@@ -1,0 +1,312 @@
+//! PeerTube, where posts are videos and replies are comment threads.
+
+use std::sync::LazyLock;
+
+use regex::Regex;
+use serde_json::Value;
+use tracing::error;
+
+use crate::api::paging::in_pages;
+use crate::http::HttpClient;
+use crate::posts::Post;
+use crate::translate::{anchored, first_name_in, non_empty_str, parse_date, unusable, usable};
+
+// PeerTube says who may watch with a number: the rest of its VideoPrivacy
+// enum is 3 private, 4 internal and 5 password protected
+const PUBLIC: &[i64] = &[1, 2]; // public, unlisted
+
+// the most videos this API will hand out at once
+const PAGE_SIZE: i64 = 100;
+
+static CHANNEL_PATH: LazyLock<Regex> =
+    LazyLock::new(|| anchored(r"^https://[^/]+/(?:video-channels|c)/"));
+
+static PROFILE_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![anchored(
+        r"^https://[^/]+/(?:accounts|a|video-channels|c)/(?P<name>[^/]+)",
+    )]
+});
+
+static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        anchored(r"^https://[^/]+/videos/watch/(?P<name>[^/]+)"),
+        // the Python pattern refuses /w/p/... with a (?!p/) lookahead, which
+        // this regex engine does not have, so the refusal is checked in
+        // post_id_from instead
+        anchored(r"^https://[^/]+/w/(?P<name>[^/]+)"),
+    ]
+});
+
+/// A PeerTube video, whose comments are the replies to it.
+pub fn to_post(raw: &Value) -> Option<Post> {
+    let url = raw.get("url").and_then(Value::as_str);
+    let created_at = raw
+        .get("publishedAt")
+        .filter(|value| !value.is_null())
+        .and_then(parse_date)
+        .or_else(|| {
+            raw.get("createdAt")
+                .filter(|value| !value.is_null())
+                .and_then(parse_date)
+        });
+    let (Some(url), Some(created_at)) = (url, created_at) else {
+        unusable("peertube", raw.get("uuid").unwrap_or(&Value::Null));
+        return None;
+    };
+
+    let privacy_id = raw
+        .get("privacy")
+        .and_then(|privacy| privacy.get("id"))
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
+    Some(Post {
+        url: url.to_string(),
+        uri: non_empty_str(raw.get("uri")).unwrap_or_else(|| url.to_string()),
+        created_at,
+        is_public: PUBLIC.contains(&privacy_id),
+        reblog: None,
+        in_reply_to_id: None,
+        in_reply_to_account_id: None,
+        reply_count: None,
+        account: None,
+        mentions: Vec::new(),
+    })
+}
+
+/// PeerTube, where posts are videos and replies are comment threads.
+#[derive(Clone)]
+pub struct PeerTubeApi {
+    webserver: String,
+    http: HttpClient,
+}
+
+impl PeerTubeApi {
+    pub fn new(webserver: &str, http: HttpClient) -> Self {
+        PeerTubeApi {
+            webserver: webserver.to_string(),
+            http,
+        }
+    }
+
+    pub fn username_from(&self, profile_url: &str) -> Option<String> {
+        first_name_in(&PROFILE_PATHS, profile_url)
+    }
+
+    pub fn post_id_from(&self, post_url: &str) -> Option<String> {
+        for (index, pattern) in POST_PATHS.iter().enumerate() {
+            if let Some(captures) = pattern.captures(post_url) {
+                let name = captures.name("name")?.as_str();
+                if index == 1 {
+                    // the Python pattern's (?!p/) lookahead: /w/p/... is a
+                    // playlist, not a video
+                    let after = &post_url[captures.get(0).unwrap().end()..];
+                    if name == "p" && after.starts_with('/') {
+                        return None;
+                    }
+                }
+                return Some(name.to_string());
+            }
+        }
+        None
+    }
+
+    pub async fn fetch_user_posts(
+        &self,
+        username: &str,
+        profile_url: &str,
+        limit: i64,
+    ) -> Option<Vec<Post>> {
+        // a channel and the account that owns it are different things here,
+        // and they are asked for separately. Anything we do not recognise is
+        // tried as an account, which is what every URL used to be treated as.
+        let collection = if CHANNEL_PATH.is_match(profile_url) {
+            "video-channels"
+        } else {
+            "accounts"
+        };
+
+        let http = self.http.clone();
+        let webserver = self.webserver.clone();
+        let username = username.to_string();
+        let collection = collection.to_string();
+        let raw = in_pages(
+            |wanted, gathered| {
+                let http = http.clone();
+                let webserver = webserver.clone();
+                let username = username.clone();
+                let collection = collection.clone();
+                let start = gathered.len() as i64;
+                async move {
+                    let url = format!(
+                        "https://{webserver}/api/v1/{collection}/{username}/videos?start={start}&count={wanted}"
+                    );
+                    let response = match http.get(&url, None, 5, 0.5).await {
+                        Ok(response) => response,
+                        Err(ex) => {
+                            error!(
+                                "Error getting posts by user {username} from {webserver}. Exception: {ex}"
+                            );
+                            return None;
+                        }
+                    };
+                    if response.status == 200 {
+                        return match response.json() {
+                            Ok(body) => body.get("data").and_then(Value::as_array).cloned(),
+                            _ => None,
+                        };
+                    }
+                    error!(
+                        "Error getting posts by user {username} from {webserver}. Status Code: {}",
+                        response.status
+                    );
+                    None
+                }
+            },
+            limit,
+            PAGE_SIZE,
+        )
+        .await;
+        raw.map(|raw| usable(raw.iter().map(to_post)))
+    }
+
+    /// Get the URLs of the comments of a given peertube video.
+    pub async fn fetch_context_urls(&self, post_id: &str, post_url: &str) -> Vec<String> {
+        let url = format!(
+            "https://{}/api/v1/videos/{post_id}/comment-threads",
+            self.webserver
+        );
+        let resp = match self.http.get(&url, None, 5, 0.5).await {
+            Ok(resp) => resp,
+            Err(ex) => {
+                error!("Error getting comments on video {post_id} from {post_url}. Exception: {ex}");
+                return Vec::new();
+            }
+        };
+
+        if resp.status == 200 {
+            return match resp.json() {
+                Ok(body) => match body.get("data").and_then(Value::as_array) {
+                    Some(comments) => usable(comments.iter().map(|comment| {
+                        comment.get("url").and_then(Value::as_str).map(str::to_string)
+                    })),
+                    None => {
+                        error!(
+                            "Error parsing comments on video {post_id} from {post_url}. Exception: KeyError"
+                        );
+                        Vec::new()
+                    }
+                },
+                Err(ex) => {
+                    error!("Error parsing comments on video {post_id} from {post_url}. Exception: {ex}");
+                    Vec::new()
+                }
+            };
+        }
+
+        error!(
+            "Error getting comments on video {post_id} from {post_url}. Status code: {}",
+            resp.status
+        );
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn api() -> PeerTubeApi {
+        PeerTubeApi::new(
+            "peertube.example",
+            HttpClient::new(crate::config::Config::default()),
+        )
+    }
+
+    #[test]
+    fn to_post_reads_a_video() {
+        let raw = json!({
+            "uuid": "abc",
+            "url": "https://peertube.example/w/abc",
+            "publishedAt": "2026-10-22T01:23:45.123Z",
+            "privacy": {"id": 2},
+        });
+        let post = to_post(&raw).unwrap();
+        assert_eq!(post.url, "https://peertube.example/w/abc");
+        assert!(post.is_public);
+    }
+
+    #[test]
+    fn to_post_falls_back_to_created_at_and_hides_private_videos() {
+        let raw = json!({
+            "url": "https://peertube.example/w/abc",
+            "createdAt": "2026-10-22T01:23:45Z",
+            "privacy": {"id": 3},
+        });
+        let post = to_post(&raw).unwrap();
+        assert!(!post.is_public);
+
+        // privacy is optional, and public is the default
+        let raw = json!({
+            "url": "https://peertube.example/w/abc",
+            "createdAt": "2026-10-22T01:23:45Z",
+        });
+        assert!(to_post(&raw).unwrap().is_public);
+    }
+
+    #[test]
+    fn to_post_rejects_a_video_without_url_or_date() {
+        assert!(to_post(&json!({"uuid": "abc"})).is_none());
+        assert!(to_post(&json!({"url": "https://peertube.example/w/abc"})).is_none());
+    }
+
+    #[test]
+    fn paths_read_names() {
+        let api = api();
+        assert_eq!(
+            api.username_from("https://peertube.example/accounts/alice"),
+            Some("alice".to_string())
+        );
+        assert_eq!(
+            api.username_from("https://peertube.example/a/bob"),
+            Some("bob".to_string())
+        );
+        assert_eq!(
+            api.username_from("https://peertube.example/video-channels/chan"),
+            Some("chan".to_string())
+        );
+        assert_eq!(
+            api.username_from("https://peertube.example/c/dan"),
+            Some("dan".to_string())
+        );
+        assert_eq!(api.username_from("https://peertube.example/other"), None);
+    }
+
+    #[test]
+    fn post_id_reads_watch_and_w_urls() {
+        let api = api();
+        assert_eq!(
+            api.post_id_from("https://peertube.example/videos/watch/abc"),
+            Some("abc".to_string())
+        );
+        assert_eq!(
+            api.post_id_from("https://peertube.example/w/def"),
+            Some("def".to_string())
+        );
+        // a bare /w/p is a video called p; /w/p/... is a playlist
+        assert_eq!(
+            api.post_id_from("https://peertube.example/w/p"),
+            Some("p".to_string())
+        );
+        assert_eq!(api.post_id_from("https://peertube.example/w/p/xyz"), None);
+        assert_eq!(api.post_id_from("https://peertube.example/w/playlist"), Some("playlist".to_string()));
+        assert_eq!(api.post_id_from("https://peertube.example/accounts/alice"), None);
+    }
+
+    #[test]
+    fn channel_paths_pick_the_collection() {
+        assert!(CHANNEL_PATH.is_match("https://peertube.example/video-channels/chan"));
+        assert!(CHANNEL_PATH.is_match("https://peertube.example/c/dan"));
+        assert!(!CHANNEL_PATH.is_match("https://peertube.example/accounts/alice"));
+    }
+}

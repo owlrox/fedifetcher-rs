@@ -1,0 +1,484 @@
+//! Finding out what software a server runs, via nodeinfo, so the right API
+//! client can be picked for it.
+
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use time::OffsetDateTime;
+use tracing::{debug, error, warn};
+
+use crate::http::HttpClient;
+use crate::state::ServerCache;
+use crate::timeutil;
+
+const NODEINFO_SCHEMAS: &[&str] = &[
+    "http://nodeinfo.diaspora.software/ns/schema/2.0",
+    "http://nodeinfo.diaspora.software/ns/schema/2.1",
+];
+
+const XRD_NAMESPACE: &str = "http://docs.oasis-open.org/ns/xri/xrd-1.0";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiFlavour {
+    Mastodon,
+    Misskey,
+    Lemmy,
+    PeerTube,
+}
+
+impl ApiFlavour {
+    /// How each flavour is spelled in the seen_hosts file.
+    pub fn state_key(self) -> &'static str {
+        match self {
+            ApiFlavour::Mastodon => "mastodonApiSupport",
+            ApiFlavour::Misskey => "misskeyApiSupport",
+            ApiFlavour::Lemmy => "lemmyApiSupport",
+            ApiFlavour::PeerTube => "peertubeApiSupport",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApiFlavour::Mastodon => "mastodon",
+            ApiFlavour::Misskey => "misskey",
+            ApiFlavour::Lemmy => "lemmy",
+            ApiFlavour::PeerTube => "peertube",
+        }
+    }
+}
+
+/// Support for new server software should be added here.
+///
+/// Software that has specific API support but is not compatible with
+/// FediFetcher for various reasons:
+/// * gotosocial - all Mastodon APIs require an access token
+///   (https://github.com/superseriousbusiness/gotosocial/issues/2038)
+pub fn software_apis(flavour: ApiFlavour) -> &'static [&'static str] {
+    match flavour {
+        ApiFlavour::Mastodon => &[
+            "mastodon",
+            "pleroma",
+            "akkoma",
+            "pixelfed",
+            "hometown",
+            "iceshrimp",
+            "Iceshrimp.NET",
+            "fedibird",
+            "kmyblue",
+            "mitra",
+        ],
+        ApiFlavour::Misskey => &[
+            "misskey",
+            "calckey",
+            "firefish",
+            "foundkey",
+            "sharkey",
+            "cherrypick",
+        ],
+        ApiFlavour::Lemmy => &["lemmy"],
+        ApiFlavour::PeerTube => &["peertube"],
+    }
+}
+
+/// What we know about a server, and which APIs we can talk to it with.
+#[derive(Clone, Debug)]
+pub struct ServerInfo {
+    pub webserver: String,
+    pub software: String,
+    pub version: String,
+    pub apis: BTreeSet<ApiFlavour>,
+    pub last_checked: OffsetDateTime,
+    pub raw: Value,
+}
+
+impl ServerInfo {
+    pub fn supports(&self, flavour: ApiFlavour) -> bool {
+        self.apis.contains(&flavour)
+    }
+
+    pub fn from_nodeinfo(webserver: &str, nodeinfo: &Value) -> Option<ServerInfo> {
+        let software = nodeinfo.get("software")?.get("name")?.as_str()?;
+        let version = nodeinfo
+            .get("software")
+            .and_then(|s| s.get("version"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        let mut apis = BTreeSet::new();
+        for flavour in [
+            ApiFlavour::Mastodon,
+            ApiFlavour::Misskey,
+            ApiFlavour::Lemmy,
+            ApiFlavour::PeerTube,
+        ] {
+            if software_apis(flavour).contains(&software) {
+                apis.insert(flavour);
+            }
+        }
+
+        // search `features` list in metadata if available
+        if let Some(features) = nodeinfo
+            .get("metadata")
+            .and_then(|m| m.get("features"))
+            .and_then(Value::as_array)
+        {
+            if features.iter().any(|f| f.as_str() == Some("mastodon_api")) {
+                apis.insert(ApiFlavour::Mastodon);
+            }
+        }
+
+        Some(ServerInfo {
+            webserver: webserver.to_string(),
+            software: software.to_string(),
+            version: version.to_string(),
+            apis,
+            last_checked: timeutil::now(),
+            raw: nodeinfo.clone(),
+        })
+    }
+
+    pub fn to_state(&self) -> Value {
+        let mut state = Map::new();
+        state.insert("webserver".to_string(), Value::String(self.webserver.clone()));
+        state.insert("software".to_string(), Value::String(self.software.clone()));
+        state.insert("version".to_string(), Value::String(self.version.clone()));
+        state.insert("rawnodeinfo".to_string(), self.raw.clone());
+        state.insert(
+            "last_checked".to_string(),
+            Value::String(timeutil::fmt_state_ts(self.last_checked)),
+        );
+        for flavour in [
+            ApiFlavour::Mastodon,
+            ApiFlavour::Misskey,
+            ApiFlavour::Lemmy,
+            ApiFlavour::PeerTube,
+        ] {
+            state.insert(
+                flavour.state_key().to_string(),
+                Value::Bool(self.apis.contains(&flavour)),
+            );
+        }
+        Value::Object(state)
+    }
+
+    /// Read a seen_hosts entry, or None if it records a failed lookup.
+    pub fn from_state(state: &Value) -> Option<ServerInfo> {
+        let object = state.as_object()?;
+        if object.get("info") == Some(&Value::Null) || !object.contains_key("webserver") {
+            return None;
+        }
+        let last_checked = object
+            .get("last_checked")
+            .and_then(Value::as_str)
+            .and_then(timeutil::parse)?;
+        let mut apis = BTreeSet::new();
+        for flavour in [
+            ApiFlavour::Mastodon,
+            ApiFlavour::Misskey,
+            ApiFlavour::Lemmy,
+            ApiFlavour::PeerTube,
+        ] {
+            if object.get(flavour.state_key()).and_then(Value::as_bool) == Some(true) {
+                apis.insert(flavour);
+            }
+        }
+        Some(ServerInfo {
+            webserver: object.get("webserver")?.as_str()?.to_string(),
+            software: object
+                .get("software")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            version: object
+                .get("version")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            apis,
+            last_checked,
+            raw: object.get("rawnodeinfo").cloned().unwrap_or(Value::Object(Map::new())),
+        })
+    }
+}
+
+pub fn failed_lookup_state() -> Value {
+    serde_json::json!({
+        "info": null,
+        "last_checked": timeutil::fmt_state_ts(timeutil::now()),
+    })
+}
+
+/// Look a server up, remembering both successes and failures.
+pub async fn get_server_info(
+    server: &str,
+    cache: &mut ServerCache,
+    http: &HttpClient,
+) -> Option<ServerInfo> {
+    if cache.contains(server) {
+        return ServerInfo::from_state(cache.get(server).expect("checked contains"));
+    }
+
+    let info = get_nodeinfo(server, cache, false, http).await;
+    match &info {
+        None => {
+            cache.add(server, failed_lookup_state());
+        }
+        Some(info) => {
+            cache.add(server, info.to_state());
+            if server != info.webserver {
+                cache.add(&info.webserver, info.to_state());
+            }
+        }
+    }
+    info
+}
+
+pub async fn get_nodeinfo(
+    server: &str,
+    cache: &mut ServerCache,
+    host_meta_fallback: bool,
+    http: &HttpClient,
+) -> Option<ServerInfo> {
+    let url = format!("https://{server}/.well-known/nodeinfo");
+    let resp = match http.get(&url, Some(Duration::from_secs(30)), 5, 0.5).await {
+        Ok(resp) => resp,
+        Err(ex) => {
+            error!("Error getting host node info for {server}. Exception: {ex}");
+            return None;
+        }
+    };
+
+    // if well-known nodeinfo isn't found, try to check host-meta for a
+    // webfinger URL, needed on servers where the display domain is different
+    // than the web domain
+    if resp.status != 200 && !host_meta_fallback {
+        debug!("nodeinfo for {server} not found, checking host-meta");
+        let Some(new_server) = get_server_from_host_meta(server, http).await else {
+            return None;
+        };
+        if new_server == server {
+            debug!("host-meta for {server} did not get a new server.");
+            return None;
+        }
+        return Box::pin(get_nodeinfo(&new_server, cache, true, http)).await;
+    }
+
+    if resp.status != 200 {
+        error!(
+            "Error getting well-known host node info for {server}. Status Code: {}",
+            resp.status
+        );
+        return None;
+    }
+
+    let node_location = match extract_node_location(&resp) {
+        Ok(location) => location,
+        Err(ex) => {
+            error!("error getting server {server} info from well-known node info. Exception: {ex}");
+            return None;
+        }
+    };
+
+    let Some(node_location) = node_location else {
+        error!("could not find link to node info in well-known nodeinfo of {server}");
+        return None;
+    };
+
+    // regrab server from node_location, again in the case of different
+    // display and web domains
+    let pattern = Regex::new(r"https://(?P<server>[^/]+)/").unwrap();
+    let Some(server) = pattern
+        .captures(&node_location)
+        .and_then(|c| c.name("server"))
+        .map(|m| m.as_str().to_string())
+    else {
+        error!("Error getting web server name from {server}.");
+        return None;
+    };
+
+    // return early if the web domain has been seen previously (in cases with
+    // host-meta lookups)
+    if cache.contains(&server) {
+        return ServerInfo::from_state(cache.get(&server).expect("checked contains"));
+    }
+
+    let resp = match http
+        .get(&node_location, Some(Duration::from_secs(30)), 5, 0.5)
+        .await
+    {
+        Ok(resp) => resp,
+        Err(ex) => {
+            error!("Error getting host node info for {server}. Exception: {ex}");
+            return None;
+        }
+    };
+
+    if resp.status != 200 {
+        error!(
+            "Error getting host node info for {server}. Status Code: {}",
+            resp.status
+        );
+        return None;
+    }
+
+    let nodeinfo = match resp.json() {
+        Ok(nodeinfo) => nodeinfo,
+        Err(ex) => {
+            error!("error getting server {server} info from nodeinfo. Exception: {ex}");
+            return None;
+        }
+    };
+
+    let protocols = nodeinfo.get("protocols").and_then(Value::as_array);
+    if !protocols
+        .map(|p| p.iter().any(|x| x.as_str() == Some("activitypub")))
+        .unwrap_or(false)
+    {
+        warn!("server {server} does not support activitypub, skipping");
+        return None;
+    }
+
+    match ServerInfo::from_nodeinfo(&server, &nodeinfo) {
+        Some(info) => Some(info),
+        None => {
+            error!("error getting server {server} info from nodeinfo. Exception: missing software name");
+            None
+        }
+    }
+}
+
+fn extract_node_location(resp: &crate::http::Response) -> Result<Option<String>, crate::error::Error> {
+    let body = resp.json()?;
+    let mut node_location = None;
+    if let Some(links) = body.get("links").and_then(Value::as_array) {
+        for link in links {
+            if link.get("rel").and_then(Value::as_str).map(|rel| NODEINFO_SCHEMAS.contains(&rel)) == Some(true) {
+                node_location = link.get("href").and_then(Value::as_str).map(str::to_string);
+                break;
+            }
+        }
+    }
+    Ok(node_location)
+}
+
+pub async fn get_server_from_host_meta(server: &str, http: &HttpClient) -> Option<String> {
+    let url = format!("https://{server}/.well-known/host-meta");
+    let resp = match http.get(&url, Some(Duration::from_secs(30)), 5, 0.5).await {
+        Ok(resp) => resp,
+        Err(ex) => {
+            error!("Error getting host meta for {server}. Exception: {ex}");
+            return None;
+        }
+    };
+
+    if resp.status != 200 {
+        error!(
+            "Error getting host meta for {server}. Status Code: {}",
+            resp.status
+        );
+        return None;
+    }
+
+    match parse_host_meta(&resp.text, server) {
+        Ok(found) => Some(found),
+        Err(ex) => {
+            error!("Error parsing host meta for {server}. Exception: {ex}");
+            None
+        }
+    }
+}
+
+fn parse_host_meta(text: &str, server: &str) -> Result<String, crate::error::Error> {
+    let document = roxmltree::Document::parse(text)
+        .map_err(|ex| crate::error::Error(format!("{ex}")))?;
+    let lrdd = document
+        .descendants()
+        .filter(|node| node.is_element())
+        .find(|node| {
+            node.tag_name().name() == "Link"
+                && node.tag_name().namespace() == Some(XRD_NAMESPACE)
+                && node.attribute("rel") == Some("lrdd")
+        })
+        .ok_or_else(|| crate::error::Error("no lrdd link".to_string()))?;
+    let template = lrdd
+        .attribute("template")
+        .ok_or_else(|| crate::error::Error("lrdd link has no template".to_string()))?;
+    let pattern = Regex::new(r"https://(?P<server>[^/]+)/").unwrap();
+    match pattern.captures(template).and_then(|c| c.name("server")) {
+        Some(found) => Ok(found.as_str().to_string()),
+        None => Err(crate::error::Error(format!(
+            "server not found in lrdd for {server}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nodeinfo_maps_software_to_flavours() {
+        let nodeinfo = serde_json::json!({
+            "software": {"name": "mastodon", "version": "4.3.0"},
+            "protocols": ["activitypub"],
+        });
+        let info = ServerInfo::from_nodeinfo("example.com", &nodeinfo).unwrap();
+        assert!(info.supports(ApiFlavour::Mastodon));
+        assert!(!info.supports(ApiFlavour::PeerTube));
+
+        let nodeinfo = serde_json::json!({
+            "software": {"name": "sharkey", "version": "2024"},
+            "protocols": ["activitypub"],
+        });
+        let info = ServerInfo::from_nodeinfo("example.com", &nodeinfo).unwrap();
+        assert!(info.supports(ApiFlavour::Misskey));
+    }
+
+    #[test]
+    fn mastodon_api_feature_adds_mastodon_flavour() {
+        let nodeinfo = serde_json::json!({
+            "software": {"name": "something-new", "version": "1"},
+            "protocols": ["activitypub"],
+            "metadata": {"features": ["mastodon_api"]},
+        });
+        let info = ServerInfo::from_nodeinfo("example.com", &nodeinfo).unwrap();
+        assert!(info.supports(ApiFlavour::Mastodon));
+    }
+
+    #[test]
+    fn state_round_trips() {
+        let nodeinfo = serde_json::json!({
+            "software": {"name": "lemmy", "version": "0.19"},
+            "protocols": ["activitypub"],
+        });
+        let info = ServerInfo::from_nodeinfo("lemmy.example", &nodeinfo).unwrap();
+        let state = info.to_state();
+        assert_eq!(state["lemmyApiSupport"], serde_json::json!(true));
+        assert_eq!(state["peertubeApiSupport"], serde_json::json!(false));
+        let back = ServerInfo::from_state(&state).unwrap();
+        assert_eq!(back.webserver, "lemmy.example");
+        assert!(back.supports(ApiFlavour::Lemmy));
+    }
+
+    #[test]
+    fn failed_lookup_state_reads_as_none() {
+        assert!(ServerInfo::from_state(&failed_lookup_state()).is_none());
+        assert!(ServerInfo::from_state(&serde_json::json!({"foo": 1})).is_none());
+    }
+
+    #[test]
+    fn host_meta_finds_the_lrdd_template() {
+        let host_meta = r#"<?xml version="1.0" encoding="UTF-8"?>
+<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
+  <Link rel="lrdd" template="https://web.example/webfinger?q={uri}"/>
+</XRD>"#;
+        assert_eq!(
+            parse_host_meta(host_meta, "display.example").unwrap(),
+            "web.example"
+        );
+    }
+}
