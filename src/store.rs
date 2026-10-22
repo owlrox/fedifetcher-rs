@@ -3,14 +3,15 @@
 //!
 //! The file layout and formats match the Python original: two plain-text
 //! collections (`seen_urls`, `known_followings`), four JSON collections, a
-//! version file, and a lock file whose content is the time the run started.
+//! version file, and a lock file recording the process id and start time of
+//! the run holding it.
 
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 use tracing::{debug, warn};
 
 use crate::config::Config;
@@ -206,34 +207,107 @@ impl Drop for Session {
     }
 }
 
+/// What the lock file records: who holds it, and since when.
+struct LockContent {
+    pid: Option<u32>,
+    created: OffsetDateTime,
+}
+
+/// Read a lock file's content: the JSON this version writes, or the bare
+/// timestamp older versions wrote (whose holder cannot be identified).
+fn parse_lock_content(text: &str) -> Option<LockContent> {
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        let created = value
+            .get("created")
+            .and_then(Value::as_str)
+            .and_then(timeutil::parse)?;
+        let pid = value.get("pid").and_then(Value::as_u64).map(|pid| pid as u32);
+        Some(LockContent { pid, created })
+    } else {
+        timeutil::parse(text.trim()).map(|created| LockContent { pid: None, created })
+    }
+}
+
+/// Whether the process is still running. Unknown on non-Unix, where the
+/// caller falls back to the lock's age alone.
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    // signal 0 checks existence without sending anything; EPERM still means
+    // the process exists, so only a zero return counts as alive here
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    true
+}
+
 /// Hold the lock file for the duration, so two runs cannot overlap.
+///
+/// The lock records the holder's process id, and only blocks while that
+/// process is alive. A lock whose holder is dead — a run that was killed, or
+/// crashed — is reclaimed on the spot, as is one older than `lock_hours`, and
+/// one too old to name a holder (written by a previous version), so a single
+/// long-running service never has to wait out a lock it left behind.
 pub fn lock(config: &Config) -> Result<LockGuard, LockedError> {
     let path = config.lock_path();
 
     if path.exists() {
         debug!("Lock file exists at {}", path.display());
-        let lock_time = std::fs::read_to_string(&path)
+        let content = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|text| timeutil::parse(&text))
-            .ok_or_else(|| LockedError("Cannot read logfile age - aborting.".to_string()))?;
+            .and_then(|text| parse_lock_content(&text))
+            .ok_or_else(|| {
+                LockedError(format!(
+                    "Cannot read lock file {} - aborting.",
+                    path.display()
+                ))
+            })?;
 
-        let age = timeutil::now() - lock_time;
+        let age = timeutil::now() - content.created;
         if age < Duration::hours(config.lock_hours) {
-            return Err(LockedError(format!(
-                "Lock file age is {} - below --lock-hours={} provided.",
-                timeutil::fmt_timedelta(age),
-                config.lock_hours
-            )));
+            match content.pid {
+                Some(pid) if process_alive(pid) => {
+                    return Err(LockedError(format!(
+                        "Lock file age is {} - below --lock-hours={} provided: held by process {} since {} ({}). Another FediFetcher is running.",
+                        timeutil::fmt_timedelta(age),
+                        config.lock_hours,
+                        pid,
+                        timeutil::fmt_lock_ts(content.created),
+                        path.display(),
+                    )));
+                }
+                Some(pid) => {
+                    warn!(
+                        "Lock file {} is held by dead process {} (lock age {}); reclaiming it",
+                        path.display(),
+                        pid,
+                        timeutil::fmt_timedelta(age),
+                    );
+                }
+                None => {
+                    warn!(
+                        "Lock file {} was left by a version that did not record its process (lock age {}); reclaiming it",
+                        path.display(),
+                        timeutil::fmt_timedelta(age),
+                    );
+                }
+            }
+        } else {
+            debug!("Lock file has expired. Removed lock file.");
         }
 
         std::fs::remove_file(&path).ok();
-        debug!("Lock file has expired. Removed lock file.");
     }
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&path, timeutil::fmt_lock_ts(timeutil::now()))
+    let content = serde_json::json!({
+        "pid": std::process::id(),
+        "created": timeutil::fmt_lock_ts(timeutil::now()),
+    });
+    std::fs::write(&path, content.to_string())
         .map_err(|ex| LockedError(format!("Cannot write lock file {}: {ex}", path.display())))?;
     Ok(LockGuard { path })
 }
@@ -379,9 +453,107 @@ mod tests {
         // an unreadable lock aborts
         std::fs::write(config.lock_path(), "not a timestamp").unwrap();
         let err = lock(&config).unwrap_err();
-        assert_eq!(err.0, "Cannot read logfile age - aborting.");
+        assert!(
+            err.0.starts_with("Cannot read lock file"),
+            "{}",
+            err.0
+        );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A lock in the old format — a bare timestamp, no recorded process —
+    /// cannot name a holder, so it is reclaimed rather than blocking.
+    #[test]
+    fn a_legacy_lock_without_a_recorded_process_is_reclaimed() {
+        let dir = temp_dir();
+        let config = test_config(&dir);
+
+        std::fs::write(
+            config.lock_path(),
+            timeutil::fmt_lock_ts(timeutil::now()),
+        )
+        .unwrap();
+        let guard = lock(&config).expect("a legacy lock is reclaimed");
+        assert!(config.lock_path().exists());
+        drop(guard);
+        assert!(!config.lock_path().exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A lock held by a process that no longer exists is reclaimed.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_held_by_a_dead_process_is_reclaimed() {
+        let dir = temp_dir();
+        let config = test_config(&dir);
+
+        // a process that is dead by the time the lock is read
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let dead_pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!process_alive(dead_pid));
+
+        std::fs::write(
+            config.lock_path(),
+            serde_json::json!({"pid": dead_pid, "created": timeutil::fmt_lock_ts(timeutil::now())})
+                .to_string(),
+        )
+        .unwrap();
+        let guard = lock(&config).expect("a dead holder's lock is reclaimed");
+        assert!(config.lock_path().exists());
+        drop(guard);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A lock held by a live process blocks, and says who holds it.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_held_by_a_live_process_blocks_and_names_it() {
+        let dir = temp_dir();
+        let config = test_config(&dir);
+
+        let live_pid = std::process::id();
+        std::fs::write(
+            config.lock_path(),
+            serde_json::json!({"pid": live_pid, "created": timeutil::fmt_lock_ts(timeutil::now())})
+                .to_string(),
+        )
+        .unwrap();
+        let err = lock(&config).unwrap_err();
+        assert!(err.0.contains("below --lock-hours=24"), "{}", err.0);
+        assert!(
+            err.0.contains(&format!("held by process {live_pid}")),
+            "{}",
+            err.0
+        );
+        assert!(
+            config.lock_path().exists(),
+            "the live holder's lock is not removed"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lock_content_reads_both_formats() {
+        let legacy = parse_lock_content(&timeutil::fmt_lock_ts(timeutil::now())).unwrap();
+        assert_eq!(legacy.pid, None);
+
+        let current = parse_lock_content(
+            &serde_json::json!({"pid": 123, "created": timeutil::fmt_lock_ts(timeutil::now())})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(current.pid, Some(123));
+
+        assert!(parse_lock_content("not a timestamp").is_none());
     }
 
     #[test]
