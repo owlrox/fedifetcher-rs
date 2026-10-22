@@ -105,6 +105,9 @@ pub struct Config {
     pub remember_hosts_for_days: i64,
     /// The timeout for any HTTP requests to your own, or other instances
     pub http_timeout: i64,
+    /// Omit your server's name from the User-Agent sent to other servers
+    /// (default: disabled)
+    pub hide_server_in_user_agent: bool,
     /// Instances that FediFetcher should never try to connect to
     pub instance_blocklist: Vec<String>,
     /// Directory to store persistent files and possibly lock file
@@ -150,6 +153,7 @@ impl Default for Config {
             remember_users_for_hours: 24 * 7,
             remember_hosts_for_days: 30,
             http_timeout: 5,
+            hide_server_in_user_agent: false,
             instance_blocklist: Vec::new(),
             state_dir: default_state_dir(),
             lock_file: None,
@@ -282,6 +286,10 @@ impl Config {
         put("remember_users_for_hours", Value::from(self.remember_users_for_hours));
         put("remember_hosts_for_days", Value::from(self.remember_hosts_for_days));
         put("http_timeout", Value::from(self.http_timeout));
+        put(
+            "hide_server_in_user_agent",
+            Value::Bool(self.hide_server_in_user_agent),
+        );
         put(
             "instance_blocklist",
             Value::Array(
@@ -471,6 +479,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "remember_users_for_hours"
             | "remember_hosts_for_days"
             | "http_timeout"
+            | "hide_server_in_user_agent"
             | "instance_blocklist"
             | "state_dir"
             | "lock_file"
@@ -509,6 +518,7 @@ pub fn option_description(name: &str) -> Option<&'static str> {
         "remember_users_for_hours" => "How long to remember users that you aren't following for, before trying to backfill them again",
         "remember_hosts_for_days" => "How long to remember host info for, before checking again",
         "http_timeout" => "The timeout for any HTTP requests to your own, or other instances",
+        "hide_server_in_user_agent" => "Omit your server's name from the User-Agent FediFetcher sends to other servers (default: disabled)",
         "instance_blocklist" => "A comma-separated list of instances that FediFetcher should never try to connect to",
         "state_dir" => "Directory to store persistent files and possibly the lock file. Defaults to ./artifacts if that directory exists, and to $XDG_STATE_HOME/fedifetcher (usually ~/.local/state/fedifetcher) otherwise",
         "lock_file" => "Location of the lock file. Defaults to lock.lock in state_dir",
@@ -555,6 +565,9 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
                 coerce_int(value).map(|v| config.remember_hosts_for_days = v)
             }
             "http_timeout" => coerce_int(value).map(|v| config.http_timeout = v),
+            "hide_server_in_user_agent" => {
+                coerce_bool(value).map(|v| config.hide_server_in_user_agent = v)
+            }
             "instance_blocklist" => coerce_list(value).map(|v| config.instance_blocklist = v),
             "state_dir" => coerce_path(value).map(|v| config.state_dir = v),
             "lock_file" => coerce_optional_path(value).map(|v| config.lock_file = v),
@@ -703,6 +716,7 @@ mod tests {
             "remember_users_for_hours",
             "remember_hosts_for_days",
             "http_timeout",
+            "hide_server_in_user_agent",
             "instance_blocklist",
             "state_dir",
             "lock_file",
@@ -717,6 +731,25 @@ mod tests {
             assert!(option_description(name).is_some(), "{name} has no tooltip");
         }
         assert_eq!(option_description("not_an_option"), None);
+    }
+
+    #[test]
+    fn the_user_agent_option_round_trips() {
+        let config = build_config(
+            values(vec![
+                ("server", json!("example.social")),
+                ("access_tokens", json!(["t"])),
+                ("hide_server_in_user_agent", json!(true)),
+            ]),
+            RawValues::new(),
+            RawValues::new(),
+        )
+        .unwrap();
+        assert!(config.hide_server_in_user_agent);
+        assert!(
+            !Config::default().hide_server_in_user_agent,
+            "the server is named by default"
+        );
     }
 
     #[test]

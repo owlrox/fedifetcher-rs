@@ -1020,6 +1020,7 @@ fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
     rows.push(int_row("remember_users_for_hours", config.remember_users_for_hours));
     rows.push(int_row("remember_hosts_for_days", config.remember_hosts_for_days));
     rows.push(int_row("http_timeout", config.http_timeout));
+    rows.push(bool_row("hide_server_in_user_agent", config.hide_server_in_user_agent));
     rows.push(text_row("instance_blocklist", &config.instance_blocklist.join(", ")));
     rows.push(text_row("state_dir", &config.state_dir.display().to_string()));
     rows.push(text_row(

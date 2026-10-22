@@ -135,6 +135,14 @@ async fn the_config_page_has_tooltips_from_the_docs() {
         body.contains("title=\"Required: tokens generated at"),
         "the access tokens field has a tooltip"
     );
+    assert!(
+        body.contains("name=\"hide_server_in_user_agent\""),
+        "the user agent option is on the page"
+    );
+    assert!(
+        body.contains("title=\"Omit your server's name from the User-Agent"),
+        "the user agent option explains itself"
+    );
 }
 
 #[tokio::test]
@@ -536,7 +544,7 @@ async fn saving_the_config_page_writes_the_toml_file() {
 
     let (status, location, _) = post_config(
         &base,
-        "server=example.social&new_access_token=smoke-secret-token-123&max_followers=5&from_lists=1&respect_robots_txt=0&http_timeout=9",
+        "server=example.social&new_access_token=smoke-secret-token-123&max_followers=5&from_lists=1&respect_robots_txt=0&http_timeout=9&hide_server_in_user_agent=1",
     )
     .await;
     assert_eq!(status, 303, "the POST must redirect");
@@ -549,6 +557,10 @@ async fn saving_the_config_page_writes_the_toml_file() {
     assert!(saved.from_lists);
     assert!(!saved.respect_robots_txt);
     assert_eq!(saved.http_timeout, 9);
+    assert!(
+        saved.hide_server_in_user_agent,
+        "the page saves the user agent option"
+    );
 
     // the page shows the saved values, and still masks the token
     let (status, body) = get(&format!("{base}/config")).await;

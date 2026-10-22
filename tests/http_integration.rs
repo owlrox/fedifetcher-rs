@@ -35,6 +35,18 @@ fn user_agent_names_the_configured_server() {
     );
 }
 
+#[test]
+fn user_agent_can_hide_the_server() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.hide_server_in_user_agent = true;
+    let client = HttpClient::new(config);
+    assert_eq!(
+        client.user_agent(),
+        format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")
+    );
+}
+
 #[tokio::test]
 async fn get_sends_our_user_agent() {
     let server = MockServer::start_async().await;

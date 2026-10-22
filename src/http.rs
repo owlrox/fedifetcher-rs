@@ -160,10 +160,14 @@ impl HttpClient {
     }
 
     pub fn user_agent(&self) -> String {
-        format!(
-            "FediFetcher/{VERSION}; +{} (https://go.thms.uk/ff)",
-            self.config.server
-        )
+        if self.config.hide_server_in_user_agent {
+            format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")
+        } else {
+            format!(
+                "FediFetcher/{VERSION}; +{} (https://go.thms.uk/ff)",
+                self.config.server
+            )
+        }
     }
 
     /// Make a get request while providing our user agent, and respecting rate
