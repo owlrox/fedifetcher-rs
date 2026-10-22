@@ -73,7 +73,11 @@ static PROFILE_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 
 /// A status from the Mastodon API, which our own server also speaks.
 pub fn to_post(raw: &Value) -> Option<Post> {
-    let boosted = raw.get("reblog").and_then(to_post);
+    // every non-boost status carries "reblog": null, which is not a post
+    let boosted = raw
+        .get("reblog")
+        .filter(|reblog| !reblog.is_null())
+        .and_then(to_post);
 
     // a boost is an empty wrapper: the server gives it no URL of its own, and
     // the post worth reading is the one it carries
@@ -439,6 +443,20 @@ fn wants_more(result: &[Value], stop_at: &StopAt) -> Result<bool> {
     }
 }
 
+/// The "Found N toots in timeline" line: the count, and the ids of the toots
+/// found, comma separated. An empty timeline gets the bare count.
+fn timeline_found_line(posts: &[Post]) -> String {
+    if posts.is_empty() {
+        return "Found 0 toots in timeline".to_string();
+    }
+    let ids = posts
+        .iter()
+        .map(|post| post.uri.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Found {} toots in timeline: {ids}", posts.len())
+}
+
 /// Our own instance, spoken to with one of the configured access tokens.
 #[derive(Clone)]
 pub struct HomeServer {
@@ -578,7 +596,7 @@ impl HomeServer {
         let posts = self
             .posts("/api/v1/timelines/home", StopAt::Count(limit), "read:statuses")
             .await?;
-        info!("Found {} toots in timeline", posts.len());
+        info!("{}", timeline_found_line(&posts));
         Ok(posts)
     }
 
@@ -693,6 +711,35 @@ mod tests {
         assert_eq!(masked("abcdefghijklmnopqrst"), "abcde**********pqrst");
     }
 
+    fn post_with_uri(uri: &str) -> Post {
+        to_post(&json!({
+            "id": "1",
+            "url": uri,
+            "uri": uri,
+            "created_at": "2026-10-22T01:23:45.123Z",
+            "visibility": "public",
+            "reblog": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_timeline_line_lists_the_toot_ids() {
+        let posts = vec![
+            post_with_uri("https://remote.example/@alice/1"),
+            post_with_uri("https://remote.example/@bob/2"),
+        ];
+        assert_eq!(
+            timeline_found_line(&posts),
+            "Found 2 toots in timeline: https://remote.example/@alice/1, https://remote.example/@bob/2"
+        );
+    }
+
+    #[test]
+    fn the_timeline_line_without_toots_is_the_bare_count() {
+        assert_eq!(timeline_found_line(&[]), "Found 0 toots in timeline");
+    }
+
     #[test]
     fn to_post_reads_a_status() {
         let raw = json!({
@@ -704,6 +751,7 @@ mod tests {
             "in_reply_to_id": "9",
             "in_reply_to_account_id": "8",
             "replies_count": 3,
+            "reblog": null,
             "account": {"acct": "alice", "url": "https://remote.example/@alice", "id": "8"},
             "mentions": [{"acct": "bob@remote.example", "url": "https://remote.example/@bob", "id": "7"}],
         });
@@ -738,6 +786,20 @@ mod tests {
         assert_eq!(post.url, "https://remote.example/@alice/1");
         // visibility comes from the wrapper, not the post it carries
         assert!(post.is_public);
+    }
+
+    #[test]
+    fn to_post_treats_a_null_reblog_as_no_boost() {
+        // servers send "reblog": null on every non-boost status; reading it
+        // as a post would skip every status as unusable
+        let raw = json!({
+            "id": "1",
+            "url": "https://remote.example/@alice/1",
+            "created_at": "2026-10-22T01:23:45Z",
+            "reblog": null,
+        });
+        let post = to_post(&raw).unwrap();
+        assert!(!post.is_boost());
     }
 
     #[test]
