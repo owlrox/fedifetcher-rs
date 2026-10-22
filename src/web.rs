@@ -74,7 +74,7 @@ pub async fn serve(
     let addr: std::net::SocketAddr = format!("{bind}:{port}")
         .parse()
         .map_err(|ex| std::io::Error::new(std::io::ErrorKind::InvalidInput, ex))?;
-    tracing::info!("FediFetcher web UI listening on http://{addr} (config: {config_file})");
+    tracing::info!("FediFetcher v{VERSION} web UI listening on http://{addr} (config: {config_file})");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
 }
