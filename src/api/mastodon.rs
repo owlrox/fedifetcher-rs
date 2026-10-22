@@ -33,10 +33,10 @@ pub const PAGE_SIZE: i64 = 40;
 // Mastodon API, so its /p/user/id URLs are this client's to read.
 static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
-        r"^https://[^/]+/@[^/]+/(?P<name>[^/]+)",
-        r"^https://[^/]+/users/[^/]+/statuses/(?P<name>[^/]+)",
-        r"^https://[^/]+/notice/(?P<name>[^/]+)",
-        r"^https://[^/]+/p/[^/]+/(?P<name>[^/]+)",
+        r"^https?://[^/]+/@[^/]+/(?P<name>[^/]+)",
+        r"^https?://[^/]+/users/[^/]+/statuses/(?P<name>[^/]+)",
+        r"^https?://[^/]+/notice/(?P<name>[^/]+)",
+        r"^https?://[^/]+/p/[^/]+/(?P<name>[^/]+)",
     ]
     .iter()
     .map(|p| anchored(p))
@@ -46,14 +46,14 @@ static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 // Pleroma and Mitra also address a post by an opaque object id, and only the
 // redirect it serves says which notice that object is.
 static OBJECT_PATH: LazyLock<Regex> =
-    LazyLock::new(|| anchored(r"^https://[^/]+/objects/[^/]+"));
+    LazyLock::new(|| anchored(r"^https?://[^/]+/objects/[^/]+"));
 
 static REDIRECTED_OBJECT_PATH: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         // Pleroma uses /notice/ as relative
         r"/notice/(?P<name>[^/]+)",
         // Mitra uses an absolute url containing /post/
-        r"^https://[^/]+/post/(?P<name>[^/]+)",
+        r"^https?://[^/]+/post/(?P<name>[^/]+)",
     ]
     .iter()
     .map(|p| anchored(p))
@@ -62,9 +62,9 @@ static REDIRECTED_OBJECT_PATH: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 
 static PROFILE_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
-        r"^https://[^/]+/@(?P<name>[^/]+)",
-        r"^https://[^/]+/users/(?P<name>[^/]+)",
-        r"^https://[^/]+/(?P<name>[^/]+)/?$",
+        r"^https?://[^/]+/@(?P<name>[^/]+)",
+        r"^https?://[^/]+/users/(?P<name>[^/]+)",
+        r"^https?://[^/]+/(?P<name>[^/]+)/?$",
     ]
     .iter()
     .map(|p| anchored(p))
@@ -148,23 +148,29 @@ pub fn to_list(raw: &Value) -> Option<UserList> {
 #[derive(Clone)]
 pub struct MastodonApi {
     webserver: String,
+    /// The API's base URL, scheme included: `https://host` in production.
+    base: String,
     http: HttpClient,
 }
 
 impl MastodonApi {
     pub fn new(webserver: &str, http: HttpClient) -> Self {
+        Self::with_scheme(webserver, "https", http)
+    }
+
+    /// A client for the API at `scheme://webserver`. Production always uses
+    /// `new` (https); tests point this at a local http server.
+    pub fn with_scheme(webserver: &str, scheme: &str, http: HttpClient) -> Self {
         MastodonApi {
             webserver: webserver.to_string(),
+            base: format!("{scheme}://{webserver}"),
             http,
         }
     }
 
     /// Look up the numeric id the API addresses an account by.
     pub async fn user_id(&self, user: &str) -> Result<String> {
-        let url = format!(
-            "https://{}/api/v1/accounts/lookup?acct={user}",
-            self.webserver
-        );
+        let url = format!("{}/api/v1/accounts/lookup?acct={user}", self.base);
         let response = self.http.get(&url, None, 5, 0.5).await?;
 
         if response.status == 200 {
@@ -212,13 +218,13 @@ impl MastodonApi {
             }
         };
 
-        let webserver = self.webserver.clone();
+        let base = self.base.clone();
         let http = self.http.clone();
         let username = username.to_string();
         let raw = in_pages(
             |wanted, gathered| {
                 let http = http.clone();
-                let webserver = webserver.clone();
+                let base = base.clone();
                 let username = username.clone();
                 let user_id = user_id.clone();
                 // everything older than the oldest status we already have
@@ -228,13 +234,13 @@ impl MastodonApi {
                 async move {
                     match max_id {
                         Some(Some(id)) => {
-                            statuses(&http, &webserver, &user_id, &username, wanted, Some(&id)).await
+                            statuses(&http, &base, &user_id, &username, wanted, Some(&id)).await
                         }
                         Some(None) => {
                             error!("Error getting posts for user {username}: status has no id");
                             None
                         }
-                        None => statuses(&http, &webserver, &user_id, &username, wanted, None).await,
+                        None => statuses(&http, &base, &user_id, &username, wanted, None).await,
                     }
                 }
             },
@@ -246,7 +252,7 @@ impl MastodonApi {
     }
 
     pub async fn fetch_context_urls(&self, post_id: &str, post_url: &str) -> Vec<String> {
-        let url = format!("https://{}/api/v1/statuses/{post_id}/context", self.webserver);
+        let url = format!("{}/api/v1/statuses/{post_id}/context", self.base);
         let resp = match self.http.get(&url, None, 5, 0.5).await {
             Ok(resp) => resp,
             Err(ex) => {
@@ -278,14 +284,14 @@ impl MastodonApi {
 
 async fn statuses(
     http: &HttpClient,
-    webserver: &str,
+    base: &str,
     user_id: &str,
     username: &str,
     wanted: i64,
     max_id: Option<&str>,
 ) -> Option<Vec<Value>> {
     let mut url = format!(
-        "https://{webserver}/api/v1/accounts/{user_id}/statuses?exclude_replies=false&limit={wanted}"
+        "{base}/api/v1/accounts/{user_id}/statuses?exclude_replies=false&limit={wanted}"
     );
     if let Some(max_id) = max_id {
         url.push_str(&format!("&max_id={max_id}"));
@@ -461,6 +467,8 @@ fn timeline_found_line(posts: &[Post]) -> String {
 #[derive(Clone)]
 pub struct HomeServer {
     pub server: String,
+    /// The API's base URL, scheme included: `https://server` in production.
+    base: String,
     http: HttpClient,
     token_hint: String,
     api: MastodonApi,
@@ -468,11 +476,18 @@ pub struct HomeServer {
 
 impl HomeServer {
     pub fn new(server: &str, token: &str, http: HttpClient) -> Self {
+        Self::with_scheme(server, "https", token, http)
+    }
+
+    /// A client for the API at `scheme://server`. Production always uses
+    /// `new` (https); tests point this at a local http server.
+    pub fn with_scheme(server: &str, scheme: &str, token: &str, http: HttpClient) -> Self {
         let http = http.authenticated(token);
         HomeServer {
             server: server.to_string(),
+            base: format!("{scheme}://{server}"),
             token_hint: masked(token),
-            api: MastodonApi::new(server, http.clone()),
+            api: MastodonApi::with_scheme(server, scheme, http.clone()),
             http,
         }
     }
@@ -484,7 +499,7 @@ impl HomeServer {
         required_scope: &str,
     ) -> Result<Vec<Value>> {
         get_paginated(
-            &format!("https://{}{path}", self.server),
+            &format!("{}{path}", self.base),
             stop_at,
             None,
             5,
@@ -500,7 +515,7 @@ impl HomeServer {
             return self.api.user_id(user).await;
         }
 
-        let url = format!("https://{}/api/v1/accounts/verify_credentials", self.server);
+        let url = format!("{}/api/v1/accounts/verify_credentials", self.base);
         let resp = self.http.get(&url, None, 5, 0.5).await?;
         if resp.status != 200 {
             return Err(report_mastodon_error(
@@ -604,7 +619,7 @@ impl HomeServer {
     pub async fn active_user_ids(&self, reply_interval_hours: f64) -> Result<Vec<String>> {
         let since = timeutil::now_local()
             - time::Duration::seconds_f64((reply_interval_hours / 24.0 + 1.0) * 86_400.0);
-        let url = format!("https://{}/api/v1/admin/accounts", self.server);
+        let url = format!("{}/api/v1/admin/accounts", self.base);
         let resp = self.http.get(&url, None, 5, 0.5).await?;
         if resp.status != 200 {
             return Err(report_mastodon_error(
@@ -644,8 +659,8 @@ impl HomeServer {
     /// Recent posts by one of our users, replies included.
     pub async fn account_statuses(&self, user_id: &str) -> Result<Vec<Post>> {
         let url = format!(
-            "https://{}/api/v1/accounts/{user_id}/statuses?exclude_replies=false&limit=40",
-            self.server
+            "{}/api/v1/accounts/{user_id}/statuses?exclude_replies=false&limit=40",
+            self.base
         );
         let resp = self.http.get(&url, None, 5, 0.5).await?;
 
@@ -667,8 +682,8 @@ impl HomeServer {
     /// Ask our server to fetch a remote post, so it appears locally.
     pub async fn resolve(&self, url: &str) -> bool {
         let search_url = format!(
-            "https://{}/api/v2/search?q={url}&resolve=true&limit=1",
-            self.server
+            "{}/api/v2/search?q={url}&resolve=true&limit=1",
+            self.base
         );
 
         let resp = match self.http.get(&search_url, None, 5, 0.5).await {

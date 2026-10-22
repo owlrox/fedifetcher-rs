@@ -15,13 +15,13 @@ use crate::translate::{anchored, first_name_in, parse_date, unusable, usable};
 // the most entries this API will hand out at once
 const PAGE_SIZE: i64 = 50;
 
-static COMMUNITY_PATH: LazyLock<Regex> = LazyLock::new(|| anchored(r"^https://[^/]+/c/"));
-static USER_PATH: LazyLock<Regex> = LazyLock::new(|| anchored(r"^https://[^/]+/u/"));
+static COMMUNITY_PATH: LazyLock<Regex> = LazyLock::new(|| anchored(r"^https?://[^/]+/c/"));
+static USER_PATH: LazyLock<Regex> = LazyLock::new(|| anchored(r"^https?://[^/]+/u/"));
 
 static PROFILE_PATHS: LazyLock<Vec<Regex>> =
-    LazyLock::new(|| vec![anchored(r"^https://[^/]+/(?:u|c)/(?P<name>[^/]+)")]);
+    LazyLock::new(|| vec![anchored(r"^https?://[^/]+/(?:u|c)/(?P<name>[^/]+)")]);
 static POST_PATHS: LazyLock<Vec<Regex>> =
-    LazyLock::new(|| vec![anchored(r"^https://[^/]+/(?:comment|post)/(?P<name>[^/]+)")]);
+    LazyLock::new(|| vec![anchored(r"^https?://[^/]+/(?:comment|post)/(?P<name>[^/]+)")]);
 
 /// A Lemmy post or comment, which names itself by its ActivityPub id.
 pub fn to_post(raw: &Value) -> Option<Post> {
@@ -74,14 +74,21 @@ fn account_entries(body: &Value) -> Option<Vec<Value>> {
 /// comment.
 #[derive(Clone)]
 pub struct LemmyApi {
-    webserver: String,
+    /// The API's base URL, scheme included: `https://host` in production.
+    base: String,
     http: HttpClient,
 }
 
 impl LemmyApi {
     pub fn new(webserver: &str, http: HttpClient) -> Self {
+        Self::with_scheme(webserver, "https", http)
+    }
+
+    /// A client for the API at `scheme://webserver`. Production always uses
+    /// `new` (https); tests point this at a local http server.
+    pub fn with_scheme(webserver: &str, scheme: &str, http: HttpClient) -> Self {
         LemmyApi {
-            webserver: webserver.to_string(),
+            base: format!("{scheme}://{webserver}"),
             http,
         }
     }
@@ -144,19 +151,19 @@ impl LemmyApi {
         describe: &str,
     ) -> Option<Vec<Post>> {
         let http = self.http.clone();
-        let webserver = self.webserver.clone();
+        let base = self.base.clone();
         let path = path.to_string();
         let describe = describe.to_string();
         let raw = in_pages(
             |wanted, gathered| {
                 let http = http.clone();
-                let webserver = webserver.clone();
+                let base = base.clone();
                 let path = path.clone();
                 let describe = describe.clone();
                 let page = gathered.len() as i64 / PAGE_SIZE + 1;
                 async move {
                     let url = format!(
-                        "https://{webserver}/api/v3/{path}&sort=New&limit={wanted}&page={page}"
+                        "{base}/api/v3/{path}&sort=New&limit={wanted}&page={page}"
                     );
                     let response = match http.get(&url, None, 5, 0.5).await {
                         Ok(response) => response,
@@ -208,7 +215,7 @@ impl LemmyApi {
 
     /// Get the URLs of the context toots of the given toot.
     async fn comment_context(&self, comment_id: &str, post_url: &str) -> Vec<String> {
-        let url = format!("https://{}/api/v3/comment?id={comment_id}", self.webserver);
+        let url = format!("{}/api/v3/comment?id={comment_id}", self.base);
         let resp = match self.http.get(&url, None, 5, 0.5).await {
             Ok(resp) => resp,
             Err(ex) => {
@@ -256,7 +263,7 @@ impl LemmyApi {
     /// Get the URLs of the comments of the given post.
     async fn post_comments(&self, post_id: &str, post_url: &str) -> Vec<String> {
         let mut urls: Vec<String> = Vec::new();
-        let url = format!("https://{}/api/v3/post?id={post_id}", self.webserver);
+        let url = format!("{}/api/v3/post?id={post_id}", self.base);
         let resp = match self.http.get(&url, None, 5, 0.5).await {
             Ok(resp) => resp,
             Err(ex) => {
@@ -295,8 +302,8 @@ impl LemmyApi {
         }
 
         let url = format!(
-            "https://{}/api/v3/comment/list?post_id={post_id}&sort=New&limit=50",
-            self.webserver
+            "{}/api/v3/comment/list?post_id={post_id}&sort=New&limit=50",
+            self.base
         );
         let resp = match self.http.get(&url, None, 5, 0.5).await {
             Ok(resp) => resp,

@@ -18,12 +18,12 @@ const PUBLIC: &[&str] = &["public", "home"];
 const PAGE_SIZE: i64 = 100;
 
 static PROFILE_PATHS: LazyLock<Vec<Regex>> =
-    LazyLock::new(|| vec![anchored(r"^https://[^/]+/@(?P<name>[^/]+)")]);
+    LazyLock::new(|| vec![anchored(r"^https?://[^/]+/@(?P<name>[^/]+)")]);
 static POST_PATHS: LazyLock<Vec<Regex>> =
-    LazyLock::new(|| vec![anchored(r"^https://[^/]+/notes/(?P<name>[^/]+)")]);
+    LazyLock::new(|| vec![anchored(r"^https?://[^/]+/notes/(?P<name>[^/]+)")]);
 
 /// A Misskey note, which only has a URL of its own when it is a copy.
-pub fn to_post(raw: &Value, webserver: &str) -> Option<Post> {
+pub fn to_post(raw: &Value, base: &str) -> Option<Post> {
     let note_id = raw.get("id").and_then(Value::as_str);
     let created_at = raw.get("createdAt").and_then(parse_date);
     let (Some(note_id), Some(created_at)) = (note_id, created_at) else {
@@ -32,11 +32,11 @@ pub fn to_post(raw: &Value, webserver: &str) -> Option<Post> {
     };
 
     let url =
-        non_empty_str(raw.get("url")).unwrap_or_else(|| format!("https://{webserver}/notes/{note_id}"));
+        non_empty_str(raw.get("url")).unwrap_or_else(|| format!("{base}/notes/{note_id}"));
     let renote = raw
         .get("renote")
         .filter(|renote| !renote.is_null())
-        .and_then(|renote| to_post(renote, webserver));
+        .and_then(|renote| to_post(renote, base));
 
     Some(Post {
         url: url.clone(),
@@ -60,13 +60,22 @@ pub fn to_post(raw: &Value, webserver: &str) -> Option<Post> {
 #[derive(Clone)]
 pub struct MisskeyApi {
     webserver: String,
+    /// The API's base URL, scheme included: `https://host` in production.
+    base: String,
     http: HttpClient,
 }
 
 impl MisskeyApi {
     pub fn new(webserver: &str, http: HttpClient) -> Self {
+        Self::with_scheme(webserver, "https", http)
+    }
+
+    /// A client for the API at `scheme://webserver`. Production always uses
+    /// `new` (https); tests point this at a local http server.
+    pub fn with_scheme(webserver: &str, scheme: &str, http: HttpClient) -> Self {
         MisskeyApi {
             webserver: webserver.to_string(),
+            base: format!("{scheme}://{webserver}"),
             http,
         }
     }
@@ -88,11 +97,13 @@ impl MisskeyApi {
         let user_id = self.find_user_id(username).await?;
 
         let http = self.http.clone();
+        let base = self.base.clone();
         let webserver = self.webserver.clone();
         let username = username.to_string();
         let raw = in_pages(
             |wanted, gathered| {
                 let http = http.clone();
+                let base = base.clone();
                 let webserver = webserver.clone();
                 let username = username.clone();
                 let user_id = user_id.clone();
@@ -103,13 +114,16 @@ impl MisskeyApi {
                 async move {
                     match until_id {
                         Some(Some(id)) => {
-                            notes(&http, &webserver, &user_id, &username, wanted, Some(&id)).await
+                            notes(&http, &base, &webserver, &user_id, &username, wanted, Some(&id))
+                                .await
                         }
                         Some(None) => {
                             error!("Error getting posts for user {username}: note has no id");
                             None
                         }
-                        None => notes(&http, &webserver, &user_id, &username, wanted, None).await,
+                        None => {
+                            notes(&http, &base, &webserver, &user_id, &username, wanted, None).await
+                        }
                     }
                 }
             },
@@ -117,8 +131,8 @@ impl MisskeyApi {
             PAGE_SIZE,
         )
         .await;
-        let webserver = self.webserver.clone();
-        raw.map(|raw| usable(raw.iter().map(|note| to_post(note, &webserver))))
+        let base = self.base.clone();
+        raw.map(|raw| usable(raw.iter().map(|note| to_post(note, &base))))
     }
 
     async fn find_user_id(&self, username: &str) -> Option<String> {
@@ -127,8 +141,8 @@ impl MisskeyApi {
         // main host on firefish currently; on misskey it works if you supply
         // '.' as the host but firefish does not
         let url = format!(
-            "https://{}/api/users/search-by-username-and-host",
-            self.webserver
+            "{}/api/users/search-by-username-and-host",
+            self.base
         );
         let resp = match self
             .http
@@ -203,7 +217,7 @@ impl MisskeyApi {
                 serde_json::json!({ "noteId": post_id, "limit": 100 }),
             ),
         ] {
-            let url = format!("https://{}/api/notes/{endpoint}", self.webserver);
+            let url = format!("{}/api/notes/{endpoint}", self.base);
             let resp = match self.http.post(&url, &params, None, 5, 0.5).await {
                 Ok(resp) => resp,
                 Err(ex) => {
@@ -226,7 +240,7 @@ impl MisskeyApi {
                     if let Some(notes) = res.as_array() {
                         for note in notes {
                             if let Some(id) = note.get("id").and_then(Value::as_str) {
-                                urls.push(format!("https://{}/notes/{id}", self.webserver));
+                                urls.push(format!("{}/notes/{id}", self.base));
                             }
                         }
                     }
@@ -243,6 +257,7 @@ impl MisskeyApi {
 
 async fn notes(
     http: &HttpClient,
+    base: &str,
     webserver: &str,
     user_id: &str,
     username: &str,
@@ -254,7 +269,7 @@ async fn notes(
         params["untilId"] = Value::String(until_id.to_string());
     }
 
-    let url = format!("https://{webserver}/api/users/notes");
+    let url = format!("{base}/api/users/notes");
     let resp = match http.post(&url, &params, None, 5, 0.5).await {
         Ok(resp) => resp,
         Err(ex) => {
@@ -291,7 +306,7 @@ mod tests {
             "replyId": "8def",
             "repliesCount": 2,
         });
-        let post = to_post(&raw, "misskey.example").unwrap();
+        let post = to_post(&raw, "https://misskey.example").unwrap();
         assert_eq!(post.url, "https://misskey.example/notes/9abc");
         assert_eq!(post.uri, "https://misskey.example/notes/9abc");
         assert!(post.is_public);
@@ -313,7 +328,7 @@ mod tests {
                 "visibility": "public",
             },
         });
-        let post = to_post(&raw, "misskey.example").unwrap();
+        let post = to_post(&raw, "https://misskey.example").unwrap();
         assert_eq!(post.url, "https://elsewhere.example/notes/1");
         assert!(!post.is_public);
         assert!(post.is_boost());
@@ -323,8 +338,8 @@ mod tests {
 
     #[test]
     fn to_post_rejects_a_note_without_id_or_date() {
-        assert!(to_post(&json!({"createdAt": "2026-10-22T01:23:45Z"}), "misskey.example").is_none());
-        assert!(to_post(&json!({"id": "1"}), "misskey.example").is_none());
+        assert!(to_post(&json!({"createdAt": "2026-10-22T01:23:45Z"}), "https://misskey.example").is_none());
+        assert!(to_post(&json!({"id": "1"}), "https://misskey.example").is_none());
     }
 
     #[test]

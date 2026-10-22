@@ -19,21 +19,21 @@ const PUBLIC: &[i64] = &[1, 2]; // public, unlisted
 const PAGE_SIZE: i64 = 100;
 
 static CHANNEL_PATH: LazyLock<Regex> =
-    LazyLock::new(|| anchored(r"^https://[^/]+/(?:video-channels|c)/"));
+    LazyLock::new(|| anchored(r"^https?://[^/]+/(?:video-channels|c)/"));
 
 static PROFILE_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![anchored(
-        r"^https://[^/]+/(?:accounts|a|video-channels|c)/(?P<name>[^/]+)",
+        r"^https?://[^/]+/(?:accounts|a|video-channels|c)/(?P<name>[^/]+)",
     )]
 });
 
 static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        anchored(r"^https://[^/]+/videos/watch/(?P<name>[^/]+)"),
+        anchored(r"^https?://[^/]+/videos/watch/(?P<name>[^/]+)"),
         // the Python pattern refuses /w/p/... with a (?!p/) lookahead, which
         // this regex engine does not have, so the refusal is checked in
         // post_id_from instead
-        anchored(r"^https://[^/]+/w/(?P<name>[^/]+)"),
+        anchored(r"^https?://[^/]+/w/(?P<name>[^/]+)"),
     ]
 });
 
@@ -77,13 +77,22 @@ pub fn to_post(raw: &Value) -> Option<Post> {
 #[derive(Clone)]
 pub struct PeerTubeApi {
     webserver: String,
+    /// The API's base URL, scheme included: `https://host` in production.
+    base: String,
     http: HttpClient,
 }
 
 impl PeerTubeApi {
     pub fn new(webserver: &str, http: HttpClient) -> Self {
+        Self::with_scheme(webserver, "https", http)
+    }
+
+    /// A client for the API at `scheme://webserver`. Production always uses
+    /// `new` (https); tests point this at a local http server.
+    pub fn with_scheme(webserver: &str, scheme: &str, http: HttpClient) -> Self {
         PeerTubeApi {
             webserver: webserver.to_string(),
+            base: format!("{scheme}://{webserver}"),
             http,
         }
     }
@@ -126,19 +135,21 @@ impl PeerTubeApi {
         };
 
         let http = self.http.clone();
+        let base = self.base.clone();
         let webserver = self.webserver.clone();
         let username = username.to_string();
         let collection = collection.to_string();
         let raw = in_pages(
             |wanted, gathered| {
                 let http = http.clone();
+                let base = base.clone();
                 let webserver = webserver.clone();
                 let username = username.clone();
                 let collection = collection.clone();
                 let start = gathered.len() as i64;
                 async move {
                     let url = format!(
-                        "https://{webserver}/api/v1/{collection}/{username}/videos?start={start}&count={wanted}"
+                        "{base}/api/v1/{collection}/{username}/videos?start={start}&count={wanted}"
                     );
                     let response = match http.get(&url, None, 5, 0.5).await {
                         Ok(response) => response,
@@ -172,8 +183,8 @@ impl PeerTubeApi {
     /// Get the URLs of the comments of a given peertube video.
     pub async fn fetch_context_urls(&self, post_id: &str, post_url: &str) -> Vec<String> {
         let url = format!(
-            "https://{}/api/v1/videos/{post_id}/comment-threads",
-            self.webserver
+            "{}/api/v1/videos/{post_id}/comment-threads",
+            self.base
         );
         let resp = match self.http.get(&url, None, 5, 0.5).await {
             Ok(resp) => resp,
