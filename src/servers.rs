@@ -205,14 +205,27 @@ impl ServerInfo {
     }
 }
 
-pub fn failed_lookup_state() -> Value {
+/// The seen_hosts entry for a server whose lookup failed, keeping the reason
+/// so that later errors can report why.
+pub fn failed_lookup_state(reason: &str) -> Value {
     serde_json::json!({
         "info": null,
+        "error": reason,
         "last_checked": timeutil::fmt_state_ts(timeutil::now()),
     })
 }
 
-/// Look a server up, remembering both successes and failures.
+/// The reason a cached lookup failed, if the cache records one.
+fn cached_failure_reason(cache: &ServerCache, server: &str) -> Option<String> {
+    cache
+        .get(server)
+        .and_then(|info| info.get("error"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Look a server up, remembering both successes and failures. A failure is
+/// remembered with the reason it failed.
 pub async fn get_server_info(
     server: &str,
     cache: &mut ServerCache,
@@ -222,33 +235,35 @@ pub async fn get_server_info(
         return ServerInfo::from_state(cache.get(server).expect("checked contains"));
     }
 
-    let info = get_nodeinfo(server, cache, false, http).await;
-    match &info {
-        None => {
-            cache.add(server, failed_lookup_state());
-        }
-        Some(info) => {
+    match get_nodeinfo(server, cache, false, http).await {
+        Ok(info) => {
             cache.add(server, info.to_state());
             if server != info.webserver {
                 cache.add(&info.webserver, info.to_state());
             }
+            Some(info)
+        }
+        Err(reason) => {
+            cache.add(server, failed_lookup_state(&reason));
+            None
         }
     }
-    info
 }
 
+/// Fetch a server's nodeinfo. The error is the same message the log prints,
+/// so a failure is reported with its reason wherever it is next needed.
 pub async fn get_nodeinfo(
     server: &str,
     cache: &mut ServerCache,
     host_meta_fallback: bool,
     http: &HttpClient,
-) -> Option<ServerInfo> {
+) -> Result<ServerInfo, String> {
     let url = format!("https://{server}/.well-known/nodeinfo");
     let resp = match http.get(&url, Some(Duration::from_secs(30)), 5, 0.5).await {
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting host node info for {server}. Exception: {ex}");
-            return None;
+            return Err(format!("Error getting host node info for {server}. Exception: {ex}"));
         }
     };
 
@@ -258,11 +273,16 @@ pub async fn get_nodeinfo(
     if resp.status != 200 && !host_meta_fallback {
         debug!("nodeinfo for {server} not found, checking host-meta");
         let Some(new_server) = get_server_from_host_meta(server, http).await else {
-            return None;
+            return Err(format!(
+                "no nodeinfo found for {server} (well-known returned {})",
+                resp.status
+            ));
         };
         if new_server == server {
             debug!("host-meta for {server} did not get a new server.");
-            return None;
+            return Err(format!(
+                "host-meta for {server} did not identify a different web server"
+            ));
         }
         return Box::pin(get_nodeinfo(&new_server, cache, true, http)).await;
     }
@@ -272,20 +292,27 @@ pub async fn get_nodeinfo(
             "Error getting well-known host node info for {server}. Status Code: {}",
             resp.status
         );
-        return None;
+        return Err(format!(
+            "Error getting well-known host node info for {server}. Status Code: {}",
+            resp.status
+        ));
     }
 
     let node_location = match extract_node_location(&resp) {
         Ok(location) => location,
         Err(ex) => {
             error!("error getting server {server} info from well-known node info. Exception: {ex}");
-            return None;
+            return Err(format!(
+                "error getting server {server} info from well-known node info. Exception: {ex}"
+            ));
         }
     };
 
     let Some(node_location) = node_location else {
         error!("could not find link to node info in well-known nodeinfo of {server}");
-        return None;
+        return Err(format!(
+            "could not find link to node info in well-known nodeinfo of {server}"
+        ));
     };
 
     // regrab server from node_location, again in the case of different
@@ -297,13 +324,18 @@ pub async fn get_nodeinfo(
         .map(|m| m.as_str().to_string())
     else {
         error!("Error getting web server name from {server}.");
-        return None;
+        return Err(format!("Error getting web server name from {server}."));
     };
 
     // return early if the web domain has been seen previously (in cases with
     // host-meta lookups)
     if cache.contains(&server) {
-        return ServerInfo::from_state(cache.get(&server).expect("checked contains"));
+        let state = cache.get(&server).expect("checked contains");
+        return match ServerInfo::from_state(state) {
+            Some(info) => Ok(info),
+            None => Err(cached_failure_reason(cache, &server)
+                .unwrap_or_else(|| format!("no server info for {server}"))),
+        };
     }
 
     let resp = match http
@@ -313,7 +345,7 @@ pub async fn get_nodeinfo(
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting host node info for {server}. Exception: {ex}");
-            return None;
+            return Err(format!("Error getting host node info for {server}. Exception: {ex}"));
         }
     };
 
@@ -322,14 +354,19 @@ pub async fn get_nodeinfo(
             "Error getting host node info for {server}. Status Code: {}",
             resp.status
         );
-        return None;
+        return Err(format!(
+            "Error getting host node info for {server}. Status Code: {}",
+            resp.status
+        ));
     }
 
     let nodeinfo = match resp.json() {
         Ok(nodeinfo) => nodeinfo,
         Err(ex) => {
             error!("error getting server {server} info from nodeinfo. Exception: {ex}");
-            return None;
+            return Err(format!(
+                "error getting server {server} info from nodeinfo. Exception: {ex}"
+            ));
         }
     };
 
@@ -339,14 +376,16 @@ pub async fn get_nodeinfo(
         .unwrap_or(false)
     {
         warn!("server {server} does not support activitypub, skipping");
-        return None;
+        return Err(format!("server {server} does not support activitypub, skipping"));
     }
 
     match ServerInfo::from_nodeinfo(&server, &nodeinfo) {
-        Some(info) => Some(info),
+        Some(info) => Ok(info),
         None => {
             error!("error getting server {server} info from nodeinfo. Exception: missing software name");
-            None
+            Err(format!(
+                "error getting server {server} info from nodeinfo. Exception: missing software name"
+            ))
         }
     }
 }
@@ -465,8 +504,10 @@ mod tests {
     }
 
     #[test]
-    fn failed_lookup_state_reads_as_none() {
-        assert!(ServerInfo::from_state(&failed_lookup_state()).is_none());
+    fn failed_lookup_state_reads_as_none_and_keeps_the_reason() {
+        let state = failed_lookup_state("prohibited by robots.txt");
+        assert!(ServerInfo::from_state(&state).is_none());
+        assert_eq!(state["error"], serde_json::json!("prohibited by robots.txt"));
         assert!(ServerInfo::from_state(&serde_json::json!({"foo": 1})).is_none());
     }
 

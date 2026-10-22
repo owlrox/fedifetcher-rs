@@ -8,6 +8,7 @@ pub mod paging;
 pub mod peertube;
 
 use indexmap::IndexMap;
+use serde_json::Value;
 use tracing::error;
 
 use crate::http::HttpClient;
@@ -133,24 +134,98 @@ pub async fn find_post(
         return cached.clone();
     }
 
-    let found = look_up_post(url, seen_hosts, http).await;
-    if found.is_none() {
-        error!("Error parsing toot URL {url}");
-    }
+    let found = match look_up_post(url, seen_hosts, http).await {
+        Ok(found) => Some(found),
+        Err(reason) => {
+            error!("Error parsing toot URL {url}: {reason}");
+            None
+        }
+    };
     parsed_urls.insert(url.to_string(), found.clone());
     found
 }
 
+/// Read a post URL, or say which step made that impossible: no host, no
+/// known server info (with the reason its lookup failed), no supported API,
+/// or a URL shape the server's client does not recognize.
 async fn look_up_post(
     url: &str,
     seen_hosts: &mut ServerCache,
     http: &HttpClient,
-) -> Option<PostRef> {
-    let host = host_of(url)?;
+) -> Result<PostRef, String> {
+    let host = host_of(url).ok_or_else(|| "the URL has no host".to_string())?;
 
-    let server = get_server_info(&host, seen_hosts, http).await?;
-    let client = client_for(&server, http)?;
+    let server = get_server_info(&host, seen_hosts, http)
+        .await
+        .ok_or_else(|| {
+            let reason = seen_hosts
+                .get(&host)
+                .and_then(|info| info.get("error"))
+                .and_then(Value::as_str);
+            match reason {
+                Some(reason) => format!("server info for {host} is unavailable: {reason}"),
+                None => format!("server info for {host} is unavailable"),
+            }
+        })?;
+    let client = client_for(&server, http).ok_or_else(|| {
+        format!(
+            "{host} runs {} and no supported API is known for it",
+            server.software
+        )
+    })?;
 
-    let post_id = client.post_id_from(url).await?;
-    Some(PostRef(host, post_id))
+    let post_id = client
+        .post_id_from(url)
+        .await
+        .ok_or_else(|| format!("the URL is not a {} post URL", client.flavour().as_str()))?;
+    Ok(PostRef(host, post_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::servers::failed_lookup_state;
+
+    fn dummy_http() -> HttpClient {
+        HttpClient::new(Config {
+            server: "home.example".to_string(),
+            access_tokens: vec!["t".to_string()],
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn a_failed_server_lookup_reports_the_cached_reason() {
+        // the host's earlier lookup failed (robots.txt, say); no request is
+        // made, and the error says why
+        let mut seen_hosts = ServerCache::new();
+        seen_hosts.add(
+            "nya.social",
+            failed_lookup_state(
+                "Error getting host node info for nya.social. Exception: Querying https://nya.social/.well-known/nodeinfo prohibited by robots.txt",
+            ),
+        );
+        let http = dummy_http();
+
+        let reason = look_up_post("https://nya.social/notes/81a131a4b49fff235e0b0575", &mut seen_hosts, &http)
+            .await
+            .unwrap_err();
+
+        assert!(
+            reason.contains("prohibited by robots.txt"),
+            "{reason}"
+        );
+        assert!(reason.contains("nya.social"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_url_without_a_host_reports_that() {
+        let mut seen_hosts = ServerCache::new();
+        let http = dummy_http();
+        let reason = look_up_post("not a url", &mut seen_hosts, &http)
+            .await
+            .unwrap_err();
+        assert_eq!(reason, "the URL has no host");
+    }
 }
