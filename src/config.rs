@@ -201,6 +201,114 @@ impl Config {
     pub fn recently_checked_contexts_file(&self) -> PathBuf {
         self.state_dir.join("recent_context")
     }
+
+    /// Which tasks a run will do, in the order it will do them. An empty
+    /// list means the run has nothing to do and will finish immediately.
+    pub fn enabled_tasks(&self) -> Vec<&'static str> {
+        let mut tasks = Vec::new();
+        if self.from_lists {
+            tasks.push("lists");
+        }
+        if self.reply_interval_in_hours > 0 {
+            tasks.push("reply context");
+        }
+        if self.home_timeline_length > 0 {
+            tasks.push("home timeline");
+        }
+        if self.max_followings > 0 {
+            tasks.push("followings");
+        }
+        if self.max_followers > 0 {
+            tasks.push("followers");
+        }
+        if self.max_follow_requests > 0 {
+            tasks.push("follow requests");
+        }
+        if self.from_notifications > 0 {
+            tasks.push("notifications");
+        }
+        if self.max_bookmarks > 0 {
+            tasks.push("bookmarks");
+        }
+        if self.max_favourites > 0 {
+            tasks.push("favourites");
+        }
+        tasks
+    }
+
+    /// Overlay raw values onto this config, coercing them the same way
+    /// `build_config` does, and normalizing the server name.
+    pub fn apply_values(&mut self, values: &RawValues) -> Result<(), ConfigError> {
+        apply(self, values)?;
+        self.server = Config::normalize_server(&self.server);
+        Ok(())
+    }
+
+    /// The whole effective configuration as raw values, ready to be written
+    /// back to a config file. Options that are unset (`None`) are omitted, so
+    /// a cleared option stays cleared when the file is read back.
+    pub fn to_raw_values(&self) -> RawValues {
+        let mut values = RawValues::new();
+        let mut put = |key: &str, value: Value| {
+            values.insert(key.to_string(), value);
+        };
+        put("server", Value::String(self.server.clone()));
+        put(
+            "access_tokens",
+            Value::Array(
+                self.access_tokens
+                    .iter()
+                    .map(|token| Value::String(token.clone()))
+                    .collect(),
+            ),
+        );
+        put("reply_interval_in_hours", Value::from(self.reply_interval_in_hours));
+        put("home_timeline_length", Value::from(self.home_timeline_length));
+        put("user", Value::String(self.user.clone()));
+        put("max_followings", Value::from(self.max_followings));
+        put("max_followers", Value::from(self.max_followers));
+        put("max_follow_requests", Value::from(self.max_follow_requests));
+        put("max_bookmarks", Value::from(self.max_bookmarks));
+        put("max_favourites", Value::from(self.max_favourites));
+        put("from_notifications", Value::from(self.from_notifications));
+        put("from_lists", Value::Bool(self.from_lists));
+        put("max_list_length", Value::from(self.max_list_length));
+        put("max_list_accounts", Value::from(self.max_list_accounts));
+        put("max_posts_per_account", Value::from(self.max_posts_per_account));
+        put("backfill_with_context", Value::Bool(self.backfill_with_context));
+        put("backfill_mentioned_users", Value::Bool(self.backfill_mentioned_users));
+        put("respect_robots_txt", Value::Bool(self.respect_robots_txt));
+        put("respect_user_opt_out", Value::Bool(self.respect_user_opt_out));
+        put("remember_users_for_hours", Value::from(self.remember_users_for_hours));
+        put("remember_hosts_for_days", Value::from(self.remember_hosts_for_days));
+        put("http_timeout", Value::from(self.http_timeout));
+        put(
+            "instance_blocklist",
+            Value::Array(
+                self.instance_blocklist
+                    .iter()
+                    .map(|host| Value::String(host.clone()))
+                    .collect(),
+            ),
+        );
+        put("state_dir", Value::String(self.state_dir.display().to_string()));
+        if let Some(lock_file) = &self.lock_file {
+            put("lock_file", Value::String(lock_file.display().to_string()));
+        }
+        put("lock_hours", Value::from(self.lock_hours));
+        if let Some(on_start) = &self.on_start {
+            put("on_start", Value::String(on_start.clone()));
+        }
+        if let Some(on_done) = &self.on_done {
+            put("on_done", Value::String(on_done.clone()));
+        }
+        if let Some(on_fail) = &self.on_fail {
+            put("on_fail", Value::String(on_fail.clone()));
+        }
+        put("log_level", Value::String(self.log_level.clone()));
+        put("log_format", Value::String(self.log_format.clone()));
+        values
+    }
 }
 
 /// The raw, uncoerced values from one source, keyed by option name.
@@ -210,6 +318,26 @@ pub type RawValues = BTreeMap<String, Value>;
 ///
 /// Later sources win: `file`, then `environ`, then `cli`.
 pub fn build_config(file: RawValues, environ: RawValues, cli: RawValues) -> Result<Config, ConfigError> {
+    build_config_with(file, environ, cli, true)
+}
+
+/// Like `build_config`, but a missing server or access token is not an error:
+/// the web UI starts with an empty configuration, and the values are filled
+/// in through its config page.
+pub fn build_config_lenient(
+    file: RawValues,
+    environ: RawValues,
+    cli: RawValues,
+) -> Result<Config, ConfigError> {
+    build_config_with(file, environ, cli, false)
+}
+
+fn build_config_with(
+    file: RawValues,
+    environ: RawValues,
+    cli: RawValues,
+    require_server_and_token: bool,
+) -> Result<Config, ConfigError> {
     let mut values: RawValues = RawValues::new();
     for source in [file, environ, cli] {
         for (key, value) in source {
@@ -217,15 +345,17 @@ pub fn build_config(file: RawValues, environ: RawValues, cli: RawValues) -> Resu
         }
     }
 
-    if !values.contains_key("server") || values.get("access_tokens").map(is_empty_list).unwrap_or(true) {
+    if require_server_and_token
+        && (!values.contains_key("server")
+            || values.get("access_tokens").map(is_empty_list).unwrap_or(true))
+    {
         return Err(ConfigError(
             "You must supply at least a server name and an access token".to_string(),
         ));
     }
 
     let mut config = Config::default();
-    apply(&mut config, &values)?;
-    config.server = Config::normalize_server(&config.server);
+    config.apply_values(&values)?;
     Ok(config)
 }
 
@@ -269,6 +399,28 @@ pub fn read_config_file(path: &str) -> Result<RawValues, ConfigError> {
     Ok(values)
 }
 
+/// Write raw values to a config file: TOML, or JSON when the path ends in
+/// `.json`. Unset (`null`) values are omitted.
+pub fn write_config_file(path: &str, values: &RawValues) -> Result<(), ConfigError> {
+    let map: serde_json::Map<String, Value> = values
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let text = if path.ends_with(".json") {
+        serde_json::to_string_pretty(&Value::Object(map))
+            .map_err(|ex| ConfigError(format!("Cannot write config file {path}: {ex}")))?
+    } else {
+        toml::to_string(&map)
+            .map_err(|ex| ConfigError(format!("Cannot write config file {path}: {ex}")))?
+    };
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(path, text)
+        .map_err(|ex| ConfigError(format!("Cannot write config file {path}: {ex}")))
+}
+
 /// Read the `ff_*` environment variables into raw values.
 ///
 /// Any variable starting with `ff_access_token` supplies an access token.
@@ -294,7 +446,7 @@ pub fn read_environ(environ: &[(String, String)]) -> RawValues {
     values
 }
 
-fn is_known_option(name: &str) -> bool {
+pub fn is_known_option(name: &str) -> bool {
     matches!(
         name,
         "server"
@@ -329,6 +481,45 @@ fn is_known_option(name: &str) -> bool {
             | "log_level"
             | "log_format"
     )
+}
+
+/// What an option does, as the original documentation puts it — shown as the
+/// config page's hover tooltips.
+pub fn option_description(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "server" => "Required: the name of your server (e.g. mstdn.thms.uk)",
+        "access_tokens" => "Required: tokens generated at https://<server>/settings/applications, needing read:search, read:statuses and admin:read:accounts scopes. Add one per user whose timelines you fetch.",
+        "reply_interval_in_hours" => "Fetch remote replies to posts that have received replies from users on your own instance in this period",
+        "home_timeline_length" => "Look for replies to posts in the API key owner's home timeline, up to this many posts",
+        "user" => "Use together with max_followings or max_followers to backfill a specific user's followings/followers. If omitted, we use the account that owns the access token.",
+        "max_followings" => "Backfill posts for new accounts followed by user. At most this many followings' posts",
+        "max_followers" => "Backfill posts for new accounts following user. At most this many followers' posts",
+        "max_follow_requests" => "Backfill posts of the API key owners' pending follow requests. At most this many requesters' posts",
+        "max_bookmarks" => "Fetch remote replies to the API key owners' bookmarks. At most this many bookmarks",
+        "max_favourites" => "Fetch remote replies to the API key owners' favourites. At most this many favourites",
+        "from_notifications" => "Backfill accounts of anyone appearing in your notifications, during the last hours",
+        "from_lists" => "Fetch missing replies and/or backfill accounts from your lists. Disabled by default",
+        "max_list_length" => "How many posts to fetch replies for in each list. Ignored unless from_lists is set. Set to 0 to only backfill profiles in lists",
+        "max_list_accounts" => "How many accounts to backfill for in each list. Ignored unless from_lists is set. Set to 0 to only fetch replies in lists",
+        "max_posts_per_account" => "How many posts to fetch from each account we backfill. Above the 40 fetched by default means more requests to the remote server, and to your own server to pull each post in, so raising this makes FediFetcher considerably slower",
+        "backfill_with_context" => "Fetch remote replies when backfilling profiles (default: enabled)",
+        "backfill_mentioned_users" => "Backfill any mentioned users when fetching remote replies to timeline posts (default: enabled)",
+        "respect_robots_txt" => "Respect robots.txt when fetching from remote servers (default: enabled)",
+        "respect_user_opt_out" => "Skip accounts that have opted out (nobot tag, or not indexable or discoverable) when backfilling (default: enabled)",
+        "remember_users_for_hours" => "How long to remember users that you aren't following for, before trying to backfill them again",
+        "remember_hosts_for_days" => "How long to remember host info for, before checking again",
+        "http_timeout" => "The timeout for any HTTP requests to your own, or other instances",
+        "instance_blocklist" => "A comma-separated list of instances that FediFetcher should never try to connect to",
+        "state_dir" => "Directory to store persistent files and possibly the lock file. Defaults to ./artifacts if that directory exists, and to $XDG_STATE_HOME/fedifetcher (usually ~/.local/state/fedifetcher) otherwise",
+        "lock_file" => "Location of the lock file. Defaults to lock.lock in state_dir",
+        "lock_hours" => "How long a lock held by a live process is respected. Locks held by a dead process, or left by an older version, are reclaimed immediately",
+        "on_start" => "Pinged when processing is starting — use for 'dead man switch' monitoring of your task",
+        "on_done" => "Pinged when processing has completed — use for 'dead man switch' monitoring of your task",
+        "on_fail" => "Pinged when processing has failed — use for 'dead man switch' monitoring of your task",
+        "log_level" => "Severity of events to log: DEBUG, INFO, WARNING, ERROR or CRITICAL. Applies on restart",
+        "log_format" => "The log format. Applies on restart",
+        _ => return None,
+    })
 }
 
 fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
@@ -485,6 +676,47 @@ mod tests {
         assert!(build_config(RawValues::new(), RawValues::new(), RawValues::new()).is_err());
         assert!(build_config(values(vec![("server", json!("x"))]), RawValues::new(), RawValues::new()).is_err());
         assert!(build_config(minimal(), RawValues::new(), RawValues::new()).is_ok());
+    }
+
+    #[test]
+    fn every_known_option_has_a_description() {
+        for name in [
+            "server",
+            "access_tokens",
+            "reply_interval_in_hours",
+            "home_timeline_length",
+            "user",
+            "max_followings",
+            "max_followers",
+            "max_follow_requests",
+            "max_bookmarks",
+            "max_favourites",
+            "from_notifications",
+            "from_lists",
+            "max_list_length",
+            "max_list_accounts",
+            "max_posts_per_account",
+            "backfill_with_context",
+            "backfill_mentioned_users",
+            "respect_robots_txt",
+            "respect_user_opt_out",
+            "remember_users_for_hours",
+            "remember_hosts_for_days",
+            "http_timeout",
+            "instance_blocklist",
+            "state_dir",
+            "lock_file",
+            "lock_hours",
+            "on_start",
+            "on_done",
+            "on_fail",
+            "log_level",
+            "log_format",
+        ] {
+            assert!(is_known_option(name), "{name}");
+            assert!(option_description(name).is_some(), "{name} has no tooltip");
+        }
+        assert_eq!(option_description("not_an_option"), None);
     }
 
     #[test]
@@ -660,6 +892,86 @@ mod tests {
         );
         assert!(!raw.contains_key("unknown_option"));
         assert!(!raw.contains_key("unrelated"));
+    }
+
+    #[test]
+    fn enabled_tasks_follow_the_config() {
+        let mut config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        assert!(
+            config.enabled_tasks().is_empty(),
+            "the defaults enable nothing"
+        );
+        config.from_lists = true;
+        config.reply_interval_in_hours = 48;
+        config.max_followers = 5;
+        assert_eq!(
+            config.enabled_tasks(),
+            vec!["lists", "reply context", "followers"]
+        );
+    }
+
+    #[test]
+    fn lenient_build_allows_an_empty_config() {
+        let config =
+            build_config_lenient(RawValues::new(), RawValues::new(), RawValues::new()).unwrap();
+        assert_eq!(config.server, "");
+        assert!(config.access_tokens.is_empty());
+
+        let config = build_config_lenient(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        assert_eq!(config.server, "example.com");
+        assert_eq!(config.access_tokens, vec!["token1".to_string()]);
+    }
+
+    #[test]
+    fn config_round_trips_through_a_toml_file() {
+        let dir = std::env::temp_dir().join(format!("ff-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut raw = minimal();
+        raw.insert("max_followers".to_string(), json!(7));
+        raw.insert("from_lists".to_string(), json!(true));
+        raw.insert("on_start".to_string(), json!("https://example.com/start"));
+        raw.insert("instance_blocklist".to_string(), json!(["a.example", "b.example"]));
+        let config = build_config(raw, RawValues::new(), RawValues::new()).unwrap();
+        write_config_file(path.to_str().unwrap(), &config.to_raw_values()).unwrap();
+
+        let read_back = read_config_file(path.to_str().unwrap()).unwrap();
+        let reloaded = build_config(read_back, RawValues::new(), RawValues::new()).unwrap();
+        assert_eq!(config.to_raw_values(), reloaded.to_raw_values());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unset_optional_options_are_omitted_from_the_file() {
+        let dir = std::env::temp_dir().join(format!("ff-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let config = Config::default();
+        write_config_file(path.to_str().unwrap(), &config.to_raw_values()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("server = \"\""));
+        assert!(text.contains("lock_hours = 24"));
+        assert!(!text.contains("lock_file"));
+        assert!(!text.contains("on_start"));
+        assert!(!text.contains("on_done"));
+        assert!(!text.contains("on_fail"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn json_config_files_are_written_as_json() {
+        let dir = std::env::temp_dir().join(format!("ff-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        write_config_file(path.to_str().unwrap(), &config.to_raw_values()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with('{'));
+
+        let read_back = read_config_file(path.to_str().unwrap()).unwrap();
+        let reloaded = build_config(read_back, RawValues::new(), RawValues::new()).unwrap();
+        assert_eq!(config.to_raw_values(), reloaded.to_raw_values());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn read_config_file_bytes(text: &str) -> Result<RawValues, ConfigError> {
