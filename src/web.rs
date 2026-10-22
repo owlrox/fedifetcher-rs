@@ -118,9 +118,59 @@ async fn dashboard(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
     render(move || view! { <Dashboard state=state history=history /> })
 }
 
-async fn hosts(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+/// Which column of the hosts table the /hosts page sorts by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostSort {
+    Host,
+    Software,
+    Version,
+    Apis,
+    LastChecked,
+}
+
+impl HostSort {
+    /// The /hosts query string's name for the column.
+    fn param(self) -> &'static str {
+        match self {
+            HostSort::Host => "host",
+            HostSort::Software => "software",
+            HostSort::Version => "version",
+            HostSort::Apis => "apis",
+            HostSort::LastChecked => "last_checked",
+        }
+    }
+
+    /// The column a /hosts query string asks for, defaulting to the host.
+    fn parse(param: Option<&str>) -> Self {
+        match param {
+            Some("software") => HostSort::Software,
+            Some("version") => HostSort::Version,
+            Some("apis") => HostSort::Apis,
+            Some("last_checked") => HostSort::LastChecked,
+            _ => HostSort::Host,
+        }
+    }
+}
+
+/// The /hosts page's query string: which column to sort by, and which way.
+/// Unknown values fall back to the defaults, hosts alphabetically.
+#[derive(serde::Deserialize)]
+struct HostsQuery {
+    sort: Option<String>,
+    dir: Option<String>,
+}
+
+async fn hosts(
+    AxumState(state): AxumState<Arc<AppState>>,
+    Query(query): Query<HostsQuery>,
+) -> Html<String> {
     tracing::debug!("GET /hosts");
-    render(move || view! { <HostsPage state=state /> })
+    let sort = HostSort::parse(query.sort.as_deref());
+    let order = match query.dir.as_deref() {
+        Some("desc") => LogOrder::Desc,
+        _ => LogOrder::Asc,
+    };
+    render(move || view! { <HostsPage state=state sort=sort order=order /> })
 }
 
 /// The /logs page's query string: which column to sort by, and which way.
@@ -136,11 +186,7 @@ async fn logs(
     Query(query): Query<LogsQuery>,
 ) -> Html<String> {
     tracing::debug!("GET /logs");
-    let sort = match query.sort.as_deref() {
-        Some("level") => LogSort::Level,
-        Some("message") => LogSort::Message,
-        _ => LogSort::Time,
-    };
+    let sort = LogSort::parse(query.sort.as_deref());
     let order = match query.dir.as_deref() {
         Some("asc") => LogOrder::Asc,
         _ => LogOrder::Desc,
@@ -773,7 +819,7 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>) -> impl IntoView {
 }
 
 #[component]
-fn HostsPage(state: Arc<AppState>) -> impl IntoView {
+fn HostsPage(state: Arc<AppState>, sort: HostSort, order: LogOrder) -> impl IntoView {
     let data = StateStore::new(state.config.lock().unwrap().clone()).load();
     let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
     for (host, info) in data.seen_hosts.iter() {
@@ -806,12 +852,27 @@ fn HostsPage(state: Arc<AppState>) -> impl IntoView {
         };
         rows.push((host.clone(), software, text("version"), apis, text("last_checked")));
     }
+    // hosts alphabetically; the tie order for every other column
     rows.sort();
+    // a stable sort, so equal keys keep the alphabetical order above
+    rows.sort_by(|a, b| match sort {
+        HostSort::Host => a.0.cmp(&b.0),
+        HostSort::Software => a.1.cmp(&b.1),
+        HostSort::Version => a.2.cmp(&b.2),
+        HostSort::Apis => a.3.cmp(&b.3),
+        HostSort::LastChecked => a.4.cmp(&b.4),
+    });
+    if order == LogOrder::Desc {
+        rows.reverse();
+    }
 
     view! {
         <Page title="Hosts".to_string()>
             <section>
                 <h2>"Seen hosts"</h2>
+                <p class="muted">
+                    "Every server FediFetcher has contacted, and what it found. Click a column heading to sort by it; click it again to flip the direction."
+                </p>
                 {if rows.is_empty() {
                     view! { <p class="muted">"No hosts seen yet."</p> }.into_any()
                 } else {
@@ -819,11 +880,11 @@ fn HostsPage(state: Arc<AppState>) -> impl IntoView {
                         <table>
                             <thead>
                                 <tr>
-                                    <th>"Host"</th>
-                                    <th>"Software"</th>
-                                    <th>"Version"</th>
-                                    <th>"APIs"</th>
-                                    <th>"Last checked"</th>
+                                    <th>{sort_link("Host", HostSort::Host.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
+                                    <th>{sort_link("Software", HostSort::Software.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
+                                    <th>{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
+                                    <th>{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
+                                    <th>{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -869,9 +930,9 @@ fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder) -> impl IntoView 
                         <table>
                             <thead>
                                 <tr>
-                                    <th>{sort_link("Time", "ts", LogSort::Time, sort, order)}</th>
-                                    <th>{sort_link("Level", "level", LogSort::Level, sort, order)}</th>
-                                    <th>{sort_link("Message", "message", LogSort::Message, sort, order)}</th>
+                                    <th>{sort_link("Time", LogSort::Time.param(), sort.param(), order, "/logs", LogOrder::Desc)}</th>
+                                    <th>{sort_link("Level", LogSort::Level.param(), sort.param(), order, "/logs", LogOrder::Desc)}</th>
+                                    <th>{sort_link("Message", LogSort::Message.param(), sort.param(), order, "/logs", LogOrder::Desc)}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -897,14 +958,28 @@ fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder) -> impl IntoView 
 }
 
 /// A column heading that links to the same page sorted by that column.
-/// Clicking the column that is already sorted flips the direction.
-fn sort_link(label: &str, param: &str, column: LogSort, current: LogSort, order: LogOrder) -> AnyView {
-    let dir = if current == column && order == LogOrder::Desc {
-        "asc"
+/// Clicking the column that is already sorted flips the direction; clicking
+/// a new column sorts it the page's default way (`fresh`).
+fn sort_link(
+    label: &str,
+    column: &str,
+    current: &str,
+    order: LogOrder,
+    page: &str,
+    fresh: LogOrder,
+) -> AnyView {
+    let dir = if current == column {
+        match order {
+            LogOrder::Desc => "asc",
+            LogOrder::Asc => "desc",
+        }
     } else {
-        "desc"
+        match fresh {
+            LogOrder::Desc => "desc",
+            LogOrder::Asc => "asc",
+        }
     };
-    let href = format!("/logs?sort={param}&dir={dir}");
+    let href = format!("{page}?sort={column}&dir={dir}");
     let label = label.to_string();
     let shown = if current == column {
         match order {

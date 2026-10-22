@@ -354,6 +354,111 @@ async fn posting_clear_log_empties_the_database() {
     assert!(body.contains("No log entries yet."));
 }
 
+/// Write a seen_hosts state file with the given entries, as a run would.
+fn seed_hosts(dir: &std::path::Path, hosts: serde_json::Value) {
+    std::fs::write(dir.join("seen_hosts"), hosts.to_string()).unwrap();
+}
+
+/// A seen_hosts entry that survives loading: the PeerTube marker expire()
+/// requires of every entry, and a last_checked `days_ago` days back.
+fn host_entry(software: &str, version: &str, apis: &[&str], days_ago: i64) -> serde_json::Value {
+    let last_checked = fedifetcher::timeutil::fmt_state_ts(
+        fedifetcher::timeutil::now() - time::Duration::days(days_ago),
+    );
+    let mut entry = serde_json::json!({
+        "info": {},
+        "software": software,
+        "version": version,
+        "peertubeApiSupport": false,
+        "last_checked": last_checked,
+    });
+    for api in apis {
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert(format!("{api}ApiSupport"), serde_json::json!(true));
+    }
+    entry
+}
+
+#[tokio::test]
+async fn the_hosts_page_sorts_by_the_clicked_column() {
+    let dir = common::tmp_dir();
+    seed_hosts(
+        &dir,
+        serde_json::json!({
+            "alpha.example": host_entry("Mastodon", "4.2.0", &["mastodon"], 3),
+            "beta.example": host_entry("Akkoma", "3.13.0", &["mastodon"], 1),
+            "gamma.example": host_entry("Pleroma", "4.1.0", &[], 2),
+        }),
+    );
+    let base = spawn_ui(&dir).await;
+
+    let position = |body: &str, host: &str| body.find(host).unwrap();
+
+    // the default is hosts alphabetically
+    let (status, body) = get(&format!("{base}/hosts")).await;
+    assert_eq!(status, 200);
+    assert!(
+        position(&body, "alpha.example") < position(&body, "beta.example")
+            && position(&body, "beta.example") < position(&body, "gamma.example"),
+        "hosts sort alphabetically by default"
+    );
+    assert!(
+        body.contains("<td>mastodon</td>"),
+        "the APIs column lists the supported APIs"
+    );
+    assert!(
+        body.contains("/hosts?sort=software&amp;dir=asc"),
+        "a new column sorts the page's default way"
+    );
+
+    // by software, ascending: Akkoma, Mastodon, Pleroma
+    let (_, body) = get(&format!("{base}/hosts?sort=software&dir=asc")).await;
+    assert!(
+        position(&body, "beta.example") < position(&body, "alpha.example")
+            && position(&body, "alpha.example") < position(&body, "gamma.example"),
+        "software ascending is Akkoma, Mastodon, Pleroma"
+    );
+    assert!(body.contains("(asc)"), "the sorted column shows its direction");
+    assert!(
+        body.contains("/hosts?sort=software&amp;dir=desc"),
+        "clicking the sorted column flips the direction"
+    );
+
+    // by software, descending: Pleroma, Mastodon, Akkoma
+    let (_, body) = get(&format!("{base}/hosts?sort=software&dir=desc")).await;
+    assert!(
+        position(&body, "gamma.example") < position(&body, "alpha.example")
+            && position(&body, "alpha.example") < position(&body, "beta.example"),
+        "software descending is Pleroma, Mastodon, Akkoma"
+    );
+
+    // by version, ascending: 3.13.0, 4.1.0, 4.2.0
+    let (_, body) = get(&format!("{base}/hosts?sort=version&dir=asc")).await;
+    assert!(
+        position(&body, "beta.example") < position(&body, "gamma.example")
+            && position(&body, "gamma.example") < position(&body, "alpha.example"),
+        "version ascending is 3.13.0, 4.1.0, 4.2.0"
+    );
+
+    // by last checked, descending: 1, 2, 3 days ago
+    let (_, body) = get(&format!("{base}/hosts?sort=last_checked&dir=desc")).await;
+    assert!(
+        position(&body, "beta.example") < position(&body, "gamma.example")
+            && position(&body, "gamma.example") < position(&body, "alpha.example"),
+        "the most recently checked host comes first"
+    );
+
+    // an unknown sort falls back to hosts alphabetically
+    let (_, body) = get(&format!("{base}/hosts?sort=nonsense")).await;
+    assert!(
+        position(&body, "alpha.example") < position(&body, "beta.example")
+            && position(&body, "beta.example") < position(&body, "gamma.example"),
+        "an unknown sort falls back to the host column"
+    );
+}
+
 #[tokio::test]
 async fn posting_stop_redirects_back_even_when_idle() {
     let dir = common::tmp_dir();

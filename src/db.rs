@@ -96,6 +96,26 @@ pub enum LogSort {
     Message,
 }
 
+impl LogSort {
+    /// The /logs query string's name for the column.
+    pub fn param(self) -> &'static str {
+        match self {
+            LogSort::Time => "ts",
+            LogSort::Level => "level",
+            LogSort::Message => "message",
+        }
+    }
+
+    /// The column a /logs query string asks for, defaulting to time.
+    pub fn parse(param: Option<&str>) -> Self {
+        match param {
+            Some("level") => LogSort::Level,
+            Some("message") => LogSort::Message,
+            _ => LogSort::Time,
+        }
+    }
+}
+
 /// The direction the /logs page sorts the log table in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogOrder {
