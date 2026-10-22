@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use serde_json::Value;
 
-use fedifetcher::config::{RawValues, build_config, read_config_file, read_environ};
+use fedifetcher::config::{RawValues, build_config, build_config_lenient, read_config_file, read_environ};
 use fedifetcher::{logging, run, web};
 
 #[derive(Parser)]
@@ -218,16 +218,41 @@ async fn main() -> ExitCode {
         }
     };
 
+    // Serving reads and writes one config file: the one named with -c, or
+    // config.toml in the working directory, which the config page creates.
+    let config_file = match (config_file, &mode) {
+        (Some(path), _) => Some(path),
+        (None, Mode::Serve { .. }) => Some("config.toml".to_string()),
+        (None, Mode::Run) => None,
+    };
+
     let file_values = match &config_file {
         Some(path) => match read_config_file(path) {
             Ok(values) => values,
-            Err(ex) => return config_error(ex),
+            Err(ex) => {
+                // The web UI can start without a config file and create it
+                // from the config page; a run cannot.
+                if matches!(mode, Mode::Serve { .. }) && !std::path::Path::new(path).exists() {
+                    eprintln!(
+                        "WARNING:FediFetcher:Config file {path} doesn't exist yet, starting with defaults"
+                    );
+                    RawValues::new()
+                } else {
+                    return config_error(ex);
+                }
+            }
         },
         None => RawValues::new(),
     };
     let environ = read_environ(&std::env::vars().collect::<Vec<_>>());
 
-    let config = match build_config(file_values, environ, cli_values) {
+    // Serving only needs a config the page can edit; running needs a server
+    // and an access token.
+    let config = match &mode {
+        Mode::Run => build_config(file_values, environ, cli_values),
+        Mode::Serve { .. } => build_config_lenient(file_values, environ, cli_values),
+    };
+    let config = match config {
         Ok(config) => config,
         Err(ex) => return config_error(ex),
     };
@@ -236,18 +261,36 @@ async fn main() -> ExitCode {
         return config_error(ex);
     }
 
+    // The database in the state directory: every log line is written to it,
+    // and the web UI reads it for the logs page and the run history.
+    let db = match logging::setup_log_db(&config).await {
+        Ok(db) => db,
+        Err(ex) => {
+            eprintln!("CRITICAL:FediFetcher:{ex}");
+            return ExitCode::from(1);
+        }
+    };
+
     match mode {
-        Mode::Run => match run::run_once(config).await {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::from(1),
-        },
-        Mode::Serve { bind, port } => match web::serve(config, &bind, port).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(ex) => {
-                eprintln!("ERROR:FediFetcher:{ex}");
-                ExitCode::from(1)
+        Mode::Run => {
+            let result = run::run_once(config, run::CancelToken::new()).await;
+            // wait for the log lines already received to reach the database
+            logging::shutdown_log_db().await;
+            match result {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::from(1),
             }
-        },
+        }
+        Mode::Serve { bind, port } => {
+            let config_file = config_file.expect("serve mode always has a config file");
+            match web::serve(config, &config_file, &bind, port, db).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(ex) => {
+                    eprintln!("ERROR:FediFetcher:{ex}");
+                    ExitCode::from(1)
+                }
+            }
+        }
     }
 }
 

@@ -1,7 +1,10 @@
 //! One run of FediFetcher: the lock, the state, and the tasks.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use time::OffsetDateTime;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::api::mastodon::HomeServer;
@@ -77,12 +80,49 @@ impl Notifier {
     }
 }
 
+/// A cooperative stop signal for a run: set from the web UI's stop button,
+/// checked between tasks and between the items of the long loops.
+///
+/// Cloning shares the flag, so the web UI's copy and the run's copy see the
+/// same stop. It cannot interrupt an in-flight HTTP request; a stop lands
+/// within one request, bounded by the configured http timeout.
+#[derive(Clone, Default)]
+pub struct CancelToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        CancelToken::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Clear the flag, so the next run starts un-stopped.
+    pub fn reset(&self) {
+        self.cancelled.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
 /// Do one run, and report the message it finished with.
 ///
 /// The state is written back even when a task fails part way through, and the
-/// lock is released either way.
-pub async fn run_once(config: Config) -> Result<String> {
+/// lock is released either way. A run whose `cancel` was set finishes early
+/// and reports "Stopped.".
+pub async fn run_once(config: Config, cancel: CancelToken) -> Result<String> {
     info!("Starting FediFetcher v{VERSION}");
+    if !config.respect_robots_txt {
+        warn!("respect_robots_txt is disabled: remote servers' robots.txt will not be respected");
+    }
+    if !config.respect_user_opt_out {
+        warn!("respect_user_opt_out is disabled: accounts that have opted out will still be backfilled");
+    }
 
     let http = HttpClient::new(config.clone());
     let notifier = Notifier::new(config.clone(), http.clone(), Uuid::new_v4());
@@ -104,11 +144,18 @@ pub async fn run_once(config: Config) -> Result<String> {
     // Delete any old robots.txt files so we can re-download them
     http.robots().discard_stale_files(ROBOTS_MAX_AGE);
 
-    let result = run_tasks(&config, &http, &mut session).await;
+    let result = run_tasks(&config, &http, &mut session, &cancel).await;
 
     // the session saves the state on drop, failures included
     drop(session);
     drop(lock);
+
+    if cancel.is_cancelled() {
+        let message = "Stopped.".to_string();
+        notifier.done(&message).await;
+        info!("{message}");
+        return Ok(message);
+    }
 
     match result {
         Ok(()) => {
@@ -131,14 +178,32 @@ pub async fn run_once(config: Config) -> Result<String> {
     }
 }
 
-async fn run_tasks(config: &Config, http: &HttpClient, session: &mut Session) -> Result<()> {
+async fn run_tasks(
+    config: &Config,
+    http: &HttpClient,
+    session: &mut Session,
+    cancel: &CancelToken,
+) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    let tasks = config.enabled_tasks();
+    if tasks.is_empty() {
+        info!("No tasks are enabled; nothing to do");
+    } else {
+        debug!("Enabled tasks: {}", tasks.join(", "));
+    }
     for token in &config.access_tokens {
+        if cancel.is_cancelled() {
+            break;
+        }
         let home = HomeServer::new(&config.server, token, http.clone());
         let mut ctx = Context {
             config,
             state: session.state(),
             http,
             home: &home,
+            cancel: cancel.clone(),
         };
         run_enabled_tasks(&mut ctx).await?;
     }
@@ -155,5 +220,19 @@ mod tests {
         let http = HttpClient::new(config.clone());
         let notifier = Notifier::new(config, http, Uuid::new_v4());
         assert!(notifier.elapsed_ms() >= 0);
+    }
+
+    #[test]
+    fn cancel_token_starts_unset_and_shares_its_flag() {
+        let token = CancelToken::new();
+        assert!(!token.is_cancelled());
+
+        let clone = token.clone();
+        token.cancel();
+        assert!(token.is_cancelled());
+        assert!(clone.is_cancelled(), "clones share the flag");
+
+        token.reset();
+        assert!(!clone.is_cancelled(), "reset clears it for all clones");
     }
 }

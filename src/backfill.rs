@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::context::{add_context_urls, get_all_known_context_urls};
 use crate::http::HttpClient;
 use crate::posts::Post;
+use crate::run::CancelToken;
 use crate::servers::get_server_info;
 use crate::state::TimestampedSet;
 use crate::store::State;
@@ -40,13 +41,19 @@ pub fn filter_known_users(users: Vec<User>, known_users: &TimestampedSet) -> Vec
         .collect()
 }
 
-/// Whether the account asked, in any of the usual ways, to be left alone.
-pub fn user_has_opted_out(user: &User) -> bool {
+/// Why the account asked, in any of the usual ways to be left alone.
+pub fn opt_out_reason(user: &User) -> Option<&'static str> {
     let note = user.note.to_lowercase();
     if note.contains(" nobot") || note.contains("/tags/nobot") {
-        return true;
+        return Some("its profile asks not to be crawled (nobot)");
     }
-    !user.indexable || !user.discoverable
+    if !user.indexable {
+        return Some("it is not indexable");
+    }
+    if !user.discoverable {
+        return Some("it is not discoverable");
+    }
+    None
 }
 
 pub async fn get_user_posts(
@@ -57,9 +64,11 @@ pub async fn get_user_posts(
     config: &Config,
     state: &mut State,
 ) -> Option<Vec<Post>> {
-    if config.respect_user_opt_out && user_has_opted_out(user) {
-        debug!("User {} has opted out of backfilling", user.acct);
-        return None;
+    if config.respect_user_opt_out {
+        if let Some(reason) = opt_out_reason(user) {
+            info!("Skipping {}: the account has opted out ({reason})", user.acct);
+            return None;
+        }
     }
     let Some(host) = host_of(&user.url) else {
         error!("Error parsing Profile URL {}", user.url);
@@ -100,6 +109,7 @@ pub async fn add_post_with_context(
     home: &HomeServer,
     http: &HttpClient,
     config: &Config,
+    cancel: &CancelToken,
     state: &mut State,
 ) -> bool {
     if home.resolve(&post.url).await {
@@ -111,9 +121,15 @@ pub async fn add_post_with_context(
             {
                 return true;
             }
-            let known_context_urls =
-                get_all_known_context_urls(&home.server, std::slice::from_ref(post), http, state).await;
-            add_context_urls(home, known_context_urls, state).await;
+            let known_context_urls = get_all_known_context_urls(
+                &home.server,
+                std::slice::from_ref(post),
+                http,
+                cancel,
+                state,
+            )
+            .await;
+            add_context_urls(home, known_context_urls, cancel, state).await;
         }
         return true;
     }
@@ -127,10 +143,14 @@ pub async fn add_user_posts(
     target: UserSet,
     http: &HttpClient,
     config: &Config,
+    cancel: &CancelToken,
     state: &mut State,
 ) {
     let home_server = home.server.clone();
     for user in followings {
+        if cancel.is_cancelled() {
+            break;
+        }
         if !state.all_known_users.contains(&user.acct)
             && !user.url.starts_with(&format!("https://{home_server}/"))
         {
@@ -140,8 +160,11 @@ pub async fn add_user_posts(
                 let mut count = 0;
                 let mut failed = 0;
                 for post in posts {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
                     if !post.is_boost() && !state.seen_urls.contains(&post.url) {
-                        if add_post_with_context(&post, home, http, config, state).await {
+                        if add_post_with_context(&post, home, http, config, cancel, state).await {
                             state.seen_urls.add(&post.url, None);
                             count += 1;
                         } else {
@@ -190,18 +213,24 @@ mod tests {
     #[test]
     fn opt_out_reads_the_usual_signs() {
         // ' nobot' needs the space in front, so a bare #nobot does not count
-        assert!(user_has_opted_out(&user("a", "i am a bot, nobot")));
-        assert!(user_has_opted_out(&user("a", "check /tags/nobot please")));
-        assert!(!user_has_opted_out(&user("a", "#nobot")));
-        assert!(!user_has_opted_out(&user("a", "just a person")));
-        assert!(!user_has_opted_out(&user("a", "")));
+        assert_eq!(
+            opt_out_reason(&user("a", "i am a bot, nobot")).unwrap(),
+            "its profile asks not to be crawled (nobot)"
+        );
+        assert!(opt_out_reason(&user("a", "check /tags/nobot please")).is_some());
+        assert_eq!(opt_out_reason(&user("a", "#nobot")), None);
+        assert_eq!(opt_out_reason(&user("a", "just a person")), None);
+        assert_eq!(opt_out_reason(&user("a", "")), None);
 
         let mut not_indexable = user("a", "");
         not_indexable.indexable = false;
-        assert!(user_has_opted_out(&not_indexable));
+        assert_eq!(opt_out_reason(&not_indexable).unwrap(), "it is not indexable");
 
         let mut not_discoverable = user("a", "");
         not_discoverable.discoverable = false;
-        assert!(user_has_opted_out(&not_discoverable));
+        assert_eq!(
+            opt_out_reason(&not_discoverable).unwrap(),
+            "it is not discoverable"
+        );
     }
 }

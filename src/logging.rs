@@ -1,15 +1,18 @@
-//! Logging that looks like the Python original's, plus a ring buffer the web
-//! UI can read.
+//! Logging that looks like the Python original's, plus a SQLite database the
+//! web UI can query.
 //!
 //! Python configures the root logger with `log_format` and the date format
 //! "%Y-%m-%d %H:%M:%S %Z"; here a `FormatEvent` renders the same
-//! substitutions, and a second layer keeps the last lines for /logs.
+//! substitutions on stderr, and a layer sends every line to the database in
+//! the state directory, which the /logs page reads.
 
-use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Mutex;
 
+use sqlx::SqlitePool;
 use time::{OffsetDateTime, UtcOffset};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::task::JoinHandle;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
@@ -21,34 +24,31 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Layer};
 
 use crate::config::Config;
+use crate::db::{self, LogRow};
 use crate::error::ConfigError;
 use crate::timeutil;
-
-/// The most log lines kept for the web UI's /logs page.
-pub const LOG_RING_CAPACITY: usize = 1000;
 
 /// Python's datefmt: "%Y-%m-%d %H:%M:%S %Z".
 const DATEFMT: &[time::format_description::FormatItem<'static>] = time::macros::format_description!(
     "[year]-[month]-[day] [hour]:[minute]:[second]"
 );
 
-static LOG_LINES: OnceLock<Arc<Mutex<VecDeque<String>>>> = OnceLock::new();
+/// How many log lines the database keeps; the oldest are pruned as new ones
+/// arrive.
+const LOG_RETENTION: i64 = 100_000;
 
-fn log_lines() -> Arc<Mutex<VecDeque<String>>> {
-    LOG_LINES
-        .get_or_init(|| Arc::new(Mutex::new(VecDeque::new())))
-        .clone()
-}
+/// Prune the log table every this many lines received, so the DELETE is not
+/// run per line.
+const PRUNE_EVERY: i64 = 1_000;
 
-/// The most recent log lines, oldest first.
-pub fn recent_log_lines(max: usize) -> Vec<String> {
-    let ring = log_lines();
-    let ring = ring.lock().unwrap();
-    ring.iter().rev().take(max).rev().cloned().collect()
-}
+/// The log lines' way into the database. Set by `setup_log_db`.
+static LOG_TX: Mutex<Option<UnboundedSender<LogRow>>> = Mutex::new(None);
+
+/// The task writing log lines to the database, so it can be awaited on exit.
+static LOG_WRITER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 /// Configure logging from the config: the Python-style format on stderr, and
-/// the ring buffer for the web UI.
+/// a layer that sends every line to the database (see `setup_log_db`).
 pub fn setup_logging(config: &Config) -> Result<(), ConfigError> {
     let level = match config.log_level.to_uppercase().as_str() {
         "DEBUG" => "debug",
@@ -62,16 +62,13 @@ pub fn setup_logging(config: &Config) -> Result<(), ConfigError> {
         }
     };
 
-    // the Python original quiets urllib3; the HTTP stack is reqwest here
+    // the Python original quiets urllib3; the HTTP stack is reqwest here,
+    // and sqlx logs every query at debug
     let filter = EnvFilter::try_new(format!(
-        "{level},reqwest=warn,hyper=warn,hyper_util=warn,h2=warn,tower_http=warn"
+        "{level},reqwest=warn,hyper=warn,hyper_util=warn,h2=warn,tower_http=warn,sqlx=warn"
     ))
     .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let ring_layer = RingLayer {
-        ring: log_lines(),
-        format: config.log_format.clone(),
-    };
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .event_format(PythonFormat {
@@ -80,10 +77,47 @@ pub fn setup_logging(config: &Config) -> Result<(), ConfigError> {
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(ring_layer)
+        .with(DbLayer)
         .with(fmt_layer)
         .init();
     Ok(())
+}
+
+/// Open the log database and start the task that writes to it. Every line
+/// the DbLayer sees is sent to that task, the only writer, so lines reach
+/// the database in order. Returns the pool, for the web UI to query.
+pub async fn setup_log_db(config: &Config) -> crate::error::Result<SqlitePool> {
+    let pool = db::open(config).await?;
+    let (tx, mut rx) = unbounded_channel::<LogRow>();
+    *LOG_TX.lock().unwrap() = Some(tx);
+    let writer_pool = pool.clone();
+    let handle = tokio::spawn(async move {
+        let mut received = 0i64;
+        while let Some(row) = rx.recv().await {
+            if let Err(ex) = db::insert_log(&writer_pool, &row).await {
+                eprintln!("WARNING:FediFetcher:could not write a log line to the database: {ex}");
+            }
+            received += 1;
+            if received % PRUNE_EVERY == 0 {
+                if let Err(ex) = db::prune_logs(&writer_pool, LOG_RETENTION).await {
+                    eprintln!("WARNING:FediFetcher:could not prune the log database: {ex}");
+                }
+            }
+        }
+    });
+    *LOG_WRITER.lock().unwrap() = Some(handle);
+    Ok(pool)
+}
+
+/// Stop the log database's writer, waiting for the lines already received
+/// to be written. Called before a one-shot run exits, so no line is lost.
+pub async fn shutdown_log_db() {
+    if let Some(tx) = LOG_TX.lock().unwrap().take() {
+        drop(tx);
+    }
+    if let Some(handle) = LOG_WRITER.lock().unwrap().take() {
+        let _ = handle.await;
+    }
 }
 
 /// Render one event the way Python's `log_format` would.
@@ -107,20 +141,24 @@ where
     }
 }
 
-/// Keep the last lines for the web UI.
-struct RingLayer {
-    ring: Arc<Mutex<VecDeque<String>>>,
-    format: String,
-}
+/// Send every log line to the database's writer task. The channel keeps the
+/// layer synchronous; the task does the writing.
+struct DbLayer;
 
-impl<S: Subscriber> Layer<S> for RingLayer {
+impl<S: Subscriber> Layer<S> for DbLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let line = format_line(&self.format, event.metadata().level(), &message_of(event));
-        let mut ring = self.ring.lock().unwrap();
-        if ring.len() >= LOG_RING_CAPACITY {
-            ring.pop_front();
-        }
-        ring.push_back(line);
+        let Some(tx) = LOG_TX.lock().unwrap().clone() else {
+            return;
+        };
+        let row = LogRow {
+            ts: asctime(timeutil::now_local()),
+            level: level_name(event.metadata().level()).to_string(),
+            target: event.metadata().target().to_string(),
+            message: message_of(event),
+        };
+        // a closed channel means the writer is shutting down; the line is
+        // still on stderr
+        let _ = tx.send(row);
     }
 }
 
@@ -146,9 +184,19 @@ impl Visit for MessageVisitor {
 
 /// Substitute the Python format's fields into `format`.
 fn format_line(format: &str, level: &Level, message: &str) -> String {
+    format_db_line(
+        format,
+        level_name(level),
+        &asctime(timeutil::now_local()),
+        message,
+    )
+}
+
+/// Render one stored log row the way `log_format` would.
+pub fn format_db_line(format: &str, level: &str, ts: &str, message: &str) -> String {
     format
-        .replace("%(asctime)s", &asctime(timeutil::now_local()))
-        .replace("%(levelname)s", level_name(level))
+        .replace("%(asctime)s", ts)
+        .replace("%(levelname)s", level)
         .replace("%(name)s", "FediFetcher")
         .replace("%(message)s", message)
 }
@@ -195,6 +243,20 @@ mod tests {
         let asctime = parts.next().unwrap();
         assert!(asctime.ends_with(" UTC") || asctime.contains(" +") || asctime.contains(" -"));
         assert_eq!(parts.next().unwrap(), "WARNING FediFetcher: hello");
+    }
+
+    #[test]
+    fn a_stored_row_renders_like_a_live_line() {
+        let line = format_db_line(
+            "%(asctime)s: %(message)s",
+            "INFO",
+            "2026-10-22 16:05:07 -05:00",
+            "Found 2 toots in timeline",
+        );
+        assert_eq!(
+            line,
+            "2026-10-22 16:05:07 -05:00: Found 2 toots in timeline"
+        );
     }
 
     #[test]

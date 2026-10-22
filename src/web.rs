@@ -1,24 +1,31 @@
-//! A server-rendered web UI: dashboard, run trigger, hosts, logs and the
-//! effective config. No JavaScript anywhere — every page is HTML from leptos
-//! SSR, and the only interactivity is a form POST that redirects back.
+//! A server-rendered web UI: dashboard, run trigger, hosts, logs and an
+//! editable config page that writes back to the config file. No JavaScript
+//! anywhere — every page is HTML from leptos SSR, and the only interactivity
+//! is a form POST that redirects back.
 
-use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use axum::body::Bytes;
 use axum::extract::State as AxumState;
+use axum::http::StatusCode;
 use axum::response::{Html, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
 use leptos::prelude::*;
-use serde::{Deserialize, Serialize};
+use regex::Regex;
 use serde_json::Value;
+use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::api::mastodon::masked;
-use crate::config::Config;
+use crate::config::{Config, RawValues, is_known_option, option_description, write_config_file};
+use crate::db::{self, RunRow};
+use crate::debug::{self, DebugOutcome};
+use crate::http::HttpClient;
 use crate::logging;
-use crate::run::run_once;
+use crate::run::{CancelToken, run_once};
 use crate::store::StateStore;
 use crate::timeutil;
 use crate::VERSION;
@@ -30,16 +37,23 @@ const HISTORY_CAPACITY: usize = 50;
 const LOG_LINES_SHOWN: usize = 200;
 
 struct AppState {
-    config: Config,
+    /// The effective config; replaced when the config page saves.
+    config: Mutex<Config>,
+    /// Where the config page writes; TOML, or JSON when it ends in .json.
+    config_file: PathBuf,
+    /// The database the log lines and the run history are written to.
+    db: SqlitePool,
     ui: Mutex<UiState>,
     /// Held for the duration of a web-triggered run, so two clicks cannot
     /// overlap; the lock file keeps other processes out.
     run_guard: Arc<AsyncMutex<()>>,
+    /// Set by the stop button; the running run checks it between tasks and
+    /// items, and finishes early when it is set.
+    cancel: CancelToken,
 }
 
 struct UiState {
     status: RunStatus,
-    history: VecDeque<RunRecord>,
 }
 
 enum RunStatus {
@@ -47,66 +61,296 @@ enum RunStatus {
     Running { since: OffsetDateTime },
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct RunRecord {
-    started: OffsetDateTime,
-    finished: OffsetDateTime,
-    outcome: String,
-    message: String,
-}
-
-/// Serve the web UI until the process is stopped.
-pub async fn serve(config: Config, bind: &str, port: u16) -> std::io::Result<()> {
-    let app = app(config);
+/// Serve the web UI until the process is stopped. The config page writes
+/// back to `config_file`.
+pub async fn serve(
+    config: Config,
+    config_file: &str,
+    bind: &str,
+    port: u16,
+    db: SqlitePool,
+) -> std::io::Result<()> {
+    let app = app(config, PathBuf::from(config_file), db);
 
     let addr: std::net::SocketAddr = format!("{bind}:{port}")
         .parse()
         .map_err(|ex| std::io::Error::new(std::io::ErrorKind::InvalidInput, ex))?;
-    tracing::info!("FediFetcher web UI listening on http://{addr}");
+    tracing::info!("FediFetcher web UI listening on http://{addr} (config: {config_file})");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
 }
 
 /// Build the web UI's router: the dashboard, the run trigger, hosts, logs,
-/// config, and the health check.
-pub fn app(config: Config) -> Router {
-    let mut history = VecDeque::new();
-    if let Some(record) = load_last_run(&config) {
-        history.push_back(record);
-    }
+/// the editable config page, the debug page, and the health check.
+pub fn app(config: Config, config_file: PathBuf, db: SqlitePool) -> Router {
     let state = Arc::new(AppState {
-        config,
+        config: Mutex::new(config),
+        config_file,
+        db,
         ui: Mutex::new(UiState {
             status: RunStatus::Idle,
-            history,
         }),
         run_guard: Arc::new(AsyncMutex::new(())),
+        cancel: CancelToken::new(),
     });
 
     Router::new()
         .route("/", get(dashboard))
         .route("/run", post(run))
+        .route("/stop", post(stop))
         .route("/hosts", get(hosts))
         .route("/logs", get(logs))
-        .route("/config", get(config_page))
+        .route("/config", get(config_page).post(save_config))
+        .route("/debug", get(debug_page).post(debug_post))
         .route("/healthz", get(healthz))
         .with_state(state)
 }
 
 async fn dashboard(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
-    render(move || view! { <Dashboard state=state /> })
+    tracing::debug!("GET /");
+    let history = match db::recent_runs(&state.db, HISTORY_CAPACITY).await {
+        Ok(runs) => runs,
+        Err(ex) => {
+            tracing::warn!("Could not read the run history: {ex}");
+            Vec::new()
+        }
+    };
+    render(move || view! { <Dashboard state=state history=history /> })
 }
 
 async fn hosts(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+    tracing::debug!("GET /hosts");
     render(move || view! { <HostsPage state=state /> })
 }
 
-async fn logs() -> Html<String> {
-    render(|| view! { <LogsPage /> })
+async fn logs(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+    tracing::debug!("GET /logs");
+    let config = state.config.lock().unwrap().clone();
+    let rows = match db::recent_logs(&state.db, LOG_LINES_SHOWN).await {
+        Ok(rows) => rows,
+        Err(ex) => {
+            tracing::warn!("Could not read the log: {ex}");
+            Vec::new()
+        }
+    };
+    let lines = rows
+        .iter()
+        .map(|row| logging::format_db_line(&config.log_format, &row.level, &row.ts, &row.message))
+        .collect::<Vec<_>>();
+    render(move || view! { <LogsPage lines=lines /> })
 }
 
 async fn config_page(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+    tracing::debug!("GET /config");
     render(move || view! { <ConfigPage state=state /> })
+}
+
+/// Save the config page's form: apply the fields to the effective config,
+/// write it back to the config file, and redirect to the page.
+///
+/// The redirect is what makes this work without JavaScript: the POST answers
+/// 303 See Other, and the browser follows it with a GET.
+async fn save_config(
+    AxumState(state): AxumState<Arc<AppState>>,
+    body: Bytes,
+) -> Result<Redirect, (StatusCode, Html<String>)> {
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+
+    let mut values = RawValues::new();
+    let mut remove_tokens: Vec<usize> = Vec::new();
+    let mut new_token = String::new();
+    for (key, value) in &pairs {
+        match key.as_str() {
+            "remove_access_token" => {
+                if let Ok(index) = value.parse::<usize>() {
+                    remove_tokens.push(index);
+                }
+            }
+            "new_access_token" => {
+                let token = value.trim();
+                if !token.is_empty() {
+                    new_token = token.to_string();
+                }
+            }
+            name if is_known_option(name) => {
+                // an empty field for an optional option means "unset"
+                let value = if value.is_empty() && is_optional_option(name) {
+                    Value::Null
+                } else {
+                    Value::String(value.clone())
+                };
+                values.insert(name.to_string(), value);
+            }
+            _ => {}
+        }
+    }
+
+    let mut config = state.config.lock().unwrap().clone();
+    let before = config.to_raw_values();
+    if let Err(ex) = config.apply_values(&values) {
+        tracing::warn!("POST /config: not saved: {ex}");
+        return Err(save_error(StatusCode::BAD_REQUEST, &ex.to_string()));
+    }
+    if !remove_tokens.is_empty() || !new_token.is_empty() {
+        let mut tokens: Vec<String> = config
+            .access_tokens
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !remove_tokens.contains(index))
+            .map(|(_, token)| token.clone())
+            .collect();
+        if !new_token.is_empty() {
+            tokens.push(new_token);
+        }
+        config.access_tokens = tokens;
+    }
+
+    let config_file = state.config_file.to_string_lossy().into_owned();
+    if let Err(ex) = write_config_file(&config_file, &config.to_raw_values()) {
+        tracing::warn!("POST /config: not saved: {ex}");
+        return Err(save_error(StatusCode::INTERNAL_SERVER_ERROR, &ex.to_string()));
+    }
+    let after = config.to_raw_values();
+    // option names only: the values can hold access tokens
+    let changed: Vec<String> = after
+        .keys()
+        .filter(|key| before.get(*key) != after.get(*key))
+        .cloned()
+        .collect();
+    tracing::info!("Configuration saved to {config_file}");
+    tracing::debug!(
+        "POST /config: changed options: {}",
+        if changed.is_empty() {
+            "none".to_string()
+        } else {
+            changed.join(", ")
+        }
+    );
+    *state.config.lock().unwrap() = config;
+    Ok(Redirect::to("/config"))
+}
+
+/// Options whose empty form field means "unset".
+fn is_optional_option(name: &str) -> bool {
+    matches!(name, "lock_file" | "on_start" | "on_done" | "on_fail")
+}
+
+/// A failed save: the message, and a way back to the form.
+fn save_error(status: StatusCode, message: &str) -> (StatusCode, Html<String>) {
+    let message = message.to_string();
+    let body = render(move || {
+        view! {
+            <Page title="Config".to_string()>
+                <section>
+                    <h2>"Could not save the configuration"</h2>
+                    <p><code>{message}</code></p>
+                    <p><a href="/config">"Back to the config page"</a></p>
+                </section>
+            </Page>
+        }
+    });
+    (status, body)
+}
+
+async fn debug_page(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+    tracing::debug!("GET /debug");
+    render(move || view! { <DebugPage state=state result=None /> })
+}
+
+/// Run the debug tab's form, and render the page with the result. The
+/// result is shown in the POST's own response: there is nowhere to
+/// redirect to that would not lose it.
+async fn debug_post(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -> Html<String> {
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let outcome = run_debug_action(&state, &pairs).await;
+    match &outcome {
+        DebugOutcome::Failed { message } => tracing::warn!("POST /debug: failed: {message}"),
+        _ => tracing::debug!("POST /debug: succeeded"),
+    }
+    render(move || view! { <DebugPage state=state result=Some(outcome) /> })
+}
+
+/// Run one debug action against the configured server, with the first
+/// access token.
+async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> DebugOutcome {
+    let field = |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.trim().to_string())
+            .unwrap_or_default()
+    };
+    let action = field("action");
+    let description = match action.as_str() {
+        "connect" => "test the connection".to_string(),
+        "user" => format!("look up user {}", field("user")),
+        "posts" => format!("fetch {} posts for {}", field("limit"), field("user")),
+        other => format!("unknown action {other:?}"),
+    };
+    tracing::info!("POST /debug: {description}");
+    let config = state.config.lock().unwrap().clone();
+    if config.server.is_empty() {
+        return DebugOutcome::Failed {
+            message: "No server is configured — set one on the Config page.".to_string(),
+        };
+    }
+    let Some(token) = config.access_tokens.first() else {
+        return DebugOutcome::Failed {
+            message: "No access token is configured — add one on the Config page.".to_string(),
+        };
+    };
+    let token = token.clone();
+    let base = format!("https://{}", config.server);
+    let http = HttpClient::new(config);
+    match action.as_str() {
+        "connect" => match debug::test_connection(&base, &token, &http).await {
+            Ok((instance, account)) => DebugOutcome::Connected { instance, account },
+            Err(ex) => DebugOutcome::Failed {
+                message: ex.to_string(),
+            },
+        },
+        "user" => {
+            let acct = field("user");
+            if acct.is_empty() {
+                return DebugOutcome::Failed {
+                    message: "Enter an account to look up, e.g. user@example.social.".to_string(),
+                };
+            }
+            match debug::lookup_account(&base, &acct, &token, &http).await {
+                Ok(account) => DebugOutcome::User { acct, account },
+                Err(ex) => DebugOutcome::Failed {
+                    message: ex.to_string(),
+                },
+            }
+        }
+        "posts" => {
+            let acct = field("user");
+            if acct.is_empty() {
+                return DebugOutcome::Failed {
+                    message: "Enter an account to fetch posts for, e.g. user@example.social."
+                        .to_string(),
+                };
+            }
+            let limit = field("limit").parse::<i64>().unwrap_or(10).clamp(1, 40);
+            match debug::account_posts(&base, &acct, limit, &token, &http).await {
+                Ok((account, posts)) => DebugOutcome::Posts {
+                    acct,
+                    account,
+                    posts,
+                },
+                Err(ex) => DebugOutcome::Failed {
+                    message: ex.to_string(),
+                },
+            }
+        }
+        _ => DebugOutcome::Failed {
+            message: format!("Unknown action {action:?}."),
+        },
+    }
 }
 
 async fn healthz() -> &'static str {
@@ -119,6 +363,8 @@ async fn healthz() -> &'static str {
 /// 303 See Other, and the browser follows it with a GET.
 async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     if let Ok(guard) = state.run_guard.clone().try_lock_owned() {
+        tracing::info!("POST /run: run triggered from the web UI");
+        state.cancel.reset();
         tokio::spawn(async move {
             let started = timeutil::now();
             {
@@ -126,29 +372,46 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
                 ui.status = RunStatus::Running { since: started };
             }
 
-            let outcome = run_once(state.config.clone()).await;
+            let config = state.config.lock().unwrap().clone();
+            let cancel = state.cancel.clone();
+            let outcome = run_once(config.clone(), cancel.clone()).await;
             let finished = timeutil::now();
             let (outcome_label, message) = match &outcome {
+                Ok(message) if cancel.is_cancelled() => ("stopped".to_string(), message.clone()),
                 Ok(message) => ("ok".to_string(), message.clone()),
                 Err(ex) => ("error".to_string(), ex.to_string()),
             };
-            let record = RunRecord {
-                started,
-                finished,
+            let record = RunRow {
+                started: timeutil::fmt_state_ts(started),
+                finished: timeutil::fmt_state_ts(finished),
                 outcome: outcome_label,
                 message,
             };
-            persist_last_run(&state.config, &record);
+            if let Err(ex) = db::insert_run(&state.db, &record).await {
+                tracing::warn!("Could not record the run in the database: {ex}");
+            }
 
             let mut ui = state.ui.lock().unwrap();
             ui.status = RunStatus::Idle;
-            ui.history.push_back(record);
-            if ui.history.len() > HISTORY_CAPACITY {
-                ui.history.pop_front();
-            }
             drop(ui);
             drop(guard);
         });
+    } else {
+        tracing::debug!("POST /run: a run is already in progress; trigger ignored");
+    }
+    Redirect::to("/")
+}
+
+/// Ask the running FediFetcher to stop: set the token the run checks between
+/// tasks and items, then redirect back to the dashboard. Stopping an idle UI
+/// is harmless — the next run clears the flag first.
+async fn stop(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
+    let running = matches!(state.ui.lock().unwrap().status, RunStatus::Running { .. });
+    state.cancel.cancel();
+    if running {
+        tracing::info!("POST /stop: stop requested for the running FediFetcher run");
+    } else {
+        tracing::debug!("POST /stop: no run in progress; nothing to stop");
     }
     Redirect::to("/")
 }
@@ -163,174 +426,129 @@ where
     Html(format!("<!DOCTYPE html>{}", make().to_html()))
 }
 
-/// The last run the web UI triggered, remembered across restarts.
-fn last_run_file(config: &Config) -> std::path::PathBuf {
-    config.state_dir.join("web_ui_last_run.json")
+/// One row of the config form: a text input, with the option's description
+/// as a hover tooltip (a title attribute — no JavaScript needed).
+fn text_row(name: &str, value: &str) -> AnyView {
+    let tooltip = option_description(name).map(str::to_string);
+    view! {
+        <tr>
+            <td><code>{name.to_string()}</code></td>
+            <td><input type="text" name={name.to_string()} value={value.to_string()} title=tooltip/></td>
+        </tr>
+    }
+    .into_any()
 }
 
-fn persist_last_run(config: &Config, record: &RunRecord) {
-    std::fs::create_dir_all(&config.state_dir).ok();
-    if let Ok(json) = serde_json::to_string_pretty(record) {
-        std::fs::write(last_run_file(config), json).ok();
+/// One row of the config form: a number input, with the option's description
+/// as a hover tooltip.
+fn int_row(name: &str, value: i64) -> AnyView {
+    let tooltip = option_description(name).map(str::to_string);
+    view! {
+        <tr>
+            <td><code>{name.to_string()}</code></td>
+            <td><input type="number" name={name.to_string()} value={value.to_string()} title=tooltip/></td>
+        </tr>
     }
+    .into_any()
 }
 
-fn load_last_run(config: &Config) -> Option<RunRecord> {
-    let text = std::fs::read_to_string(last_run_file(config)).ok()?;
-    serde_json::from_str(&text).ok()
+/// One row of the config form: a yes/no select, which always submits a value,
+/// with the option's description as a hover tooltip.
+fn bool_row(name: &str, value: bool) -> AnyView {
+    let tooltip = option_description(name).map(str::to_string);
+    let (yes, no) = if value {
+        (
+            view! { <option value="1" selected="selected">"yes"</option> }.into_any(),
+            view! { <option value="0">"no"</option> }.into_any(),
+        )
+    } else {
+        (
+            view! { <option value="1">"yes"</option> }.into_any(),
+            view! { <option value="0" selected="selected">"no"</option> }.into_any(),
+        )
+    };
+    view! {
+        <tr>
+            <td><code>{name.to_string()}</code></td>
+            <td>
+                <select name={name.to_string()} title=tooltip>
+                    {yes}
+                    {no}
+                </select>
+            </td>
+        </tr>
+    }
+    .into_any()
 }
 
-/// Which tasks a run will do, in the order it will do them.
-fn enabled_tasks(config: &Config) -> Vec<&'static str> {
-    let mut tasks = Vec::new();
-    if config.from_lists {
-        tasks.push("lists");
+/// The access tokens row: the current tokens masked, each with a remove
+/// checkbox, plus a password field to add one. The tokens themselves are
+/// never sent to the browser.
+fn tokens_row(config: &Config) -> AnyView {
+    let items: Vec<AnyView> = config
+        .access_tokens
+        .iter()
+        .enumerate()
+        .map(|(index, token)| {
+            let masked = masked(token);
+            view! {
+                <li>
+                    <code>{masked}</code>
+                    " "
+                    <label>
+                        <input type="checkbox" name="remove_access_token" value={index.to_string()}/>
+                        "remove"
+                    </label>
+                </li>
+            }
+            .into_any()
+        })
+        .collect();
+    view! {
+        <tr>
+            <td><code>"access_tokens"</code></td>
+            <td>
+                {if items.is_empty() {
+                    view! { <p class="muted">"No access tokens set."</p> }.into_any()
+                } else {
+                    view! { <ul class="tokens">{items}</ul> }.into_any()
+                }}
+                <p>
+                    <input type="password" name="new_access_token" placeholder="new access token"
+                        autocomplete="new-password"
+                        title=option_description("access_tokens").map(str::to_string)/>
+                </p>
+                <p class="muted">"Tokens are never shown in full; add one, or tick remove."</p>
+            </td>
+        </tr>
     }
-    if config.reply_interval_in_hours > 0 {
-        tasks.push("reply context");
-    }
-    if config.home_timeline_length > 0 {
-        tasks.push("home timeline");
-    }
-    if config.max_followings > 0 {
-        tasks.push("followings");
-    }
-    if config.max_followers > 0 {
-        tasks.push("followers");
-    }
-    if config.max_follow_requests > 0 {
-        tasks.push("follow requests");
-    }
-    if config.from_notifications > 0 {
-        tasks.push("notifications");
-    }
-    if config.max_bookmarks > 0 {
-        tasks.push("bookmarks");
-    }
-    if config.max_favourites > 0 {
-        tasks.push("favourites");
-    }
-    tasks
+    .into_any()
 }
 
-/// The effective config as rows of (name, value), tokens masked.
-fn config_rows(config: &Config) -> Vec<(String, String)> {
-    let yes_no = |value: bool| if value { "yes" } else { "no" }.to_string();
-    vec![
-        ("server".to_string(), config.server.clone()),
-        (
-            "access_tokens".to_string(),
-            config
-                .access_tokens
-                .iter()
-                .map(|token| masked(token))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
-        (
-            "user".to_string(),
-            if config.user.is_empty() {
-                "-".to_string()
-            } else {
-                config.user.clone()
-            },
-        ),
-        (
-            "reply_interval_in_hours".to_string(),
-            config.reply_interval_in_hours.to_string(),
-        ),
-        (
-            "home_timeline_length".to_string(),
-            config.home_timeline_length.to_string(),
-        ),
-        (
-            "max_followings".to_string(),
-            config.max_followings.to_string(),
-        ),
-        ("max_followers".to_string(), config.max_followers.to_string()),
-        (
-            "max_follow_requests".to_string(),
-            config.max_follow_requests.to_string(),
-        ),
-        ("max_bookmarks".to_string(), config.max_bookmarks.to_string()),
-        (
-            "max_favourites".to_string(),
-            config.max_favourites.to_string(),
-        ),
-        (
-            "from_notifications".to_string(),
-            config.from_notifications.to_string(),
-        ),
-        ("from_lists".to_string(), yes_no(config.from_lists)),
-        (
-            "max_list_length".to_string(),
-            config.max_list_length.to_string(),
-        ),
-        (
-            "max_list_accounts".to_string(),
-            config.max_list_accounts.to_string(),
-        ),
-        (
-            "max_posts_per_account".to_string(),
-            config.max_posts_per_account.to_string(),
-        ),
-        (
-            "backfill_with_context".to_string(),
-            yes_no(config.backfill_with_context),
-        ),
-        (
-            "backfill_mentioned_users".to_string(),
-            yes_no(config.backfill_mentioned_users),
-        ),
-        (
-            "respect_robots_txt".to_string(),
-            yes_no(config.respect_robots_txt),
-        ),
-        (
-            "respect_user_opt_out".to_string(),
-            yes_no(config.respect_user_opt_out),
-        ),
-        (
-            "remember_users_for_hours".to_string(),
-            config.remember_users_for_hours.to_string(),
-        ),
-        (
-            "remember_hosts_for_days".to_string(),
-            config.remember_hosts_for_days.to_string(),
-        ),
-        ("http_timeout".to_string(), config.http_timeout.to_string()),
-        (
-            "instance_blocklist".to_string(),
-            config.instance_blocklist.join(", "),
-        ),
-        (
-            "state_dir".to_string(),
-            config.state_dir.display().to_string(),
-        ),
-        (
-            "lock_file".to_string(),
-            config
-                .lock_file
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "-".to_string()),
-        ),
-        ("lock_hours".to_string(), config.lock_hours.to_string()),
-        (
-            "on_start".to_string(),
-            config.on_start.clone().unwrap_or_else(|| "-".to_string()),
-        ),
-        (
-            "on_done".to_string(),
-            config.on_done.clone().unwrap_or_else(|| "-".to_string()),
-        ),
-        (
-            "on_fail".to_string(),
-            config.on_fail.clone().unwrap_or_else(|| "-".to_string()),
-        ),
-        ("log_level".to_string(), config.log_level.clone()),
-        ("log_format".to_string(), config.log_format.clone()),
-    ]
+/// The log level row: a select of the levels `setup_logging` accepts.
+fn log_level_row(value: &str) -> AnyView {
+    let levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
+    let tooltip = option_description("log_level").map(str::to_string);
+    view! {
+        <tr>
+            <td><code>"log_level"</code></td>
+            <td>
+                <select name="log_level" title=tooltip>
+                    {levels
+                        .iter()
+                        .map(|level| {
+                            if *level == value {
+                                view! { <option value={level.to_string()} selected="selected">{level.to_string()}</option> }.into_any()
+                            } else {
+                                view! { <option value={level.to_string()}>{level.to_string()}</option> }.into_any()
+                            }
+                        })
+                        .collect::<Vec<_>>()}
+                </select>
+            </td>
+        </tr>
+    }
+    .into_any()
 }
 
 const CSS: &str = r#"
@@ -351,10 +569,18 @@ th { font-weight: 600; }
 code, pre { font-family: ui-monospace, monospace; font-size: 0.85em; }
 pre { background: #8881; padding: 0.75rem; overflow-x: auto; }
 button { font-size: 1rem; padding: 0.4rem 1rem; }
+input, select { font: inherit; padding: 0.2rem 0.4rem; }
+td input, td select { width: 100%; max-width: 30rem; box-sizing: border-box; }
+form input[type="text"] { width: 22rem; max-width: 100%; }
+form input[type="number"] { width: 6rem; }
+pre { white-space: pre-wrap; }
+ul.tokens { margin: 0.2rem 0; padding-left: 1.2rem; }
+ul.tokens label { color: #888; }
 .badge { padding: 0.1rem 0.5rem; border-radius: 0.4rem; font-size: 0.8rem; color: #fff; }
 .badge.ok { background: #2a8; }
 .badge.error { background: #c44; }
 .badge.running { background: #c83; }
+.badge.stopped { background: #777; }
 .muted { color: #888; }
 "#;
 
@@ -379,6 +605,7 @@ fn Page(title: String, children: Children) -> impl IntoView {
                         <a href="/hosts">"Hosts"</a>
                         <a href="/logs">"Logs"</a>
                         <a href="/config">"Config"</a>
+                        <a href="/debug">"Debug"</a>
                     </nav>
                 </header>
                 <main>{children()}</main>
@@ -388,30 +615,21 @@ fn Page(title: String, children: Children) -> impl IntoView {
 }
 
 #[component]
-fn Dashboard(state: Arc<AppState>) -> impl IntoView {
-    let config = state.config.clone();
+fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>) -> impl IntoView {
+    let config = state.config.lock().unwrap().clone();
     let data = StateStore::new(config.clone()).load();
-    let (status_label, status_class) = {
+    let (status_label, status_class, is_running) = {
         let ui = state.ui.lock().unwrap();
         match &ui.status {
-            RunStatus::Idle => ("Idle".to_string(), "ok".to_string()),
+            RunStatus::Idle => ("Idle".to_string(), "ok".to_string(), false),
             RunStatus::Running { since } => (
                 format!("Running since {}", timeutil::fmt_state_ts(*since)),
                 "running".to_string(),
+                true,
             ),
         }
     };
-    let history: Vec<RunRecord> = state
-        .ui
-        .lock()
-        .unwrap()
-        .history
-        .iter()
-        .rev()
-        .take(HISTORY_CAPACITY)
-        .cloned()
-        .collect();
-    let tasks = enabled_tasks(&config);
+    let tasks = config.enabled_tasks();
     let stats = vec![
         ("seen urls".to_string(), data.seen_urls.len()),
         ("known followings".to_string(), data.known_followings.len()),
@@ -438,9 +656,19 @@ fn Dashboard(state: Arc<AppState>) -> impl IntoView {
                     "Status: "
                     <span class=format!("badge {status_class}")>{status_label}</span>
                 </p>
-                <form class="run" method="post" action="/run">
-                    <button type="submit">"Run FediFetcher now"</button>
-                </form>
+                {if is_running {
+                    view! {
+                        <form class="run" method="post" action="/stop">
+                            <button type="submit">"Stop the running FediFetcher"</button>
+                        </form>
+                    }.into_any()
+                } else {
+                    view! {
+                        <form class="run" method="post" action="/run">
+                            <button type="submit">"Run FediFetcher now"</button>
+                        </form>
+                    }.into_any()
+                }}
                 <p class="muted">
                     "Server " <code>{config.server.clone()}</code>
                     " · " {config.access_tokens.len()} " access token(s)"
@@ -495,11 +723,15 @@ fn Dashboard(state: Arc<AppState>) -> impl IntoView {
                                 {history
                                     .into_iter()
                                     .map(|record| {
-                                        let badge = if record.outcome == "ok" { "ok" } else { "error" };
+                                        let badge = match record.outcome.as_str() {
+                                            "ok" => "ok",
+                                            "stopped" => "stopped",
+                                            _ => "error",
+                                        };
                                         view! {
                                             <tr>
-                                                <td>{timeutil::fmt_state_ts(record.started)}</td>
-                                                <td>{timeutil::fmt_state_ts(record.finished)}</td>
+                                                <td>{record.started}</td>
+                                                <td>{record.finished}</td>
                                                 <td><span class=format!("badge {badge}")>{record.outcome}</span></td>
                                                 <td>{record.message}</td>
                                             </tr>
@@ -517,7 +749,7 @@ fn Dashboard(state: Arc<AppState>) -> impl IntoView {
 
 #[component]
 fn HostsPage(state: Arc<AppState>) -> impl IntoView {
-    let data = StateStore::new(state.config.clone()).load();
+    let data = StateStore::new(state.config.lock().unwrap().clone()).load();
     let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
     for (host, info) in data.seen_hosts.iter() {
         let text = |key: &str| {
@@ -538,7 +770,12 @@ fn HostsPage(state: Arc<AppState>) -> impl IntoView {
         .collect::<Vec<_>>()
         .join(", ");
         let (software, apis) = if info.get("info") == Some(&Value::Null) {
-            ("lookup failed".to_string(), String::new())
+            match info.get("error").and_then(Value::as_str) {
+                Some(reason) if !reason.is_empty() => {
+                    (format!("lookup failed: {reason}"), String::new())
+                }
+                _ => ("lookup failed".to_string(), String::new()),
+            }
         } else {
             (text("software"), if apis.is_empty() { "none".to_string() } else { apis })
         };
@@ -589,13 +826,12 @@ fn HostsPage(state: Arc<AppState>) -> impl IntoView {
 }
 
 #[component]
-fn LogsPage() -> impl IntoView {
-    let lines = logging::recent_log_lines(LOG_LINES_SHOWN);
+fn LogsPage(lines: Vec<String>) -> impl IntoView {
     view! {
         <Page title="Logs".to_string()>
             <section>
                 <h2>"Recent log"</h2>
-                <p class="muted">"The last " {LOG_LINES_SHOWN} " lines."</p>
+                <p class="muted">"The last " {LOG_LINES_SHOWN} " lines, from the database in the state directory."</p>
                 <pre>{lines.join("\n")}</pre>
             </section>
         </Page>
@@ -604,27 +840,351 @@ fn LogsPage() -> impl IntoView {
 
 #[component]
 fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
-    let rows = config_rows(&state.config);
+    let config = state.config.lock().unwrap().clone();
+    let config_file = state.config_file.display().to_string();
+    let optional = |value: &Option<String>| value.clone().unwrap_or_default();
+    let mut rows: Vec<AnyView> = Vec::new();
+    rows.push(text_row("server", &config.server));
+    rows.push(tokens_row(&config));
+    rows.push(text_row("user", &config.user));
+    rows.push(int_row("reply_interval_in_hours", config.reply_interval_in_hours));
+    rows.push(int_row("home_timeline_length", config.home_timeline_length));
+    rows.push(int_row("max_followings", config.max_followings));
+    rows.push(int_row("max_followers", config.max_followers));
+    rows.push(int_row("max_follow_requests", config.max_follow_requests));
+    rows.push(int_row("max_bookmarks", config.max_bookmarks));
+    rows.push(int_row("max_favourites", config.max_favourites));
+    rows.push(int_row("from_notifications", config.from_notifications));
+    rows.push(bool_row("from_lists", config.from_lists));
+    rows.push(int_row("max_list_length", config.max_list_length));
+    rows.push(int_row("max_list_accounts", config.max_list_accounts));
+    rows.push(int_row("max_posts_per_account", config.max_posts_per_account));
+    rows.push(bool_row("backfill_with_context", config.backfill_with_context));
+    rows.push(bool_row("backfill_mentioned_users", config.backfill_mentioned_users));
+    rows.push(bool_row("respect_robots_txt", config.respect_robots_txt));
+    rows.push(bool_row("respect_user_opt_out", config.respect_user_opt_out));
+    rows.push(int_row("remember_users_for_hours", config.remember_users_for_hours));
+    rows.push(int_row("remember_hosts_for_days", config.remember_hosts_for_days));
+    rows.push(int_row("http_timeout", config.http_timeout));
+    rows.push(text_row("instance_blocklist", &config.instance_blocklist.join(", ")));
+    rows.push(text_row("state_dir", &config.state_dir.display().to_string()));
+    rows.push(text_row(
+        "lock_file",
+        &config.lock_file.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
+    ));
+    rows.push(int_row("lock_hours", config.lock_hours));
+    rows.push(text_row("on_start", &optional(&config.on_start)));
+    rows.push(text_row("on_done", &optional(&config.on_done)));
+    rows.push(text_row("on_fail", &optional(&config.on_fail)));
+    rows.push(log_level_row(&config.log_level));
+    rows.push(text_row("log_format", &config.log_format));
     view! {
         <Page title="Config".to_string()>
             <section>
-                <h2>"Effective configuration"</h2>
-                <table>
-                    <tbody>
-                        {rows
-                            .into_iter()
-                            .map(|(name, value)| {
-                                view! {
-                                    <tr>
-                                        <td><code>{name}</code></td>
-                                        <td>{value}</td>
-                                    </tr>
-                                }
-                            })
-                            .collect::<Vec<_>>()}
-                    </tbody>
-                </table>
+                <h2>"Edit configuration"</h2>
+                <p class="muted">
+                    "Saved to " <code>{config_file}</code>
+                    ". Runs use the saved values; log level and format apply on restart."
+                </p>
+                <p class="muted">"Hover a field for what it does."</p>
+                <form method="post" action="/config">
+                    <table>
+                        <tbody>{rows}</tbody>
+                    </table>
+                    <p><button type="submit">"Save configuration"</button></p>
+                </form>
             </section>
         </Page>
+    }
+}
+
+#[component]
+fn DebugPage(state: Arc<AppState>, result: Option<DebugOutcome>) -> impl IntoView {
+    let config = state.config.lock().unwrap().clone();
+    let server = if config.server.is_empty() {
+        "not set".to_string()
+    } else {
+        config.server.clone()
+    };
+    let token_hint = config
+        .access_tokens
+        .first()
+        .map(|token| masked(token))
+        .unwrap_or_else(|| "none".to_string());
+    view! {
+        <Page title="Debug".to_string()>
+            <section>
+                <h2>"Test connection"</h2>
+                <p class="muted">
+                    "Asks " <code>{server.clone()}</code> " what it is, and whether it accepts the first access token (" {token_hint.clone()} ")."
+                </p>
+                <form method="post" action="/debug">
+                    <input type="hidden" name="action" value="connect"/>
+                    <button type="submit">"Test connection"</button>
+                </form>
+            </section>
+            <section>
+                <h2>"Look up a user"</h2>
+                <form method="post" action="/debug">
+                    <input type="hidden" name="action" value="user"/>
+                    <p>
+                        <input type="text" name="user" placeholder="user@example.social" required/>
+                        <button type="submit">"Look up"</button>
+                    </p>
+                </form>
+            </section>
+            <section>
+                <h2>"Recent posts"</h2>
+                <form method="post" action="/debug">
+                    <input type="hidden" name="action" value="posts"/>
+                    <p>
+                        <input type="text" name="user" placeholder="user@example.social" required/>
+                        <input type="number" name="limit" value="10" min="1" max="40"/>
+                        " posts"
+                        <button type="submit">"Fetch posts"</button>
+                    </p>
+                </form>
+            </section>
+            {result.map(|outcome| debug_result_view(&outcome))}
+        </Page>
+    }
+}
+
+/// The result of a debug action, as a section at the bottom of the page.
+fn debug_result_view(outcome: &DebugOutcome) -> AnyView {
+    match outcome {
+        DebugOutcome::Connected { instance, account } => {
+            let instance_rows = [
+                ("title", text_field(instance, "title")),
+                ("uri", text_field(instance, "uri")),
+                ("version", text_field(instance, "version")),
+            ];
+            view! {
+                <section class="result">
+                    <h2>"Connection"</h2>
+                    <p>
+                        <span class="badge ok">"ok"</span>
+                        " The server answered, and accepted the access token."
+                    </p>
+                    <table>
+                        <tbody>
+                            {instance_rows
+                                .iter()
+                                .map(|(name, value)| {
+                                    view! {
+                                        <tr>
+                                            <td>{name.to_string()}</td>
+                                            <td>{value.clone()}</td>
+                                        </tr>
+                                    }
+                                })
+                                .collect::<Vec<_>>()}
+                        </tbody>
+                    </table>
+                    {account_view(account)}
+                </section>
+            }
+            .into_any()
+        }
+        DebugOutcome::User { acct, account } => view! {
+            <section class="result">
+                <h2>"User"</h2>
+                <p>
+                    <span class="badge ok">"ok"</span>
+                    " Found " <code>{acct.clone()}</code> "."
+                </p>
+                {account_view(account)}
+            </section>
+        }
+        .into_any(),
+        DebugOutcome::Posts {
+            acct,
+            account,
+            posts,
+        } => {
+            let rows: Vec<AnyView> = posts
+                .iter()
+                .map(|post| {
+                    let url = text_field(post, "url");
+                    let content = snippet(post.get("content").and_then(Value::as_str).unwrap_or(""));
+                    view! {
+                        <tr>
+                            <td>{text_field(post, "created_at")}</td>
+                            <td>{text_field(post, "visibility")}</td>
+                            <td>{int_field(post, "replies_count")}</td>
+                            <td>{int_field(post, "reblogs_count")}</td>
+                            <td>{int_field(post, "favourites_count")}</td>
+                            <td><a href={url.clone()}>{content}</a></td>
+                        </tr>
+                    }
+                    .into_any()
+                })
+                .collect();
+            view! {
+                <section class="result">
+                    <h2>"Recent posts"</h2>
+                    <p>
+                        <span class="badge ok">"ok"</span>
+                        " " {posts.len().to_string()} " post(s) by "
+                        <code>{acct.clone()}</code>
+                        " (" <code>{text_field(account, "acct")}</code> ")."
+                    </p>
+                    {if rows.is_empty() {
+                        view! { <p class="muted">"No posts."</p> }.into_any()
+                    } else {
+                        view! {
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"Created"</th>
+                                        <th>"Visibility"</th>
+                                        <th>"Replies"</th>
+                                        <th>"Boosts"</th>
+                                        <th>"Favourites"</th>
+                                        <th>"Post"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>{rows}</tbody>
+                            </table>
+                        }
+                        .into_any()
+                    }}
+                </section>
+            }
+            .into_any()
+        }
+        DebugOutcome::Failed { message } => view! {
+            <section class="result">
+                <h2>"Result"</h2>
+                <p><span class="badge error">"failed"</span></p>
+                <pre>{message.clone()}</pre>
+            </section>
+        }
+        .into_any(),
+    }
+}
+
+/// An account's basic fields, as a table.
+fn account_view(account: &Value) -> AnyView {
+    let url = text_field(account, "url");
+    let mut rows: Vec<AnyView> = [
+        ("acct", text_field(account, "acct")),
+        ("display name", text_field(account, "display_name")),
+        ("id", text_field(account, "id")),
+        ("created", text_field(account, "created_at")),
+        ("followers", int_field(account, "followers_count")),
+        ("following", int_field(account, "following_count")),
+        ("posts", int_field(account, "statuses_count")),
+        ("bot", text_field(account, "bot")),
+        ("locked", text_field(account, "locked")),
+    ]
+    .iter()
+    .map(|(name, value)| {
+        view! {
+            <tr>
+                <td>{name.to_string()}</td>
+                <td>{value.clone()}</td>
+            </tr>
+        }
+        .into_any()
+    })
+    .collect();
+    let link = url.clone();
+    rows.push(
+        view! {
+            <tr>
+                <td>"url"</td>
+                <td><a href={link}>{url}</a></td>
+            </tr>
+        }
+        .into_any(),
+    );
+    let note = snippet(account.get("note").and_then(Value::as_str).unwrap_or(""));
+    if !note.is_empty() {
+        rows.push(
+            view! {
+                <tr>
+                    <td>"note"</td>
+                    <td>{note}</td>
+                </tr>
+            }
+            .into_any(),
+        );
+    }
+    view! {
+        <table>
+            <tbody>{rows}</tbody>
+        </table>
+    }
+    .into_any()
+}
+
+/// A string field of a JSON object, or "-" when it is absent or empty.
+fn text_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("-")
+        .to_string()
+}
+
+/// A count field of a JSON object, or "-" when it is absent.
+fn int_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// Plain text for a bit of HTML: tags gone, entities read, one line, short.
+fn snippet(html: &str) -> String {
+    let without_tags = Regex::new(r"<[^>]*>").unwrap().replace_all(html, " ");
+    let text = without_tags
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > 200 {
+        let mut truncated: String = collapsed.chars().take(200).collect();
+        truncated.push_str("...");
+        truncated
+    } else {
+        collapsed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn snippet_strips_html_and_reads_entities() {
+        assert_eq!(snippet("<p>Hello <b>world</b></p>"), "Hello world");
+        assert_eq!(snippet("a &amp; b &lt; c &gt; d"), "a & b < c > d");
+        assert_eq!(snippet("<p>one\n  two</p>"), "one two");
+        assert_eq!(snippet(""), "");
+    }
+
+    #[test]
+    fn snippet_truncates_long_text() {
+        let long = format!("<p>{}</p>", "x".repeat(500));
+        let text = snippet(&long);
+        assert_eq!(text.len(), 203, "200 characters and an ellipsis");
+        assert!(text.ends_with("..."));
+    }
+
+    #[test]
+    fn json_fields_render_or_dash() {
+        let account = json!({"acct": "me", "followers_count": 12, "note": ""});
+        assert_eq!(text_field(&account, "acct"), "me");
+        assert_eq!(text_field(&account, "url"), "-");
+        assert_eq!(text_field(&account, "note"), "-", "empty is absent");
+        assert_eq!(int_field(&account, "followers_count"), "12");
+        assert_eq!(int_field(&account, "id"), "-");
     }
 }

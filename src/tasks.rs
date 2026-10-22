@@ -14,16 +14,19 @@ use crate::context::{
 use crate::error::Result;
 use crate::http::HttpClient;
 use crate::posts::Post;
+use crate::run::CancelToken;
 use crate::store::State;
 use crate::timeutil;
 use crate::users::User;
 
-/// Everything a task needs: the settings, what we remember, and who to ask.
+/// Everything a task needs: the settings, what we remember, who to ask, and
+/// how to stop.
 pub struct Context<'a> {
     pub config: &'a Config,
     pub state: &'a mut State,
     pub http: &'a HttpClient,
     pub home: &'a HomeServer,
+    pub cancel: CancelToken,
 }
 
 /// Get all replies to other users by the given users in the last day.
@@ -31,6 +34,7 @@ pub async fn get_all_reply_toots(
     home: &HomeServer,
     user_ids: &[String],
     reply_interval_hours: i64,
+    cancel: &CancelToken,
     state: &mut State,
 ) -> Vec<Post> {
     // a post's date is UTC, so the window has to be measured in UTC too:
@@ -39,6 +43,9 @@ pub async fn get_all_reply_toots(
     let replies_since = timeutil::now() - Duration::hours(reply_interval_hours);
     let mut reply_toots = Vec::new();
     for user_id in user_ids {
+        if cancel.is_cancelled() {
+            break;
+        }
         reply_toots.extend(get_reply_toots(user_id, home, replies_since, state).await);
     }
     info!("Found {} reply toots", reply_toots.len());
@@ -82,11 +89,12 @@ async fn fetch_timeline_context(
     home: &HomeServer,
     http: &HttpClient,
     config: &Config,
+    cancel: &CancelToken,
     state: &mut State,
 ) {
     let known_context_urls =
-        get_all_known_context_urls(&config.server, &timeline_posts, http, state).await;
-    add_context_urls(home, known_context_urls, state).await;
+        get_all_known_context_urls(&config.server, &timeline_posts, http, cancel, state).await;
+    add_context_urls(home, known_context_urls, cancel, state).await;
 
     // Backfill any post authors, and any mentioned users
     if config.backfill_mentioned_users {
@@ -109,7 +117,16 @@ async fn fetch_timeline_context(
         }
 
         let new_users = filter_known_users(mentioned_users, &state.all_known_users);
-        add_user_posts(home, new_users, UserSet::RecentlyCheckedUsers, http, config, state).await;
+        add_user_posts(
+            home,
+            new_users,
+            UserSet::RecentlyCheckedUsers,
+            http,
+            config,
+            cancel,
+            state,
+        )
+        .await;
     }
 }
 
@@ -139,7 +156,15 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 timeline_toots.len(),
                 user_list.title
             );
-            fetch_timeline_context(timeline_toots, ctx.home, ctx.http, ctx.config, ctx.state).await;
+            fetch_timeline_context(
+                timeline_toots,
+                ctx.home,
+                ctx.http,
+                ctx.config,
+                &ctx.cancel,
+                ctx.state,
+            )
+            .await;
         }
 
         if ctx.config.max_list_accounts > 0 {
@@ -158,6 +183,7 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 UserSet::RecentlyCheckedUsers,
                 ctx.http,
                 ctx.config,
+                &ctx.cancel,
                 ctx.state,
             )
             .await;
@@ -176,17 +202,36 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
         ctx.home,
         &user_ids,
         ctx.config.reply_interval_in_hours,
+        &ctx.cancel,
         ctx.state,
     )
     .await;
-    let known_context_urls =
-        get_all_known_context_urls(&ctx.config.server, &reply_toots, ctx.http, ctx.state).await;
+    let known_context_urls = get_all_known_context_urls(
+        &ctx.config.server,
+        &reply_toots,
+        ctx.http,
+        &ctx.cancel,
+        ctx.state,
+    )
+    .await;
     ctx.state.seen_urls.update(known_context_urls);
-    let replied_toot_ids =
-        get_all_replied_toot_server_ids(&ctx.config.server, &reply_toots, ctx.http, ctx.state).await;
-    let context_urls =
-        get_all_context_urls(&ctx.config.server, replied_toot_ids, ctx.http, ctx.state).await;
-    add_context_urls(ctx.home, context_urls, ctx.state).await;
+    let replied_toot_ids = get_all_replied_toot_server_ids(
+        &ctx.config.server,
+        &reply_toots,
+        ctx.http,
+        &ctx.cancel,
+        ctx.state,
+    )
+    .await;
+    let context_urls = get_all_context_urls(
+        &ctx.config.server,
+        replied_toot_ids,
+        ctx.http,
+        &ctx.cancel,
+        ctx.state,
+    )
+    .await;
+    add_context_urls(ctx.home, context_urls, &ctx.cancel, ctx.state).await;
     Ok(())
 }
 
@@ -194,7 +239,15 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
 async fn fetch_home_timeline(ctx: &mut Context<'_>) -> Result<()> {
     info!("Getting context for home timeline");
     let timeline_toots = ctx.home.timeline(ctx.config.home_timeline_length).await?;
-    fetch_timeline_context(timeline_toots, ctx.home, ctx.http, ctx.config, ctx.state).await;
+    fetch_timeline_context(
+        timeline_toots,
+        ctx.home,
+        ctx.http,
+        ctx.config,
+        &ctx.cancel,
+        ctx.state,
+    )
+    .await;
     Ok(())
 }
 
@@ -216,6 +269,7 @@ async fn backfill_followings(ctx: &mut Context<'_>) -> Result<()> {
         UserSet::KnownFollowings,
         ctx.http,
         ctx.config,
+        &ctx.cancel,
         ctx.state,
     )
     .await;
@@ -237,6 +291,7 @@ async fn backfill_followers(ctx: &mut Context<'_>) -> Result<()> {
         UserSet::RecentlyCheckedUsers,
         ctx.http,
         ctx.config,
+        &ctx.cancel,
         ctx.state,
     )
     .await;
@@ -263,6 +318,7 @@ async fn backfill_follow_requests(ctx: &mut Context<'_>) -> Result<()> {
         UserSet::RecentlyCheckedUsers,
         ctx.http,
         ctx.config,
+        &ctx.cancel,
         ctx.state,
     )
     .await;
@@ -287,6 +343,7 @@ async fn backfill_from_notifications(ctx: &mut Context<'_>) -> Result<()> {
         UserSet::RecentlyCheckedUsers,
         ctx.http,
         ctx.config,
+        &ctx.cancel,
         ctx.state,
     )
     .await;
@@ -313,9 +370,15 @@ async fn fetch_favourite_context(ctx: &mut Context<'_>) -> Result<()> {
 }
 
 async fn pull_context_for(ctx: &mut Context<'_>, posts: Vec<Post>) {
-    let known_context_urls =
-        get_all_known_context_urls(&ctx.config.server, &posts, ctx.http, ctx.state).await;
-    add_context_urls(ctx.home, known_context_urls, ctx.state).await;
+    let known_context_urls = get_all_known_context_urls(
+        &ctx.config.server,
+        &posts,
+        ctx.http,
+        &ctx.cancel,
+        ctx.state,
+    )
+    .await;
+    add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;
 }
 
 /// The user whose followings and followers are backfilled, if a specific one
@@ -329,30 +392,57 @@ fn config_user(config: &Config) -> Option<&str> {
 }
 
 /// Run each task whose setting asks for it, in the Python original's order.
+///
+/// A cancelled run stops between tasks: whatever finished is kept, and the
+/// run reports that it was stopped.
 pub async fn run_enabled_tasks(ctx: &mut Context<'_>) -> Result<()> {
     if ctx.config.from_lists {
         fetch_from_lists(ctx).await?;
     }
+    if ctx.cancel.is_cancelled() {
+        return Ok(());
+    }
     if ctx.config.reply_interval_in_hours > 0 {
         fetch_reply_context(ctx).await?;
+    }
+    if ctx.cancel.is_cancelled() {
+        return Ok(());
     }
     if ctx.config.home_timeline_length > 0 {
         fetch_home_timeline(ctx).await?;
     }
+    if ctx.cancel.is_cancelled() {
+        return Ok(());
+    }
     if ctx.config.max_followings > 0 {
         backfill_followings(ctx).await?;
+    }
+    if ctx.cancel.is_cancelled() {
+        return Ok(());
     }
     if ctx.config.max_followers > 0 {
         backfill_followers(ctx).await?;
     }
+    if ctx.cancel.is_cancelled() {
+        return Ok(());
+    }
     if ctx.config.max_follow_requests > 0 {
         backfill_follow_requests(ctx).await?;
+    }
+    if ctx.cancel.is_cancelled() {
+        return Ok(());
     }
     if ctx.config.from_notifications > 0 {
         backfill_from_notifications(ctx).await?;
     }
+    if ctx.cancel.is_cancelled() {
+        return Ok(());
+    }
     if ctx.config.max_bookmarks > 0 {
         fetch_bookmark_context(ctx).await?;
+    }
+    if ctx.cancel.is_cancelled() {
+        return Ok(());
     }
     if ctx.config.max_favourites > 0 {
         fetch_favourite_context(ctx).await?;

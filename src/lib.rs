@@ -9,6 +9,8 @@ pub mod api;
 pub mod backfill;
 pub mod config;
 pub mod context;
+pub mod db;
+pub mod debug;
 pub mod error;
 pub mod http;
 pub mod lists;
