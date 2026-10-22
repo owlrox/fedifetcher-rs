@@ -88,13 +88,36 @@ pub async fn insert_log(pool: &SqlitePool, row: &LogRow) -> Result<()> {
     Ok(())
 }
 
-/// The most recent log lines, oldest first.
-pub async fn recent_logs(pool: &SqlitePool, max: usize) -> Result<Vec<LogRow>> {
+/// Which column of the log table the /logs page sorts by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogSort {
+    Time,
+    Level,
+    Message,
+}
+
+/// The direction the /logs page sorts the log table in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogOrder {
+    Asc,
+    Desc,
+}
+
+/// The most recent log lines, sorted as the /logs page asks. The newest
+/// `max` lines are fetched, then that page is sorted by `sort`; lines equal
+/// on the sorted column keep their newest-first order.
+pub async fn recent_logs(
+    pool: &SqlitePool,
+    max: usize,
+    sort: LogSort,
+    order: LogOrder,
+) -> Result<Vec<LogRow>> {
     let rows = sqlx::query("SELECT ts, level, target, message FROM logs ORDER BY id DESC LIMIT ?")
         .bind(max as i64)
         .fetch_all(pool)
         .await
         .map_err(db_error)?;
+    // newest first
     let mut lines: Vec<LogRow> = rows
         .iter()
         .map(|row| LogRow {
@@ -104,8 +127,33 @@ pub async fn recent_logs(pool: &SqlitePool, max: usize) -> Result<Vec<LogRow>> {
             message: row.get("message"),
         })
         .collect();
-    lines.reverse();
+    if sort != LogSort::Time {
+        // a stable sort, so equal keys keep the newest-first order above
+        lines.sort_by(|a, b| match sort {
+            LogSort::Level => a.level.cmp(&b.level),
+            LogSort::Message => a.message.cmp(&b.message),
+            LogSort::Time => std::cmp::Ordering::Equal,
+        });
+    }
+    match (sort, order) {
+        // time order is already newest first
+        (LogSort::Time, LogOrder::Desc) => {}
+        (LogSort::Time, LogOrder::Asc) => lines.reverse(),
+        // the sort above is ascending; flip it for descending
+        (_, LogOrder::Asc) => {}
+        (_, LogOrder::Desc) => lines.reverse(),
+    }
     Ok(lines)
+}
+
+/// Delete every log line; the /logs page's clear button. Lines already on
+/// stderr stay there; the database is what the page reads.
+pub async fn clear_logs(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("DELETE FROM logs")
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(())
 }
 
 /// Keep only the newest `keep` log lines.
@@ -182,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn log_lines_round_trip_oldest_first() {
+    async fn log_lines_round_trip_newest_first() {
         let (config, dir) = test_config();
         let pool = open(&config).await.unwrap();
         assert!(dir.join("fedifetcher.db").exists(), "the file is created");
@@ -191,11 +239,27 @@ mod tests {
         insert_log(&pool, &log_row("second")).await.unwrap();
         insert_log(&pool, &log_row("third")).await.unwrap();
 
-        let lines = recent_logs(&pool, 10).await.unwrap();
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+            .await
+            .unwrap();
         let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
-        assert_eq!(messages, ["first", "second", "third"]);
+        assert_eq!(messages, ["third", "second", "first"]);
         assert_eq!(lines[0].level, "INFO");
         assert_eq!(lines[0].target, "fedifetcher::test");
+    }
+
+    #[tokio::test]
+    async fn time_ascending_is_oldest_first() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        for message in ["first", "second", "third"] {
+            insert_log(&pool, &log_row(message)).await.unwrap();
+        }
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Asc)
+            .await
+            .unwrap();
+        let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
+        assert_eq!(messages, ["first", "second", "third"]);
     }
 
     #[tokio::test]
@@ -205,9 +269,68 @@ mod tests {
         for n in 0..5 {
             insert_log(&pool, &log_row(&format!("line {n}"))).await.unwrap();
         }
-        let lines = recent_logs(&pool, 2).await.unwrap();
+        let lines = recent_logs(&pool, 2, LogSort::Time, LogOrder::Desc)
+            .await
+            .unwrap();
         let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
-        assert_eq!(messages, ["line 3", "line 4"]);
+        assert_eq!(messages, ["line 4", "line 3"]);
+    }
+
+    #[tokio::test]
+    async fn sorting_by_level_orders_alphabetically() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        for (level, message) in [("ERROR", "c"), ("INFO", "a"), ("DEBUG", "b")] {
+            let mut row = log_row(message);
+            row.level = level.to_string();
+            insert_log(&pool, &row).await.unwrap();
+        }
+        let ascending = recent_logs(&pool, 10, LogSort::Level, LogOrder::Asc)
+            .await
+            .unwrap();
+        let messages: Vec<&str> = ascending.iter().map(|row| row.message.as_str()).collect();
+        assert_eq!(messages, ["b", "c", "a"], "DEBUG, ERROR, INFO");
+        let descending = recent_logs(&pool, 10, LogSort::Level, LogOrder::Desc)
+            .await
+            .unwrap();
+        let messages: Vec<&str> = descending.iter().map(|row| row.message.as_str()).collect();
+        assert_eq!(messages, ["a", "c", "b"], "INFO, ERROR, DEBUG");
+    }
+
+    #[tokio::test]
+    async fn sorting_by_message_orders_alphabetically() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        for message in ["zebra", "apple", "mango"] {
+            insert_log(&pool, &log_row(message)).await.unwrap();
+        }
+        let lines = recent_logs(&pool, 10, LogSort::Message, LogOrder::Asc)
+            .await
+            .unwrap();
+        let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
+        assert_eq!(messages, ["apple", "mango", "zebra"]);
+    }
+
+    #[tokio::test]
+    async fn clearing_removes_every_line() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        for n in 0..3 {
+            insert_log(&pool, &log_row(&format!("line {n}"))).await.unwrap();
+        }
+        clear_logs(&pool).await.unwrap();
+        assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+            .await
+            .unwrap()
+            .is_empty());
+        // clearing an empty log is fine, and new lines still arrive
+        clear_logs(&pool).await.unwrap();
+        insert_log(&pool, &log_row("after clearing")).await.unwrap();
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+            .await
+            .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].message, "after clearing");
     }
 
     #[tokio::test]
@@ -218,7 +341,9 @@ mod tests {
             insert_log(&pool, &log_row(&format!("line {n}"))).await.unwrap();
         }
         prune_logs(&pool, 1).await.unwrap();
-        let lines = recent_logs(&pool, 10).await.unwrap();
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+            .await
+            .unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].message, "line 2");
     }
@@ -228,7 +353,10 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
         prune_logs(&pool, 100).await.unwrap();
-        assert!(recent_logs(&pool, 10).await.unwrap().is_empty());
+        assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -282,7 +410,9 @@ mod tests {
         drop(pool);
 
         let pool = open(&config).await.unwrap();
-        let lines = recent_logs(&pool, 10).await.unwrap();
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+            .await
+            .unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].message, "remember me");
     }

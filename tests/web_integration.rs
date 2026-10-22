@@ -223,13 +223,135 @@ async fn the_logs_page_renders_lines_from_the_database() {
     let (status, body) = get(&format!("{base}/logs")).await;
     assert_eq!(status, 200);
     assert!(
-        body.contains("a line only the database knows"),
-        "the page should render the database's lines"
+        body.contains("<table"),
+        "the log should render as a table"
     );
     assert!(
-        body.contains("2026-10-22 16:05:07 -05:00: a line only the database knows"),
-        "the line should be formatted like a live one"
+        body.contains("<td>2026-10-22 16:05:07 -05:00</td>"),
+        "the time column shows the entry's timestamp"
     );
+    assert!(
+        body.contains("<td>INFO</td>"),
+        "the level column shows the entry's level"
+    );
+    assert!(
+        body.contains("<td>a line only the database knows</td>"),
+        "the message column shows the entry's message"
+    );
+    assert!(
+        body.contains("action=\"/logs/clear\""),
+        "the page offers a clear button"
+    );
+    assert!(
+        body.contains("/logs?sort=level&amp;dir=desc"),
+        "the column headings link to sorted views"
+    );
+}
+
+/// Insert one log line straight into the database, as the log layer would.
+async fn insert_log(dir: &std::path::Path, ts: &str, level: &str, message: &str) {
+    let config = common::test_config(dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    fedifetcher::db::insert_log(
+        &db,
+        &fedifetcher::db::LogRow {
+            ts: ts.to_string(),
+            level: level.to_string(),
+            target: "fedifetcher::web".to_string(),
+            message: message.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_logs_page_shows_the_newest_entries_first() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    insert_log(&dir, "2026-10-22 16:05:01 -05:00", "INFO", "the older line").await;
+    insert_log(&dir, "2026-10-22 16:05:09 -05:00", "INFO", "the newer line").await;
+
+    let (status, body) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+    let newer = body.find("the newer line").expect("the newer line renders");
+    let older = body.find("the older line").expect("the older line renders");
+    assert!(newer < older, "the newest entry should come first");
+}
+
+#[tokio::test]
+async fn the_logs_page_sorts_by_the_clicked_column() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let ts = "2026-10-22 16:05:07 -05:00";
+    insert_log(&dir, ts, "INFO", "an info line").await;
+    insert_log(&dir, ts, "ERROR", "an error line").await;
+    insert_log(&dir, ts, "DEBUG", "a debug line").await;
+
+    // sorted by level, ascending: DEBUG, ERROR, INFO
+    let (status, body) = get(&format!("{base}/logs?sort=level&dir=asc")).await;
+    assert_eq!(status, 200);
+    let debug = body.find("a debug line").unwrap();
+    let error = body.find("an error line").unwrap();
+    let info = body.find("an info line").unwrap();
+    assert!(
+        debug < error && error < info,
+        "ascending level order should be DEBUG, ERROR, INFO"
+    );
+    // the sorted column's heading shows the direction and offers to flip it
+    assert!(body.contains("(asc)"), "the sorted column shows its direction");
+    assert!(
+        body.contains("/logs?sort=level&amp;dir=desc"),
+        "clicking the sorted column flips the direction"
+    );
+
+    // sorted by level, descending: INFO, ERROR, DEBUG
+    let (_, body) = get(&format!("{base}/logs?sort=level&dir=desc")).await;
+    let debug = body.find("a debug line").unwrap();
+    let error = body.find("an error line").unwrap();
+    let info = body.find("an info line").unwrap();
+    assert!(
+        info < error && error < debug,
+        "descending level order should be INFO, ERROR, DEBUG"
+    );
+
+    // an unknown sort falls back to newest first
+    let (_, body) = get(&format!("{base}/logs?sort=nonsense")).await;
+    assert!(body.contains("(desc)"), "the fallback sort is newest first");
+}
+
+#[tokio::test]
+async fn posting_clear_log_empties_the_database() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    insert_log(&dir, "2026-10-22 16:05:07 -05:00", "INFO", "a line to clear").await;
+
+    let resp = client()
+        .post(format!("{base}/logs/clear"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303, "the POST must redirect");
+    assert_eq!(resp.headers().get("Location").unwrap(), "/logs");
+
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let rows = fedifetcher::db::recent_logs(
+        &db,
+        10,
+        fedifetcher::db::LogSort::Time,
+        fedifetcher::db::LogOrder::Desc,
+    )
+    .await
+    .unwrap();
+    assert!(rows.is_empty(), "the clear button empties the database");
+
+    let (status, body) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("No log entries yet."));
 }
 
 #[tokio::test]

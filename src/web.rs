@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
-use axum::extract::State as AxumState;
+use axum::extract::{Query, State as AxumState};
 use axum::http::StatusCode;
 use axum::response::{Html, Redirect};
 use axum::routing::{get, post};
@@ -21,10 +21,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::api::mastodon::masked;
 use crate::config::{Config, RawValues, is_known_option, option_description, write_config_file};
-use crate::db::{self, RunRow};
+use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::http::HttpClient;
-use crate::logging;
 use crate::run::{CancelToken, run_once};
 use crate::store::StateStore;
 use crate::timeutil;
@@ -100,6 +99,7 @@ pub fn app(config: Config, config_file: PathBuf, db: SqlitePool) -> Router {
         .route("/stop", post(stop))
         .route("/hosts", get(hosts))
         .route("/logs", get(logs))
+        .route("/logs/clear", post(clear_logs))
         .route("/config", get(config_page).post(save_config))
         .route("/debug", get(debug_page).post(debug_post))
         .route("/healthz", get(healthz))
@@ -123,21 +123,46 @@ async fn hosts(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
     render(move || view! { <HostsPage state=state /> })
 }
 
-async fn logs(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+/// The /logs page's query string: which column to sort by, and which way.
+/// Unknown values fall back to the defaults, newest first.
+#[derive(serde::Deserialize)]
+struct LogsQuery {
+    sort: Option<String>,
+    dir: Option<String>,
+}
+
+async fn logs(
+    AxumState(state): AxumState<Arc<AppState>>,
+    Query(query): Query<LogsQuery>,
+) -> Html<String> {
     tracing::debug!("GET /logs");
-    let config = state.config.lock().unwrap().clone();
-    let rows = match db::recent_logs(&state.db, LOG_LINES_SHOWN).await {
+    let sort = match query.sort.as_deref() {
+        Some("level") => LogSort::Level,
+        Some("message") => LogSort::Message,
+        _ => LogSort::Time,
+    };
+    let order = match query.dir.as_deref() {
+        Some("asc") => LogOrder::Asc,
+        _ => LogOrder::Desc,
+    };
+    let rows = match db::recent_logs(&state.db, LOG_LINES_SHOWN, sort, order).await {
         Ok(rows) => rows,
         Err(ex) => {
             tracing::warn!("Could not read the log: {ex}");
             Vec::new()
         }
     };
-    let lines = rows
-        .iter()
-        .map(|row| logging::format_db_line(&config.log_format, &row.level, &row.ts, &row.message))
-        .collect::<Vec<_>>();
-    render(move || view! { <LogsPage lines=lines /> })
+    render(move || view! { <LogsPage rows=rows sort=sort order=order /> })
+}
+
+/// Empty the log the /logs page shows, and redirect back to it.
+async fn clear_logs(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
+    tracing::info!("POST /logs/clear: clearing the log");
+    match db::clear_logs(&state.db).await {
+        Ok(()) => tracing::info!("The log is cleared"),
+        Err(ex) => tracing::warn!("Could not clear the log: {ex}"),
+    }
+    Redirect::to("/logs")
 }
 
 async fn config_page(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
@@ -826,16 +851,70 @@ fn HostsPage(state: Arc<AppState>) -> impl IntoView {
 }
 
 #[component]
-fn LogsPage(lines: Vec<String>) -> impl IntoView {
+fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder) -> impl IntoView {
     view! {
         <Page title="Logs".to_string()>
             <section>
                 <h2>"Recent log"</h2>
-                <p class="muted">"The last " {LOG_LINES_SHOWN} " lines, from the database in the state directory."</p>
-                <pre>{lines.join("\n")}</pre>
+                <p class="muted">
+                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction."
+                </p>
+                <form method="post" action="/logs/clear">
+                    <button type="submit">"Clear log"</button>
+                </form>
+                {if rows.is_empty() {
+                    view! { <p class="muted">"No log entries yet."</p> }.into_any()
+                } else {
+                    view! {
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>{sort_link("Time", "ts", LogSort::Time, sort, order)}</th>
+                                    <th>{sort_link("Level", "level", LogSort::Level, sort, order)}</th>
+                                    <th>{sort_link("Message", "message", LogSort::Message, sort, order)}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rows
+                                    .into_iter()
+                                    .map(|row| {
+                                        view! {
+                                            <tr>
+                                                <td>{row.ts}</td>
+                                                <td>{row.level}</td>
+                                                <td>{row.message}</td>
+                                            </tr>
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()}
+                            </tbody>
+                        </table>
+                    }.into_any()
+                }}
             </section>
         </Page>
     }
+}
+
+/// A column heading that links to the same page sorted by that column.
+/// Clicking the column that is already sorted flips the direction.
+fn sort_link(label: &str, param: &str, column: LogSort, current: LogSort, order: LogOrder) -> AnyView {
+    let dir = if current == column && order == LogOrder::Desc {
+        "asc"
+    } else {
+        "desc"
+    };
+    let href = format!("/logs?sort={param}&dir={dir}");
+    let label = label.to_string();
+    let shown = if current == column {
+        match order {
+            LogOrder::Desc => " (desc)",
+            LogOrder::Asc => " (asc)",
+        }
+    } else {
+        ""
+    };
+    view! { <a href={href}>{label}{shown}</a> }.into_any()
 }
 
 #[component]
