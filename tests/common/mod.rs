@@ -1,5 +1,9 @@
 //! Shared helpers for the integration tests.
 
+// Each integration test binary compiles this module, but only some use every
+// helper (LogCapture is only used by the http and backfill suites).
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 
 use fedifetcher::config::Config;
