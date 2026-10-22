@@ -168,6 +168,85 @@ async fn blocklisted_hosts_are_never_contacted() {
     assert_eq!(api.hits(), 0);
 }
 
+#[tokio::test]
+async fn a_host_blocked_by_robots_txt_is_logged_as_such() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let robots = server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/robots.txt");
+            then.status(200).body(DENY_ALL);
+        })
+        .await;
+    let api = server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api");
+            then.status(200).body("{}");
+        })
+        .await;
+    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+
+    let logs = common::LogCapture::new();
+    let guard = logs.install();
+    let err = client
+        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .await
+        .err()
+        .expect("a robots.txt that forbids everything must refuse the request");
+    drop(guard);
+
+    assert!(err.to_string().contains("prohibited by robots.txt"), "{err}");
+    assert_eq!(api.hits(), 0);
+    assert_eq!(robots.hits(), 1);
+    let logged = logs.text();
+    let line = logged
+        .lines()
+        .find(|line| line.contains("Not fetching"))
+        .unwrap_or_else(|| panic!("the skip should be logged, got:\n{logged}"));
+    assert!(
+        line.contains(&format!("{}/api", server.base_url())),
+        "the log line names the URL: {line}"
+    );
+    assert!(line.contains("robots.txt disallows it"), "{line}");
+    println!("logged: {line}");
+}
+
+#[tokio::test]
+async fn a_blocklisted_host_is_logged_as_such() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let api = server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api");
+            then.status(200).body("{}");
+        })
+        .await;
+    let netloc = server.base_url().trim_start_matches("http://").to_string();
+    let mut config = common::test_config(&dir, "example.social");
+    config.instance_blocklist = vec![netloc.clone()];
+    let client = HttpClient::new(config);
+
+    let logs = common::LogCapture::new();
+    let guard = logs.install();
+    let err = client
+        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .await
+        .err()
+        .expect("a blocklisted host must be refused");
+    drop(guard);
+
+    assert!(err.to_string().contains("blocklist"), "{err}");
+    assert_eq!(api.hits(), 0);
+    let logged = logs.text();
+    let line = logged
+        .lines()
+        .find(|line| line.contains("Not fetching"))
+        .unwrap_or_else(|| panic!("the skip should be logged, got:\n{logged}"));
+    assert!(line.contains(&netloc), "the log line names the instance: {line}");
+    assert!(line.contains("blocklist"), "{line}");
+    println!("logged: {line}");
+}
+
 /// Counts how often the rate-limited answer has been served, so one mock can
 /// answer 429 a fixed number of times before another mock takes over. (The
 /// matcher is a plain function, so it reaches a static.)
