@@ -11,7 +11,7 @@ use reqwest::Method;
 use serde_json::Value;
 use time::OffsetDateTime;
 use tokio::time::sleep;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -243,11 +243,19 @@ impl HttpClient {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        if !self.ignore_robots
-            && self.config.respect_robots_txt
-            && !Box::pin(self.robots().can_fetch(&user_agent, url)).await?
-        {
-            return Err(Error(format!("Querying {url} prohibited by robots.txt")));
+        if !self.ignore_robots && self.config.respect_robots_txt {
+            match Box::pin(self.robots().can_fetch(&user_agent, url)).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    info!("Not fetching {url}: its robots.txt disallows it");
+                    return Err(Error(format!("Querying {url} prohibited by robots.txt")));
+                }
+                Err(ex) => {
+                    // the configured blocklist; the error names the instance
+                    info!("Not fetching {url}: {ex}");
+                    return Err(ex);
+                }
+            }
         }
 
         let timeout = timeout.unwrap_or_else(|| Duration::from_secs(self.config.http_timeout.max(0) as u64));
