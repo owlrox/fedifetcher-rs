@@ -11,3 +11,14 @@ The version surfaces in the web UI header, in `--version`, and in the
 startup log line — all read `env!("CARGO_PKG_VERSION")` — so the bump is
 how you can tell you are running the build you just changed, and not an
 old one by accident.
+
+Every version increment is committed together with a write-up of the
+change it belongs to: bump the number, describe what changed, and commit
+them in the same commit. Never push a version bump without its write-up,
+and never commit a change without its bump.
+
+## Secrets
+
+`config.toml` in the repo root holds the real access token. It is listed
+in `.gitignore` and must never be committed. Before committing, check
+`git status --porcelain` for it, and never run `git add -A`.

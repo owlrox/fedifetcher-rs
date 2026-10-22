@@ -1,1 +1,4 @@
 /target
+
+# Local config holding the real access token — never commit it.
+/config.toml
