@@ -460,6 +460,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_known_software_name_maps_to_its_flavour() {
+        const FLAVOURS: [ApiFlavour; 4] = [
+            ApiFlavour::Mastodon,
+            ApiFlavour::Misskey,
+            ApiFlavour::Lemmy,
+            ApiFlavour::PeerTube,
+        ];
+        for flavour in FLAVOURS {
+            for name in software_apis(flavour) {
+                let nodeinfo = serde_json::json!({
+                    "software": {"name": name, "version": "1"},
+                    "protocols": ["activitypub"],
+                });
+                let info = ServerInfo::from_nodeinfo("example.com", &nodeinfo)
+                    .unwrap_or_else(|| panic!("{name} should give a ServerInfo"));
+                assert!(
+                    info.supports(flavour),
+                    "{name} should be detected as {}",
+                    flavour.as_str()
+                );
+                for other in FLAVOURS {
+                    if other != flavour {
+                        assert!(
+                            !info.supports(other),
+                            "{name} should not be detected as {}",
+                            other.as_str()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn nodeinfo_maps_software_to_flavours() {
         let nodeinfo = serde_json::json!({
             "software": {"name": "mastodon", "version": "4.3.0"},
