@@ -41,6 +41,15 @@ idiomatic Rust over the Python original's habits. Concretely:
 Before committing, `cargo test`, `cargo clippy --all-targets`, and
 `cargo fmt --check` must all pass.
 
+## License
+
+The project is GPL-3.0-only: `license = "GPL-3.0-only"` in `Cargo.toml`,
+the full text in `LICENSE`. It is a Rust port of the MIT-licensed
+FediFetcher (https://github.com/nanos/FediFetcher, copyright Michael
+Thomas); the upstream copyright and MIT notice are kept in `NOTICE.md`,
+as the MIT license requires. Do not reintroduce MIT, and do not add
+per-file license headers.
+
 ## Secrets
 
 The database (`fedifetcher.db` in the state directory) holds the real
