@@ -1853,7 +1853,7 @@ mod tests {
         .unwrap();
         assert_eq!(info.software, "mastodon");
         assert_eq!(info.version, "4.3.0");
-        assert!(info.supports(crate::servers::ApiFlavour::Mastodon));
+        assert!(info.supports(crate::servers::ApiFlavor::Mastodon));
         assert!(
             crate::servers::ServerInfo::from_state(
                 loaded.seen_hosts().get("down.example").unwrap()
@@ -1944,7 +1944,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(info.software, "mastodon");
-        assert!(info.supports(crate::servers::ApiFlavour::Mastodon));
+        assert!(info.supports(crate::servers::ApiFlavor::Mastodon));
         assert!(crate::servers::ServerInfo::from_state(
             state.seen_hosts().get("down.example").unwrap()
         )

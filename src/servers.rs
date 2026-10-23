@@ -23,30 +23,30 @@ const XRD_NAMESPACE: &str = "http://docs.oasis-open.org/ns/xri/xrd-1.0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ApiFlavour {
+pub enum ApiFlavor {
     Mastodon,
     Misskey,
     Lemmy,
     PeerTube,
 }
 
-impl ApiFlavour {
-    /// How each flavour is spelled in the seen_hosts file.
+impl ApiFlavor {
+    /// How each flavor is spelled in the seen_hosts file.
     pub fn state_key(self) -> &'static str {
         match self {
-            ApiFlavour::Mastodon => "mastodonApiSupport",
-            ApiFlavour::Misskey => "misskeyApiSupport",
-            ApiFlavour::Lemmy => "lemmyApiSupport",
-            ApiFlavour::PeerTube => "peertubeApiSupport",
+            ApiFlavor::Mastodon => "mastodonApiSupport",
+            ApiFlavor::Misskey => "misskeyApiSupport",
+            ApiFlavor::Lemmy => "lemmyApiSupport",
+            ApiFlavor::PeerTube => "peertubeApiSupport",
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            ApiFlavour::Mastodon => "mastodon",
-            ApiFlavour::Misskey => "misskey",
-            ApiFlavour::Lemmy => "lemmy",
-            ApiFlavour::PeerTube => "peertube",
+            ApiFlavor::Mastodon => "mastodon",
+            ApiFlavor::Misskey => "misskey",
+            ApiFlavor::Lemmy => "lemmy",
+            ApiFlavor::PeerTube => "peertube",
         }
     }
 }
@@ -57,9 +57,9 @@ impl ApiFlavour {
 /// FediFetcher for various reasons:
 /// * gotosocial - all Mastodon APIs require an access token
 ///   (https://github.com/superseriousbusiness/gotosocial/issues/2038)
-pub fn software_apis(flavour: ApiFlavour) -> &'static [&'static str] {
-    match flavour {
-        ApiFlavour::Mastodon => &[
+pub fn software_apis(flavor: ApiFlavor) -> &'static [&'static str] {
+    match flavor {
+        ApiFlavor::Mastodon => &[
             "mastodon",
             "pleroma",
             "akkoma",
@@ -71,7 +71,7 @@ pub fn software_apis(flavour: ApiFlavour) -> &'static [&'static str] {
             "kmyblue",
             "mitra",
         ],
-        ApiFlavour::Misskey => &[
+        ApiFlavor::Misskey => &[
             "misskey",
             "calckey",
             "firefish",
@@ -79,8 +79,8 @@ pub fn software_apis(flavour: ApiFlavour) -> &'static [&'static str] {
             "sharkey",
             "cherrypick",
         ],
-        ApiFlavour::Lemmy => &["lemmy"],
-        ApiFlavour::PeerTube => &["peertube"],
+        ApiFlavor::Lemmy => &["lemmy"],
+        ApiFlavor::PeerTube => &["peertube"],
     }
 }
 
@@ -90,14 +90,14 @@ pub struct ServerInfo {
     pub webserver: String,
     pub software: String,
     pub version: String,
-    pub apis: BTreeSet<ApiFlavour>,
+    pub apis: BTreeSet<ApiFlavor>,
     pub last_checked: OffsetDateTime,
     pub raw: Value,
 }
 
 impl ServerInfo {
-    pub fn supports(&self, flavour: ApiFlavour) -> bool {
-        self.apis.contains(&flavour)
+    pub fn supports(&self, flavor: ApiFlavor) -> bool {
+        self.apis.contains(&flavor)
     }
 
     pub fn from_nodeinfo(webserver: &str, nodeinfo: &Value) -> Option<ServerInfo> {
@@ -109,14 +109,14 @@ impl ServerInfo {
             .unwrap_or("");
 
         let mut apis = BTreeSet::new();
-        for flavour in [
-            ApiFlavour::Mastodon,
-            ApiFlavour::Misskey,
-            ApiFlavour::Lemmy,
-            ApiFlavour::PeerTube,
+        for flavor in [
+            ApiFlavor::Mastodon,
+            ApiFlavor::Misskey,
+            ApiFlavor::Lemmy,
+            ApiFlavor::PeerTube,
         ] {
-            if software_apis(flavour).contains(&software) {
-                apis.insert(flavour);
+            if software_apis(flavor).contains(&software) {
+                apis.insert(flavor);
             }
         }
 
@@ -127,7 +127,7 @@ impl ServerInfo {
             .and_then(Value::as_array)
         {
             if features.iter().any(|f| f.as_str() == Some("mastodon_api")) {
-                apis.insert(ApiFlavour::Mastodon);
+                apis.insert(ApiFlavor::Mastodon);
             }
         }
 
@@ -154,15 +154,15 @@ impl ServerInfo {
             "last_checked".to_string(),
             Value::String(timeutil::fmt_state_ts(self.last_checked)),
         );
-        for flavour in [
-            ApiFlavour::Mastodon,
-            ApiFlavour::Misskey,
-            ApiFlavour::Lemmy,
-            ApiFlavour::PeerTube,
+        for flavor in [
+            ApiFlavor::Mastodon,
+            ApiFlavor::Misskey,
+            ApiFlavor::Lemmy,
+            ApiFlavor::PeerTube,
         ] {
             state.insert(
-                flavour.state_key().to_string(),
-                Value::Bool(self.apis.contains(&flavour)),
+                flavor.state_key().to_string(),
+                Value::Bool(self.apis.contains(&flavor)),
             );
         }
         Value::Object(state)
@@ -179,14 +179,14 @@ impl ServerInfo {
             .and_then(Value::as_str)
             .and_then(timeutil::parse)?;
         let mut apis = BTreeSet::new();
-        for flavour in [
-            ApiFlavour::Mastodon,
-            ApiFlavour::Misskey,
-            ApiFlavour::Lemmy,
-            ApiFlavour::PeerTube,
+        for flavor in [
+            ApiFlavor::Mastodon,
+            ApiFlavor::Misskey,
+            ApiFlavor::Lemmy,
+            ApiFlavor::PeerTube,
         ] {
-            if object.get(flavour.state_key()).and_then(Value::as_bool) == Some(true) {
-                apis.insert(flavour);
+            if object.get(flavor.state_key()).and_then(Value::as_bool) == Some(true) {
+                apis.insert(flavor);
             }
         }
         Some(ServerInfo {
@@ -245,9 +245,9 @@ impl HostRow {
     /// The row for one seen_hosts entry, as the state spells it.
     pub fn from_state_value(host: &str, value: &Value) -> Self {
         let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
-        let supported = |flavour: ApiFlavour| {
+        let supported = |flavor: ApiFlavor| {
             value
-                .get(flavour.state_key())
+                .get(flavor.state_key())
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         };
@@ -256,10 +256,10 @@ impl HostRow {
             webserver: text("webserver"),
             software: text("software"),
             version: text("version"),
-            mastodon_api: supported(ApiFlavour::Mastodon),
-            misskey_api: supported(ApiFlavour::Misskey),
-            lemmy_api: supported(ApiFlavour::Lemmy),
-            peertube_api: supported(ApiFlavour::PeerTube),
+            mastodon_api: supported(ApiFlavor::Mastodon),
+            misskey_api: supported(ApiFlavor::Misskey),
+            lemmy_api: supported(ApiFlavor::Lemmy),
+            peertube_api: supported(ApiFlavor::PeerTube),
             last_checked: text("last_checked"),
             error: text("error"),
             raw_nodeinfo: value.get("rawnodeinfo").map(Value::to_string),
@@ -293,26 +293,26 @@ impl HostRow {
             "last_checked".to_string(),
             serde_json::json!(self.last_checked),
         );
-        for flavour in [
-            ApiFlavour::Mastodon,
-            ApiFlavour::Misskey,
-            ApiFlavour::Lemmy,
-            ApiFlavour::PeerTube,
+        for flavor in [
+            ApiFlavor::Mastodon,
+            ApiFlavor::Misskey,
+            ApiFlavor::Lemmy,
+            ApiFlavor::PeerTube,
         ] {
             state.insert(
-                flavour.state_key().to_string(),
-                Value::Bool(self.supported(flavour)),
+                flavor.state_key().to_string(),
+                Value::Bool(self.supported(flavor)),
             );
         }
         Value::Object(state)
     }
 
-    fn supported(&self, flavour: ApiFlavour) -> bool {
-        match flavour {
-            ApiFlavour::Mastodon => self.mastodon_api,
-            ApiFlavour::Misskey => self.misskey_api,
-            ApiFlavour::Lemmy => self.lemmy_api,
-            ApiFlavour::PeerTube => self.peertube_api,
+    fn supported(&self, flavor: ApiFlavor) -> bool {
+        match flavor {
+            ApiFlavor::Mastodon => self.mastodon_api,
+            ApiFlavor::Misskey => self.misskey_api,
+            ApiFlavor::Lemmy => self.lemmy_api,
+            ApiFlavor::PeerTube => self.peertube_api,
         }
     }
 }
@@ -575,15 +575,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_known_software_name_maps_to_its_flavour() {
-        const FLAVOURS: [ApiFlavour; 4] = [
-            ApiFlavour::Mastodon,
-            ApiFlavour::Misskey,
-            ApiFlavour::Lemmy,
-            ApiFlavour::PeerTube,
+    fn every_known_software_name_maps_to_its_flavor() {
+        const FLAVORS: [ApiFlavor; 4] = [
+            ApiFlavor::Mastodon,
+            ApiFlavor::Misskey,
+            ApiFlavor::Lemmy,
+            ApiFlavor::PeerTube,
         ];
-        for flavour in FLAVOURS {
-            for name in software_apis(flavour) {
+        for flavor in FLAVORS {
+            for name in software_apis(flavor) {
                 let nodeinfo = serde_json::json!({
                     "software": {"name": name, "version": "1"},
                     "protocols": ["activitypub"],
@@ -591,12 +591,12 @@ mod tests {
                 let info = ServerInfo::from_nodeinfo("example.com", &nodeinfo)
                     .unwrap_or_else(|| panic!("{name} should give a ServerInfo"));
                 assert!(
-                    info.supports(flavour),
+                    info.supports(flavor),
                     "{name} should be detected as {}",
-                    flavour.as_str()
+                    flavor.as_str()
                 );
-                for other in FLAVOURS {
-                    if other != flavour {
+                for other in FLAVORS {
+                    if other != flavor {
                         assert!(
                             !info.supports(other),
                             "{name} should not be detected as {}",
@@ -609,32 +609,32 @@ mod tests {
     }
 
     #[test]
-    fn nodeinfo_maps_software_to_flavours() {
+    fn nodeinfo_maps_software_to_flavors() {
         let nodeinfo = serde_json::json!({
             "software": {"name": "mastodon", "version": "4.3.0"},
             "protocols": ["activitypub"],
         });
         let info = ServerInfo::from_nodeinfo("example.com", &nodeinfo).unwrap();
-        assert!(info.supports(ApiFlavour::Mastodon));
-        assert!(!info.supports(ApiFlavour::PeerTube));
+        assert!(info.supports(ApiFlavor::Mastodon));
+        assert!(!info.supports(ApiFlavor::PeerTube));
 
         let nodeinfo = serde_json::json!({
             "software": {"name": "sharkey", "version": "2024"},
             "protocols": ["activitypub"],
         });
         let info = ServerInfo::from_nodeinfo("example.com", &nodeinfo).unwrap();
-        assert!(info.supports(ApiFlavour::Misskey));
+        assert!(info.supports(ApiFlavor::Misskey));
     }
 
     #[test]
-    fn mastodon_api_feature_adds_mastodon_flavour() {
+    fn mastodon_api_feature_adds_mastodon_flavor() {
         let nodeinfo = serde_json::json!({
             "software": {"name": "something-new", "version": "1"},
             "protocols": ["activitypub"],
             "metadata": {"features": ["mastodon_api"]},
         });
         let info = ServerInfo::from_nodeinfo("example.com", &nodeinfo).unwrap();
-        assert!(info.supports(ApiFlavour::Mastodon));
+        assert!(info.supports(ApiFlavor::Mastodon));
     }
 
     #[test]
@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(state["peertubeApiSupport"], serde_json::json!(false));
         let back = ServerInfo::from_state(&state).unwrap();
         assert_eq!(back.webserver, "lemmy.example");
-        assert!(back.supports(ApiFlavour::Lemmy));
+        assert!(back.supports(ApiFlavor::Lemmy));
     }
 
     #[test]
@@ -691,7 +691,7 @@ mod tests {
         let reread = ServerInfo::from_state(&back).unwrap();
         assert_eq!(reread.software, "mastodon");
         assert_eq!(reread.version, "4.3.0");
-        assert!(reread.supports(ApiFlavour::Mastodon));
+        assert!(reread.supports(ApiFlavor::Mastodon));
     }
 
     #[test]

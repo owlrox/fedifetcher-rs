@@ -60,8 +60,8 @@ pub fn parse_date(value: &Value) -> Option<OffsetDateTime> {
 }
 
 /// Something we cannot address or date is something we can do nothing with.
-pub fn unusable(flavour: &str, identifier: &Value) {
-    debug!("Skipping a {flavour} post without a URL or a date: {identifier}");
+pub fn unusable(flavor: &str, identifier: &Value) {
+    debug!("Skipping a {flavor} post without a URL or a date: {identifier}");
 }
 
 #[cfg(test)]

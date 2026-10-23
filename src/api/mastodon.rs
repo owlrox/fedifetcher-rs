@@ -24,7 +24,7 @@ pub const PUBLIC: &[&str] = &["public", "unlisted"];
 /// The most statuses this API will hand out at once.
 pub const PAGE_SIZE: i64 = 40;
 
-// one flavour, several ways of naming an account: Mastodon and its kin use
+// one flavor, several ways of naming an account: Mastodon and its kin use
 // @name, Pleroma and Akkoma /users/name, and Pixelfed no prefix at all. The
 // last would swallow any URL if it were tried against other software, which
 // is why nothing asks this of a server it has not identified first.

@@ -1,13 +1,13 @@
-//! Choosing and speaking to the right server API. The flavour clients build
+//! Choosing and speaking to the right server API. The flavor clients build
 //! their request URLs with a hardcoded https scheme (as the Python original
 //! does), so these tests cover the parts that need no network: which client a
-//! server gets, and how each flavour reads its own URL shapes.
+//! server gets, and how each flavor reads its own URL shapes.
 
 mod common;
 
 use fedifetcher::api::{client_for, find_post, Client};
 use fedifetcher::http::HttpClient;
-use fedifetcher::servers::{ApiFlavour, ServerInfo};
+use fedifetcher::servers::{ApiFlavor, ServerInfo};
 use fedifetcher::store::State;
 use fedifetcher::urls::PostRef;
 use serde_json::json;
@@ -71,7 +71,7 @@ async fn mastodon_wins_when_a_server_claims_more_than_one_api() {
         webserver: "example.social".to_string(),
         software: "hybrid".to_string(),
         version: "1".to_string(),
-        apis: BTreeSet::from([ApiFlavour::Misskey, ApiFlavour::Mastodon]),
+        apis: BTreeSet::from([ApiFlavor::Misskey, ApiFlavor::Mastodon]),
         last_checked: fedifetcher::timeutil::now(),
         raw: json!({}),
     };
@@ -82,7 +82,7 @@ async fn mastodon_wins_when_a_server_claims_more_than_one_api() {
 }
 
 #[tokio::test]
-async fn post_ids_are_read_in_each_flavours_own_url_shapes() {
+async fn post_ids_are_read_in_each_flavors_own_url_shapes() {
     let dir = common::tmp_dir();
     let http = http(&dir);
     let mastodon = client_for(&server_info("mastodon"), &http).unwrap();
@@ -128,7 +128,7 @@ async fn post_ids_are_read_in_each_flavours_own_url_shapes() {
 }
 
 #[tokio::test]
-async fn usernames_are_read_in_each_flavours_own_url_shapes() {
+async fn usernames_are_read_in_each_flavors_own_url_shapes() {
     let dir = common::tmp_dir();
     let http = http(&dir);
     let mastodon = client_for(&server_info("mastodon"), &http).unwrap();

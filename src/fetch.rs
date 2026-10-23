@@ -12,7 +12,7 @@ use crate::db;
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::Context;
-use crate::servers::{server_info, ApiFlavour, ServerInfo};
+use crate::servers::{server_info, ApiFlavor, ServerInfo};
 use crate::store::State;
 use crate::timeutil;
 use crate::users::User;
@@ -114,19 +114,19 @@ pub async fn force_user_posts(ctx: &mut Context<'_>, acct: &str, target: UserSet
 }
 
 /// The profile URL for `name` on `host`, in the shape the server's own API
-/// client reads. The flavours are tried in the order `client_for` tries
+/// client reads. The flavors are tried in the order `client_for` tries
 /// them, so the URL matches the client that will read it.
 fn profile_url_for(server: &ServerInfo, host: &str, name: &str) -> String {
-    for flavour in [
-        ApiFlavour::Mastodon,
-        ApiFlavour::Lemmy,
-        ApiFlavour::Misskey,
-        ApiFlavour::PeerTube,
+    for flavor in [
+        ApiFlavor::Mastodon,
+        ApiFlavor::Lemmy,
+        ApiFlavor::Misskey,
+        ApiFlavor::PeerTube,
     ] {
-        if server.supports(flavour) {
-            return match flavour {
-                ApiFlavour::Lemmy => format!("https://{host}/u/{name}"),
-                ApiFlavour::PeerTube => format!("https://{host}/accounts/{name}"),
+        if server.supports(flavor) {
+            return match flavor {
+                ApiFlavor::Lemmy => format!("https://{host}/u/{name}"),
+                ApiFlavor::PeerTube => format!("https://{host}/accounts/{name}"),
                 // mastodon and misskey both address profiles as /@name
                 _ => format!("https://{host}/@{name}"),
             };
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn the_profile_url_matches_the_servers_flavour() {
+    fn the_profile_url_matches_the_servers_flavor() {
         assert_eq!(
             profile_url_for(&server("mastodon"), "remote.example", "alice"),
             "https://remote.example/@alice"

@@ -12,7 +12,7 @@ use tracing::error;
 
 use crate::http::HttpClient;
 use crate::posts::Post;
-use crate::servers::{server_info, ApiFlavour, ServerInfo};
+use crate::servers::{server_info, ApiFlavor, ServerInfo};
 use crate::state::ServerCache;
 use crate::store::State;
 use crate::urls::{host_of, PostRef};
@@ -34,12 +34,12 @@ pub enum Client {
 }
 
 impl Client {
-    pub fn flavour(&self) -> ApiFlavour {
+    pub fn flavor(&self) -> ApiFlavor {
         match self {
-            Client::Mastodon(_) => ApiFlavour::Mastodon,
-            Client::Lemmy(_) => ApiFlavour::Lemmy,
-            Client::Misskey(_) => ApiFlavour::Misskey,
-            Client::PeerTube(_) => ApiFlavour::PeerTube,
+            Client::Mastodon(_) => ApiFlavor::Mastodon,
+            Client::Lemmy(_) => ApiFlavor::Lemmy,
+            Client::Misskey(_) => ApiFlavor::Misskey,
+            Client::PeerTube(_) => ApiFlavor::PeerTube,
         }
     }
 
@@ -101,25 +101,25 @@ impl Client {
 pub fn client_for(server: &ServerInfo, http: &HttpClient) -> Option<Client> {
     // tried in order, so a server claiming several APIs gets the best
     // supported one
-    if server.supports(ApiFlavour::Mastodon) {
+    if server.supports(ApiFlavor::Mastodon) {
         return Some(Client::Mastodon(MastodonApi::new(
             &server.webserver,
             http.clone(),
         )));
     }
-    if server.supports(ApiFlavour::Lemmy) {
+    if server.supports(ApiFlavor::Lemmy) {
         return Some(Client::Lemmy(LemmyApi::new(
             &server.webserver,
             http.clone(),
         )));
     }
-    if server.supports(ApiFlavour::Misskey) {
+    if server.supports(ApiFlavor::Misskey) {
         return Some(Client::Misskey(MisskeyApi::new(
             &server.webserver,
             http.clone(),
         )));
     }
-    if server.supports(ApiFlavour::PeerTube) {
+    if server.supports(ApiFlavor::PeerTube) {
         return Some(Client::PeerTube(PeerTubeApi::new(
             &server.webserver,
             http.clone(),
@@ -184,7 +184,7 @@ async fn look_up_post(
     let post_id = client
         .post_id_from(url)
         .await
-        .ok_or_else(|| format!("the URL is not a {} post URL", client.flavour().as_str()))?;
+        .ok_or_else(|| format!("the URL is not a {} post URL", client.flavor().as_str()))?;
     Ok(PostRef::new(host, post_id))
 }
 
