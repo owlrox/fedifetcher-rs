@@ -653,6 +653,10 @@ ul.tokens label { color: #888; }
 .badge.error { background: #c44; }
 .badge.running { background: #c83; }
 .badge.stopped { background: #777; }
+.badge.debug { background: #777; }
+.badge.info { background: #48c; }
+.badge.warning { background: #c83; }
+.badge.unknown { background: #777; }
 .muted { color: #888; }
 "#;
 
@@ -943,7 +947,7 @@ fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder) -> impl IntoView 
                                         view! {
                                             <tr>
                                                 <td>{row.ts}</td>
-                                                <td>{row.level}</td>
+                                                <td>{level_pill(&row.level)}</td>
                                                 <td>{row.message}</td>
                                             </tr>
                                         }
@@ -956,6 +960,21 @@ fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder) -> impl IntoView 
             </section>
         </Page>
     }
+}
+
+/// The log level as a pill, colored by severity: gray for DEBUG, blue for
+/// INFO, amber for WARNING, red for ERROR. A level the database should never
+/// hold falls back to gray.
+fn level_pill(level: &str) -> AnyView {
+    let class = match level.to_ascii_uppercase().as_str() {
+        "DEBUG" => "debug",
+        "INFO" => "info",
+        "WARNING" | "WARN" => "warning",
+        "ERROR" | "CRITICAL" => "error",
+        _ => "unknown",
+    };
+    let level = level.to_string();
+    view! { <span class=format!("badge {class}")>{level}</span> }.into_any()
 }
 
 /// A column heading that links to the same page sorted by that column.

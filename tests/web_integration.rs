@@ -239,8 +239,8 @@ async fn the_logs_page_renders_lines_from_the_database() {
         "the time column shows the entry's timestamp"
     );
     assert!(
-        body.contains("<td>INFO</td>"),
-        "the level column shows the entry's level"
+        body.contains("<td><span class=\"badge info\">INFO</span></td>"),
+        "the level column shows the entry's level as a pill"
     );
     assert!(
         body.contains("<td>a line only the database knows</td>"),
@@ -254,6 +254,32 @@ async fn the_logs_page_renders_lines_from_the_database() {
         body.contains("/logs?sort=level&amp;dir=desc"),
         "the column headings link to sorted views"
     );
+}
+
+/// Each level renders as a pill whose color class matches its severity.
+#[tokio::test]
+async fn the_logs_page_renders_levels_as_colored_pills() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    insert_log(&dir, "2026-10-22 16:05:01 -05:00", "DEBUG", "a debug line").await;
+    insert_log(&dir, "2026-10-22 16:05:02 -05:00", "INFO", "an info line").await;
+    insert_log(&dir, "2026-10-22 16:05:03 -05:00", "WARNING", "a warning line").await;
+    insert_log(&dir, "2026-10-22 16:05:04 -05:00", "ERROR", "an error line").await;
+
+    let (status, body) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+    for (level, class) in [
+        ("DEBUG", "debug"),
+        ("INFO", "info"),
+        ("WARNING", "warning"),
+        ("ERROR", "error"),
+    ] {
+        assert!(
+            body.contains(&format!("<span class=\"badge {class}\">{level}</span>")),
+            "the {level} line renders as a {class} pill"
+        );
+    }
 }
 
 /// Insert one log line straight into the database, as the log layer would.
