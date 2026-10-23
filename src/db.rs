@@ -1,9 +1,10 @@
 //! The SQLite database in the state directory: the configuration, the log
 //! lines, the web UI's run history, what FediFetcher remembers between runs
 //! (the posts and accounts it has seen, and the hosts it has learned
-//! about), and what earlier runs learned — the posts found private and the
-//! accounts found opted out. One file (`fedifetcher.db`) that the web UI can
-//! query and later runs consult.
+//! about), what earlier runs learned — the posts found private and the
+//! accounts found opted out — and the trigger posts a run scanned for
+//! context. One file (`fedifetcher.db`) that the web UI can query and later
+//! runs consult.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
@@ -11,6 +12,7 @@ use serde_json::Value;
 
 use crate::config::{Config, RawValues};
 use crate::error::{Error, Result};
+use crate::posts::Post;
 use crate::state::TimestampedSet;
 use crate::store::{RepliedToot, State};
 use crate::timeutil;
@@ -101,6 +103,21 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS known_context_posts (
             uri TEXT PRIMARY KEY,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS trigger_posts (
+            uri TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            acct TEXT,
+            replies_count INTEGER,
+            created_at TEXT,
+            source TEXT NOT NULL,
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL
         )",
@@ -543,6 +560,126 @@ pub async fn record_known_context_posts(
         previous.push(last_seen);
     }
     Ok(previous)
+}
+
+/// How many trigger posts the database keeps; the oldest are pruned as new
+/// ones are recorded.
+pub const TRIGGER_POSTS_KEPT: i64 = 100_000;
+
+/// A post a run scanned for context — one of the posts that generate the
+/// need for backfilling — as the `trigger_posts` table records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriggerPost {
+    /// The post's uri, as its server spells it.
+    pub uri: String,
+    /// The post's URL, the one a context fetch parses.
+    pub url: String,
+    /// Who wrote it, `name@host` when the server said.
+    pub acct: Option<String>,
+    /// How many replies the server said it had, when it said.
+    pub replies_count: Option<i64>,
+    /// When the post was made, as a state timestamp.
+    pub created_at: Option<String>,
+    /// Which task first scanned it: home timeline, replies, bookmarks,
+    /// favourites, lists, backfill, or a manual fetch.
+    pub source: String,
+}
+
+impl TriggerPost {
+    /// The trigger-post record for one of the posts a scan was given. A
+    /// boost is recorded as the post it boosts: that is the post whose
+    /// context is fetched.
+    pub fn from_post(post: &Post, source: &str) -> Self {
+        let original = post.original();
+        TriggerPost {
+            uri: original.uri.clone(),
+            url: original.url.clone(),
+            acct: original.account.as_ref().map(|account| account.acct.clone()),
+            replies_count: original.reply_count,
+            created_at: Some(timeutil::fmt_state_ts(original.created_at)),
+            source: source.to_string(),
+        }
+    }
+}
+
+/// Record the posts a scan was given, refreshing what is known about each:
+/// `first_seen` and `source` are kept from the first record; the rest follow
+/// the newest sighting. Returns how many of the posts are new, and keeps
+/// only the newest `keep` rows.
+pub async fn record_trigger_posts(
+    pool: &SqlitePool,
+    posts: &[TriggerPost],
+    keep: i64,
+) -> Result<usize> {
+    if posts.is_empty() {
+        return Ok(0);
+    }
+    let now = timeutil::fmt_state_ts(timeutil::now());
+    let mut tx = pool.begin().await.map_err(db_error)?;
+    let mut fresh = 0usize;
+    for post in posts {
+        let existed: Option<(String,)> =
+            sqlx::query_as("SELECT first_seen FROM trigger_posts WHERE uri = ?")
+                .bind(&post.uri)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_error)?;
+        if existed.is_none() {
+            fresh += 1;
+        }
+        sqlx::query(
+            "INSERT INTO trigger_posts (uri, url, acct, replies_count, created_at, source, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(uri) DO UPDATE SET
+                    url = excluded.url,
+                    acct = excluded.acct,
+                    replies_count = excluded.replies_count,
+                    created_at = excluded.created_at,
+                    last_seen = excluded.last_seen",
+        )
+        .bind(&post.uri)
+        .bind(&post.url)
+        .bind(&post.acct)
+        .bind(post.replies_count)
+        .bind(&post.created_at)
+        .bind(&post.source)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    }
+    // keep only the newest rows, so the table cannot grow forever
+    sqlx::query(
+        "DELETE FROM trigger_posts WHERE uri NOT IN
+            (SELECT uri FROM trigger_posts ORDER BY last_seen DESC, uri ASC LIMIT ?)",
+    )
+    .bind(keep)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+    Ok(fresh)
+}
+
+/// One trigger post, as the table records it, or None when the database has
+/// never scanned it.
+pub async fn trigger_post(pool: &SqlitePool, uri: &str) -> Result<Option<TriggerPost>> {
+    let row = sqlx::query(
+        "SELECT uri, url, acct, replies_count, created_at, source FROM trigger_posts WHERE uri = ?",
+    )
+    .bind(uri)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_error)?;
+    Ok(row.map(|row| TriggerPost {
+        uri: row.get("uri"),
+        url: row.get("url"),
+        acct: row.get("acct"),
+        replies_count: row.get("replies_count"),
+        created_at: row.get("created_at"),
+        source: row.get("source"),
+    }))
 }
 
 /// The whole remembered state, read back from the database. Expiry and the
@@ -1046,6 +1183,155 @@ mod tests {
             Some("it is not indexable".to_string()),
             "the mark survives a reopen"
         );
+    }
+
+    fn sample_trigger_post(uri: &str, source: &str) -> TriggerPost {
+        TriggerPost {
+            uri: uri.to_string(),
+            url: uri.to_string(),
+            acct: Some("a@remote.example".to_string()),
+            replies_count: Some(3),
+            created_at: Some("2026-10-22 16:05:07 -05:00".to_string()),
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn trigger_post_from_post_reads_the_original() {
+        use crate::users::User;
+        let boosted = Post {
+            url: "https://remote.example/@alice/1".to_string(),
+            uri: "https://remote.example/@alice/1".to_string(),
+            created_at: timeutil::now(),
+            is_public: true,
+            reblog: None,
+            in_reply_to_id: None,
+            in_reply_to_account_id: None,
+            reply_count: Some(5),
+            account: Some(User::new("alice@remote.example", "https://remote.example/@alice")),
+            mentions: vec![],
+        };
+        let wrapper = Post {
+            url: "https://home.example/@bob/2".to_string(),
+            uri: "https://home.example/@bob/2".to_string(),
+            created_at: timeutil::now(),
+            is_public: true,
+            reblog: Some(Box::new(boosted)),
+            in_reply_to_id: None,
+            in_reply_to_account_id: None,
+            reply_count: None,
+            account: None,
+            mentions: vec![],
+        };
+        let record = TriggerPost::from_post(&wrapper, "home timeline");
+        assert_eq!(record.uri, "https://remote.example/@alice/1");
+        assert_eq!(record.url, "https://remote.example/@alice/1");
+        assert_eq!(record.acct.as_deref(), Some("alice@remote.example"));
+        assert_eq!(record.replies_count, Some(5));
+        assert_eq!(record.source, "home timeline");
+        assert!(record.created_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn trigger_posts_are_recorded_once_and_refreshed() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        assert!(
+            trigger_post(&pool, "https://remote.example/@a/1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            record_trigger_posts(
+                &pool,
+                &[sample_trigger_post("https://remote.example/@a/1", "home timeline")],
+                100,
+            )
+            .await
+            .unwrap(),
+            1,
+            "the first record is new"
+        );
+        let first = trigger_post(&pool, "https://remote.example/@a/1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.source, "home timeline");
+        assert_eq!(first.acct.as_deref(), Some("a@remote.example"));
+        assert_eq!(first.replies_count, Some(3));
+
+        // an earlier first_seen is kept; the sighting refreshes last_seen,
+        // and the rest of the row follows the newest sighting
+        let long_ago = timeutil::fmt_state_ts(timeutil::now() - time::Duration::days(30));
+        sqlx::query("UPDATE trigger_posts SET first_seen = ?, last_seen = ? WHERE uri = ?")
+            .bind(&long_ago)
+            .bind(&long_ago)
+            .bind("https://remote.example/@a/1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut updated = sample_trigger_post("https://remote.example/@a/1", "bookmarks");
+        updated.replies_count = Some(7);
+        assert_eq!(
+            record_trigger_posts(&pool, &[updated], 100).await.unwrap(),
+            0,
+            "a sighting of a known post is not new"
+        );
+        let row: (String, String, String, Option<i64>) = sqlx::query_as(
+            "SELECT first_seen, last_seen, source, replies_count FROM trigger_posts WHERE uri = ?",
+        )
+        .bind("https://remote.example/@a/1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, long_ago, "first_seen is kept from the first record");
+        assert_ne!(row.1, long_ago, "last_seen is refreshed");
+        assert_eq!(row.2, "home timeline", "source is kept from the first record");
+        assert_eq!(row.3, Some(7), "the reply count follows the newest sighting");
+    }
+
+    #[tokio::test]
+    async fn recording_trigger_posts_keeps_only_the_newest() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let old = timeutil::fmt_state_ts(timeutil::now() - time::Duration::days(10));
+        for n in 0..5 {
+            sqlx::query(
+                "INSERT INTO trigger_posts (uri, url, source, first_seen, last_seen) VALUES (?, ?, 'test', ?, ?)",
+            )
+            .bind(format!("https://remote.example/{n}"))
+            .bind(format!("https://remote.example/{n}"))
+            .bind(&old)
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        record_trigger_posts(&pool, &[sample_trigger_post("https://remote.example/new", "test")], 3)
+            .await
+            .unwrap();
+
+        assert_eq!(table_count(&pool, "trigger_posts").await.unwrap(), 3);
+        assert!(
+            trigger_post(&pool, "https://remote.example/new")
+                .await
+                .unwrap()
+                .is_some(),
+            "the freshly recorded post survives"
+        );
+        assert!(
+            trigger_post(&pool, "https://remote.example/4")
+                .await
+                .unwrap()
+                .is_none(),
+            "the oldest entries are pruned"
+        );
+        // recording nothing records nothing, and prunes nothing
+        assert_eq!(record_trigger_posts(&pool, &[], 3).await.unwrap(), 0);
+        assert_eq!(table_count(&pool, "trigger_posts").await.unwrap(), 3);
     }
 
     #[tokio::test]

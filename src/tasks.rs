@@ -94,9 +94,19 @@ async fn fetch_timeline_context(
     cancel: &CancelToken,
     state: &mut State,
     db: &SqlitePool,
+    source: &str,
 ) {
-    let known_context_urls =
-        get_all_known_context_urls(&config.server, &timeline_posts, http, cancel, state, db).await;
+    let known_context_urls = get_all_known_context_urls(
+        &config.server,
+        &timeline_posts,
+        http,
+        cancel,
+        state,
+        db,
+        source,
+        false,
+    )
+    .await;
     add_context_urls(home, known_context_urls, cancel, state).await;
 
     // Backfill any post authors, and any mentioned users
@@ -129,6 +139,7 @@ async fn fetch_timeline_context(
             cancel,
             state,
             db,
+            false,
         )
         .await;
     }
@@ -168,6 +179,7 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 &ctx.cancel,
                 ctx.state,
                 ctx.db,
+                "lists",
             )
             .await;
         }
@@ -191,6 +203,7 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 &ctx.cancel,
                 ctx.state,
                 ctx.db,
+                false,
             )
             .await;
         }
@@ -219,6 +232,8 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
         &ctx.cancel,
         ctx.state,
         ctx.db,
+        "replies",
+        false,
     )
     .await;
     ctx.state.seen_urls.update(known_context_urls);
@@ -254,6 +269,7 @@ async fn fetch_home_timeline(ctx: &mut Context<'_>) -> Result<()> {
         &ctx.cancel,
         ctx.state,
         ctx.db,
+        "home timeline",
     )
     .await;
     Ok(())
@@ -280,6 +296,7 @@ async fn backfill_followings(ctx: &mut Context<'_>) -> Result<()> {
         &ctx.cancel,
         ctx.state,
         ctx.db,
+        false,
     )
     .await;
     Ok(())
@@ -303,6 +320,7 @@ async fn backfill_followers(ctx: &mut Context<'_>) -> Result<()> {
         &ctx.cancel,
         ctx.state,
         ctx.db,
+        false,
     )
     .await;
     Ok(())
@@ -331,6 +349,7 @@ async fn backfill_follow_requests(ctx: &mut Context<'_>) -> Result<()> {
         &ctx.cancel,
         ctx.state,
         ctx.db,
+        false,
     )
     .await;
     Ok(())
@@ -357,6 +376,7 @@ async fn backfill_from_notifications(ctx: &mut Context<'_>) -> Result<()> {
         &ctx.cancel,
         ctx.state,
         ctx.db,
+        false,
     )
     .await;
     Ok(())
@@ -366,7 +386,7 @@ async fn backfill_from_notifications(ctx: &mut Context<'_>) -> Result<()> {
 async fn fetch_bookmark_context(ctx: &mut Context<'_>) -> Result<()> {
     info!("Pulling replies to the last {} bookmarks", ctx.config.max_bookmarks);
     let bookmarks = ctx.home.bookmarks(ctx.config.max_bookmarks).await?;
-    pull_context_for(ctx, bookmarks).await;
+    pull_context_for(ctx, bookmarks, "bookmarks").await;
     Ok(())
 }
 
@@ -377,11 +397,11 @@ async fn fetch_favourite_context(ctx: &mut Context<'_>) -> Result<()> {
         ctx.config.max_favourites
     );
     let favourites = ctx.home.favourites(ctx.config.max_favourites).await?;
-    pull_context_for(ctx, favourites).await;
+    pull_context_for(ctx, favourites, "favourites").await;
     Ok(())
 }
 
-async fn pull_context_for(ctx: &mut Context<'_>, posts: Vec<Post>) {
+async fn pull_context_for(ctx: &mut Context<'_>, posts: Vec<Post>, source: &str) {
     let known_context_urls = get_all_known_context_urls(
         &ctx.config.server,
         &posts,
@@ -389,6 +409,8 @@ async fn pull_context_for(ctx: &mut Context<'_>, posts: Vec<Post>) {
         &ctx.cancel,
         ctx.state,
         ctx.db,
+        source,
+        false,
     )
     .await;
     add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;

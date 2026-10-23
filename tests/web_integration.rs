@@ -89,7 +89,7 @@ async fn every_page_renders_without_javascript() {
     let base = spawn_ui(&dir).await;
 
     for (path, marker) in [
-        ("/", "Run FediFetcher now"),
+        ("/", "FediFetch NOW!"),
         ("/hosts", "Seen hosts"),
         ("/logs", "Recent log"),
         ("/config", "access_tokens"),
@@ -98,7 +98,10 @@ async fn every_page_renders_without_javascript() {
         let (status, body) = get(&format!("{base}{path}")).await;
         assert_eq!(status, 200, "{path}");
         assert!(body.contains(marker), "{path} should contain {marker:?}");
-        assert!(body.contains("FediFetcher"), "{path} should name the app");
+        assert!(
+            body.contains("FediFetcher-rs"),
+            "{path} should name the app -rs"
+        );
         assert!(!body.contains("<script"), "{path} must not contain JavaScript");
     }
 
@@ -652,7 +655,7 @@ async fn posting_stop_redirects_back_even_when_idle() {
     // idle: the dashboard offers to run, not to stop
     let (status, body) = get(&format!("{base}/")).await;
     assert_eq!(status, 200);
-    assert!(body.contains("Run FediFetcher now"));
+    assert!(body.contains("FediFetch NOW!"));
     assert!(!body.contains("Stop the running FediFetcher"));
 }
 
@@ -686,7 +689,7 @@ async fn the_stop_button_stops_a_running_run() {
     }
     assert!(running_page.contains("Running since"), "the run should be running");
     assert!(running_page.contains("Stop the running FediFetcher"));
-    assert!(!running_page.contains("Run FediFetcher now"));
+    assert!(!running_page.contains("FediFetch NOW!"));
 
     let resp = client().post(format!("{base}/stop")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 303);
@@ -836,4 +839,201 @@ async fn debug_rejects_an_unknown_action() {
     let (status, body) = post_debug(&base, "action=dance").await;
     assert_eq!(status, 200);
     assert!(body.contains("Unknown action"), "{body}");
+}
+
+/// The logs page refreshes itself while live updates are on — a meta
+/// refresh, the one kind of live update that needs no JavaScript — and the
+/// toggle pauses and resumes it, keeping the sort.
+#[tokio::test]
+async fn the_logs_page_refreshes_itself_unless_paused() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, body) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("http-equiv=\"refresh\""), "live by default");
+    assert!(body.contains("content=\"5\""), "every five seconds");
+    assert!(body.contains("Pause live updates"));
+
+    let (status, body) = get(&format!("{base}/logs?live=0")).await;
+    assert_eq!(status, 200);
+    assert!(
+        !body.contains("http-equiv=\"refresh\""),
+        "paused: no auto-refresh"
+    );
+    assert!(body.contains("Resume live updates"));
+
+    // the toggle keeps the sort and direction
+    let (_, body) = get(&format!("{base}/logs?sort=level&dir=asc&live=0")).await;
+    assert!(
+        body.contains("/logs?sort=level&amp;dir=asc&amp;live=1"),
+        "resuming keeps the sort: {body}"
+    );
+    let (_, body) = get(&format!("{base}/logs?sort=level&dir=asc")).await;
+    assert!(
+        body.contains("/logs?sort=level&amp;dir=asc&amp;live=0"),
+        "pausing keeps the sort: {body}"
+    );
+}
+
+/// The data page offers a fetch button on every row of the tables that
+/// have one: posts fetch their context, users are backfilled, seen URLs
+/// are re-resolved, hosts are re-checked.
+#[tokio::test]
+async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let pool = fedifetcher::db::open(&config).await.unwrap();
+
+    fedifetcher::db::record_trigger_posts(
+        &pool,
+        &[fedifetcher::db::TriggerPost {
+            uri: "https://remote.example/@a/1".to_string(),
+            url: "https://remote.example/@a/1".to_string(),
+            acct: Some("a@remote.example".to_string()),
+            replies_count: Some(2),
+            created_at: None,
+            source: "home timeline".to_string(),
+        }],
+        1000,
+    )
+    .await
+    .unwrap();
+    let mut state = fedifetcher::store::State::default();
+    state.known_followings.add("alice@remote.example", None);
+    state.recently_checked_users.add("bob@remote.example", None);
+    state.seen_urls.add("https://remote.example/@a/9", None);
+    state
+        .recently_checked_context
+        .mark_fetched("https://remote.example/@a/5", fedifetcher::timeutil::now());
+    state
+        .seen_hosts
+        .add("alpha.example", host_entry("Mastodon", "4.2.0", &["mastodon"], 3));
+    fedifetcher::db::save_state(&pool, &state, fedifetcher::store::MAX_ENTRIES)
+        .await
+        .unwrap();
+    let base = spawn_ui(&dir).await;
+
+    // a post: fetch its context
+    let (status, body) = get(&format!("{base}/hosts?tab=trigger_posts")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("action=\"/fetch\""), "the row posts to /fetch");
+    assert!(body.contains("name=\"kind\" value=\"post\""));
+    assert!(
+        body.contains("name=\"key\" value=\"https://remote.example/@a/1\""),
+        "the post's uri is the key"
+    );
+    assert!(body.contains(">Fetch context</button>"));
+    assert!(
+        body.contains("name=\"back\" value=\"/hosts?tab=trigger_posts&amp;sort=uri&amp;dir=asc\""),
+        "the button returns to this view"
+    );
+
+    // a context cache row: same action
+    let (status, body) = get(&format!("{base}/hosts?tab=context_cache")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("name=\"key\" value=\"https://remote.example/@a/5\""),
+        "the cached context post is the key"
+    );
+
+    // a known following: backfill the user, into the followings set
+    let (status, body) = get(&format!("{base}/hosts?tab=known_followings")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("name=\"kind\" value=\"user\""));
+    assert!(body.contains("name=\"set\" value=\"followings\""));
+    assert!(body.contains("name=\"key\" value=\"alice@remote.example\""));
+    assert!(body.contains(">Backfill user</button>"));
+
+    // a recently checked user: backfill, into the checked set
+    let (status, body) = get(&format!("{base}/hosts?tab=recently_checked_users")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("name=\"set\" value=\"checked\""));
+    assert!(body.contains("name=\"key\" value=\"bob@remote.example\""));
+
+    // a seen URL: re-resolve it
+    let (status, body) = get(&format!("{base}/hosts?tab=seen_urls")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("name=\"kind\" value=\"url\""));
+    assert!(body.contains("name=\"key\" value=\"https://remote.example/@a/9\""));
+    assert!(body.contains(">Re-resolve</button>"));
+
+    // a host: re-check its server info
+    let (status, body) = get(&format!("{base}/hosts")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("name=\"kind\" value=\"host\""));
+    assert!(body.contains("name=\"key\" value=\"alpha.example\""));
+    assert!(body.contains(">Re-check</button>"));
+
+    // a table without an action has no fetch form
+    let (status, body) = get(&format!("{base}/hosts?tab=private_posts")).await;
+    assert_eq!(status, 200);
+    assert!(!body.contains("action=\"/fetch\""));
+}
+
+/// POST a urlencoded form to /fetch: (status, Location).
+async fn post_fetch(base: &str, form: &str) -> (u16, Option<String>) {
+    let resp = client()
+        .post(format!("{base}/fetch"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let location = resp
+        .headers()
+        .get("Location")
+        .map(|value| value.to_str().unwrap().to_string());
+    (status, location)
+}
+
+/// A fetch POST redirects back to the page the button was on; the fetch it
+/// starts runs in the background.
+#[tokio::test]
+async fn posting_fetch_redirects_back_to_the_given_page() {
+    let dir = common::tmp_dir();
+    // a server that is not there, so the fetch the POST starts fails fast
+    // instead of reaching out
+    let mut config = common::test_config(&dir, "127.0.0.1:9");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let (base, _) = spawn_ui_with(config).await;
+
+    let (status, location) = post_fetch(
+        &base,
+        "kind=url&key=https%3A%2F%2Fremote.example%2F%40a%2F1&back=%2Fhosts%3Ftab%3Dseen_urls",
+    )
+    .await;
+    assert_eq!(status, 303, "the POST must redirect");
+    assert_eq!(location.as_deref(), Some("/hosts?tab=seen_urls"));
+}
+
+/// The fetch POST's fields are validated: an unknown kind or an empty key
+/// is not a fetch this UI offers, and the redirect target is always a
+/// same-site path.
+#[tokio::test]
+async fn posting_fetch_validates_its_fields() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    // an unknown kind is not a fetch this UI offers
+    let (status, location) = post_fetch(&base, "kind=dance&key=x&back=/hosts").await;
+    assert_eq!(status, 303);
+    assert_eq!(location.as_deref(), Some("/hosts"));
+
+    // a fetch with no key does nothing
+    let (status, location) = post_fetch(&base, "kind=post&key=&back=/hosts").await;
+    assert_eq!(status, 303);
+    assert_eq!(location.as_deref(), Some("/hosts"));
+
+    // the redirect target is a same-site path, never off-site
+    for form in [
+        "kind=url&key=https://x.example/1&back=https://evil.example/",
+        "kind=url&key=https://x.example/1&back=//evil.example",
+        "kind=url&key=https://x.example/1&back=",
+    ] {
+        let (status, location) = post_fetch(&base, form).await;
+        assert_eq!(status, 303, "{form}");
+        assert_eq!(location.as_deref(), Some("/"), "{form}");
+    }
 }

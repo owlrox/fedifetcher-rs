@@ -96,6 +96,11 @@ impl ServerCache {
         self.map.contains_key(key)
     }
 
+    /// Forget a host, so the next lookup asks it again.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        self.map.shift_remove(key)
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -214,6 +219,11 @@ impl ContextCache {
         self.entries.contains_key(uri)
     }
 
+    /// When a post was last fetched, and when it was made.
+    pub fn get(&self, uri: &str) -> Option<ContextEntry> {
+        self.entries.get(uri).copied()
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -281,6 +291,25 @@ mod tests {
         assert!(!cache.should_fetch("uri3", created));
         cache.entries.get_mut("uri3").unwrap().last_seen = timeutil::now() - Duration::hours(2);
         assert!(cache.should_fetch("uri3", created));
+    }
+
+    #[test]
+    fn server_cache_remove_forgets_a_host() {
+        let mut cache = ServerCache::new();
+        cache.add("a.example", serde_json::json!({"x": 1}));
+        assert!(cache.remove("a.example").is_some());
+        assert!(!cache.contains("a.example"));
+        assert!(cache.remove("a.example").is_none(), "removing twice finds nothing");
+    }
+
+    #[test]
+    fn context_cache_get_reads_an_entry() {
+        let mut cache = ContextCache::new();
+        let created = timeutil::now() - Duration::minutes(30);
+        assert!(cache.get("uri").is_none());
+        cache.mark_fetched("uri", created);
+        let entry = cache.get("uri").unwrap();
+        assert_eq!(entry.created_at, created);
     }
 
     #[test]

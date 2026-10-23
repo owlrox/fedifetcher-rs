@@ -19,13 +19,15 @@ use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::api::mastodon::masked;
+use crate::api::mastodon::{HomeServer, masked};
+use crate::backfill::UserSet;
 use crate::config::{Config, RawValues, is_known_option, option_description};
 use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
+use crate::fetch;
 use crate::http::HttpClient;
 use crate::run::{CancelToken, run_once};
-use crate::store::{State, StateStore};
+use crate::store::{State, StateStore, lock};
 use crate::timeutil;
 use crate::VERSION;
 
@@ -76,8 +78,9 @@ pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std
 }
 
 /// Build the web UI's router: the dashboard, the run trigger, the data page
-/// (hosts and the database's tables), logs, the editable config page, the
-/// debug page, and the health check.
+/// (hosts and the database's tables, with a fetch button per row), the
+/// manual fetch trigger, logs, the editable config page, the debug page,
+/// and the health check.
 pub fn app(config: Config, db: SqlitePool) -> Router {
     let state = Arc::new(AppState {
         config: Mutex::new(config),
@@ -93,6 +96,7 @@ pub fn app(config: Config, db: SqlitePool) -> Router {
         .route("/", get(dashboard))
         .route("/run", post(run))
         .route("/stop", post(stop))
+        .route("/fetch", post(manual_fetch))
         .route("/hosts", get(data))
         .route("/logs", get(logs))
         .route("/logs/clear", post(clear_logs))
@@ -192,7 +196,46 @@ enum TabView {
         count: i64,
         sort: String,
         order: LogOrder,
+        action: Option<TableAction>,
     },
+}
+
+/// A table the data page can act on with a button per row: what the button
+/// asks the server to fetch, which user set a user belongs to, and the
+/// button's label. The row's key is always the table's first column: the
+/// post's uri, the account, the URL.
+#[derive(Clone)]
+struct TableAction {
+    kind: &'static str,
+    set: Option<&'static str>,
+    label: &'static str,
+}
+
+/// The per-row action a table's rows offer, if any.
+fn table_action(table: &str) -> Option<TableAction> {
+    match table {
+        "trigger_posts" | "context_cache" => Some(TableAction {
+            kind: "post",
+            set: None,
+            label: "Fetch context",
+        }),
+        "known_followings" => Some(TableAction {
+            kind: "user",
+            set: Some("followings"),
+            label: "Backfill user",
+        }),
+        "recently_checked_users" => Some(TableAction {
+            kind: "user",
+            set: Some("checked"),
+            label: "Backfill user",
+        }),
+        "seen_urls" => Some(TableAction {
+            kind: "url",
+            set: None,
+            label: "Re-resolve",
+        }),
+        _ => None,
+    }
 }
 
 /// The /hosts page, now the data page: sub-tabs for the hosts FediFetcher
@@ -311,6 +354,7 @@ async fn data(
                 count,
                 sort,
                 order,
+                action: table_action(name),
             }
         }
     };
@@ -318,13 +362,18 @@ async fn data(
     render(move || view! { <DataPage tabs=tabs tab=tab /> })
 }
 
-/// The /logs page's query string: which column to sort by, and which way.
-/// Unknown values fall back to the defaults, newest first.
+/// The /logs page's query string: which column to sort by, which way, and
+/// whether the page refreshes itself. Unknown values fall back to the
+/// defaults: newest first, refreshing every few seconds.
 #[derive(serde::Deserialize)]
 struct LogsQuery {
     sort: Option<String>,
     dir: Option<String>,
+    live: Option<String>,
 }
+
+/// How often the /logs page refreshes itself while live updates are on.
+const LOGS_REFRESH_SECONDS: u32 = 5;
 
 async fn logs(
     AxumState(state): AxumState<Arc<AppState>>,
@@ -336,6 +385,7 @@ async fn logs(
         Some("asc") => LogOrder::Asc,
         _ => LogOrder::Desc,
     };
+    let live = query.live.as_deref() != Some("0");
     let rows = match db::recent_logs(&state.db, LOG_LINES_SHOWN, sort, order).await {
         Ok(rows) => rows,
         Err(ex) => {
@@ -343,7 +393,7 @@ async fn logs(
             Vec::new()
         }
     };
-    render(move || view! { <LogsPage rows=rows sort=sort order=order /> })
+    render(move || view! { <LogsPage rows=rows sort=sort order=order live=live /> })
 }
 
 /// Empty the log the /logs page shows, and redirect back to it.
@@ -457,7 +507,7 @@ fn save_error(status: StatusCode, message: &str) -> (StatusCode, Html<String>) {
     let message = message.to_string();
     let body = render(move || {
         view! {
-            <Page title="Config".to_string()>
+            <Page title="Config".to_string() refresh=None>
                 <section>
                     <h2>"Could not save the configuration"</h2>
                     <p><code>{message}</code></p>
@@ -631,6 +681,103 @@ async fn stop(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     Redirect::to("/")
 }
 
+/// A manual fetch from the data page: one post's context, one account's
+/// posts, one host's server info, or one URL's resolve. The fetch runs in
+/// the background — the same guard a run takes keeps it from overlapping one
+/// — and the redirect back is immediate, as with /run.
+async fn manual_fetch(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -> Redirect {
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let field = |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.trim().to_string())
+            .unwrap_or_default()
+    };
+    let kind = field("kind");
+    let key = field("key");
+    let set = field("set");
+    // the redirect target comes from a form: only a same-site path is one
+    let back = match field("back").as_str() {
+        back if back.starts_with('/') && !back.starts_with("//") && !back.starts_with("/\\") => {
+            back.to_string()
+        }
+        _ => "/".to_string(),
+    };
+    if !matches!(kind.as_str(), "post" | "user" | "host" | "url") || key.is_empty() {
+        tracing::warn!("POST /fetch: not a fetch this UI offers (kind={kind:?}, key={key:?})");
+        return Redirect::to(&back);
+    }
+    if let Ok(guard) = state.run_guard.clone().try_lock_owned() {
+        tracing::info!("POST /fetch: {kind} {key} triggered from the web UI");
+        tokio::spawn(async move {
+            run_fetch(&state, &kind, &key, &set).await;
+            drop(guard);
+        });
+    } else {
+        tracing::debug!("POST /fetch: a run is already in progress; the fetch is ignored");
+    }
+    Redirect::to(&back)
+}
+
+/// Run one manual fetch: load the state, do the work, write the state back.
+/// The lock file keeps it from overlapping a run in another process, the
+/// same as a run's own lock.
+async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str) {
+    let config = state.config.lock().unwrap().clone();
+    if config.server.is_empty() {
+        tracing::warn!("POST /fetch: no server is configured; nothing was fetched");
+        return;
+    }
+    let Some(token) = config.access_tokens.first() else {
+        tracing::warn!("POST /fetch: no access token is configured; nothing was fetched");
+        return;
+    };
+    let token = token.clone();
+    let _lock = match lock(&config) {
+        Ok(lock) => lock,
+        Err(ex) => {
+            tracing::warn!("POST /fetch: not fetching: {ex}");
+            return;
+        }
+    };
+    let http = HttpClient::new(config.clone(), state.db.clone());
+    let home = HomeServer::new(&config.server, &token, http.clone());
+    let store = StateStore::new(config.clone());
+    let mut session = match store.session(&state.db).await {
+        Ok(session) => session,
+        Err(ex) => {
+            tracing::error!("POST /fetch: could not load the state: {ex}");
+            return;
+        }
+    };
+    let cancel = CancelToken::new();
+    match kind {
+        "post" => {
+            fetch::force_post_context(&config, &home, &http, session.state(), &state.db, &cancel, key)
+                .await
+        }
+        "user" => {
+            let target = match set {
+                "followings" => UserSet::KnownFollowings,
+                _ => UserSet::RecentlyCheckedUsers,
+            };
+            fetch::force_user_posts(
+                &config, &home, &http, session.state(), &state.db, &cancel, key, target,
+            )
+            .await
+        }
+        "host" => fetch::force_host_info(key, &http, session.state()).await,
+        "url" => fetch::force_resolve_url(&home, session.state(), key).await,
+        _ => {}
+    }
+    if let Err(ex) = session.finish().await {
+        tracing::error!("POST /fetch: could not write the state to the database: {ex}");
+    }
+}
+
 /// Render a view to a full HTML document. SSR only: the result is static
 /// HTML, with no JavaScript to hydrate it.
 fn render<F, N>(make: F) -> Html<String>
@@ -794,6 +941,8 @@ form input[type="number"] { width: 6rem; }
 pre { white-space: pre-wrap; }
 ul.tokens { margin: 0.2rem 0; padding-left: 1.2rem; }
 ul.tokens label { color: #888; }
+form.fetch { margin: 0; }
+form.fetch button { font-size: 0.8rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
 .badge { padding: 0.1rem 0.5rem; border-radius: 0.4rem; font-size: 0.8rem; color: #fff; }
 .badge.ok { background: #2a8; }
 .badge.error { background: #c44; }
@@ -807,19 +956,28 @@ ul.tokens label { color: #888; }
 "#;
 
 #[component]
-fn Page(title: String, children: Children) -> impl IntoView {
+fn Page(
+    title: String,
+    /// When set, the page reloads itself every this many seconds — the
+    /// logs page's live updates, which need no JavaScript.
+    refresh: Option<u32>,
+    children: Children,
+) -> impl IntoView {
     view! {
         <html lang="en">
             <head>
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-                <title>{format!("{title} · FediFetcher")}</title>
+                <title>{format!("{title} · FediFetcher-rs")}</title>
+                {refresh.map(|seconds| {
+                    view! { <meta http-equiv="refresh" content={seconds.to_string()}/> }
+                })}
                 <style>{CSS}</style>
             </head>
             <body>
                 <header>
                     <h1>
-                        <a href="/">"FediFetcher"</a>
+                        <a href="/">"FediFetcher-rs"</a>
                         <span class="version">"v"{VERSION}</span>
                     </h1>
                     <nav>
@@ -870,7 +1028,7 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl In
     ];
 
     view! {
-        <Page title="Dashboard".to_string()>
+        <Page title="Dashboard".to_string() refresh=None>
             <section>
                 <h2>"Run"</h2>
                 <p>
@@ -886,7 +1044,7 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl In
                 } else {
                     view! {
                         <form class="run" method="post" action="/run">
-                            <button type="submit">"Run FediFetcher now"</button>
+                            <button type="submit">"FediFetch NOW!"</button>
                         </form>
                     }.into_any()
                 }}
@@ -996,10 +1154,11 @@ fn DataPage(tabs: Vec<TabLink>, tab: TabView) -> impl IntoView {
             count,
             sort,
             order,
-        } => table_tab(name, columns, rows, count, sort, order),
+            action,
+        } => table_tab(name, columns, rows, count, sort, order, action),
     };
     view! {
-        <Page title="Data".to_string()>
+        <Page title="Data".to_string() refresh=None>
             <nav class="tabs">{links}</nav>
             {section}
         </Page>
@@ -1061,12 +1220,23 @@ fn hosts_table(
 }
 
 /// The hosts sub-tab: every server FediFetcher has contacted, and what it
-/// found, sortable by clicking a column heading.
+/// found, sortable by clicking a column heading. Each row offers to re-check
+/// the host's server info now.
 fn hosts_tab(
     rows: Vec<(String, String, String, String, String)>,
     sort: HostSort,
     order: LogOrder,
 ) -> AnyView {
+    let dir = match order {
+        LogOrder::Asc => "asc",
+        LogOrder::Desc => "desc",
+    };
+    let back = format!("/hosts?tab=hosts&sort={}&dir={}", sort.param(), dir);
+    let action = TableAction {
+        kind: "host",
+        set: None,
+        label: "Re-check",
+    };
     view! {
         <section>
             <h2>"Seen hosts"</h2>
@@ -1085,6 +1255,7 @@ fn hosts_tab(
                                 <th>{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
                                 <th>{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
                                 <th>{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
+                                <th>"Actions"</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1093,11 +1264,12 @@ fn hosts_tab(
                                 .map(|(host, software, version, apis, last_checked)| {
                                     view! {
                                         <tr>
-                                            <td><code>{host}</code></td>
+                                            <td><code>{host.clone()}</code></td>
                                             <td>{software}</td>
                                             <td>{version}</td>
                                             <td>{apis}</td>
                                             <td>{last_checked}</td>
+                                            {fetch_button(&action, &host, &back)}
                                         </tr>
                                     }
                                 })
@@ -1113,7 +1285,9 @@ fn hosts_tab(
 }
 
 /// A database table sub-tab: the table's rows as text, sortable by clicking
-/// a column heading. At most TABLE_ROWS_SHOWN rows are shown.
+/// a column heading. At most TABLE_ROWS_SHOWN rows are shown. When the
+/// table has an action, each row gets a button that fetches that one thing
+/// now.
 fn table_tab(
     name: String,
     columns: Vec<String>,
@@ -1121,25 +1295,37 @@ fn table_tab(
     count: i64,
     sort: String,
     order: LogOrder,
+    action: Option<TableAction>,
 ) -> AnyView {
     let base = format!("/hosts?tab={name}");
+    let dir = match order {
+        LogOrder::Asc => "asc",
+        LogOrder::Desc => "desc",
+    };
+    // where the fetch buttons return to: this view
+    let back = format!("{base}&sort={sort}&dir={dir}");
     let shown = rows.len() as i64;
     let summary = if count > shown {
         format!("Showing {shown} of {count} rows.")
     } else {
         format!("{count} row(s).")
     };
+    let action_note = if action.is_some() {
+        " The last column fetches that one thing now, in the background."
+    } else {
+        ""
+    };
     view! {
         <section>
             <h2>{name.clone()}</h2>
             <p class="muted">
                 "Table " <code>{name.clone()}</code> " in the database. " {summary}
-                " Click a column heading to sort by it; click it again to flip the direction."
+                " Click a column heading to sort by it; click it again to flip the direction." {action_note}
             </p>
             {if rows.is_empty() {
                 view! { <p class="muted">"No rows yet."</p> }.into_any()
             } else {
-                let header: Vec<AnyView> = columns
+                let mut header: Vec<AnyView> = columns
                     .iter()
                     .map(|column| {
                         view! {
@@ -1148,16 +1334,27 @@ fn table_tab(
                         .into_any()
                     })
                     .collect();
+                if action.is_some() {
+                    header.push(view! { <th>"Actions"</th> }.into_any());
+                }
                 let body: Vec<AnyView> = rows
                     .into_iter()
                     .map(|row| {
-                        let cells: Vec<AnyView> = row
+                        let key = row.first().cloned().flatten();
+                        let mut cells: Vec<AnyView> = row
                             .into_iter()
                             .map(|cell| match cell {
                                 Some(value) => view! { <td>{value}</td> }.into_any(),
                                 None => view! { <td><span class="muted">"NULL"</span></td> }.into_any(),
                             })
                             .collect();
+                        match (&action, key) {
+                            (Some(action), Some(key)) => {
+                                cells.push(fetch_button(action, &key, &back));
+                            }
+                            (Some(_), None) => cells.push(view! { <td></td> }.into_any()),
+                            (None, _) => {}
+                        }
                         view! { <tr>{cells}</tr> }.into_any()
                     })
                     .collect();
@@ -1174,14 +1371,60 @@ fn table_tab(
     .into_any()
 }
 
-#[component]
-fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder) -> impl IntoView {
+/// The per-row button that asks the server to fetch one thing now: a form
+/// posting to /fetch, which runs it in the background and redirects back to
+/// `back`.
+fn fetch_button(action: &TableAction, key: &str, back: &str) -> AnyView {
+    let set_field = action.set.map(|set| {
+        view! { <input type="hidden" name="set" value={set}/> }.into_any()
+    });
     view! {
-        <Page title="Logs".to_string()>
+        <td>
+            <form method="post" action="/fetch" class="fetch">
+                <input type="hidden" name="kind" value={action.kind}/>
+                <input type="hidden" name="key" value={key.to_string()}/>
+                {set_field}
+                <input type="hidden" name="back" value={back.to_string()}/>
+                <button type="submit" title="Runs in the background; watch the Logs page">{action.label}</button>
+            </form>
+        </td>
+    }
+    .into_any()
+}
+
+#[component]
+fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder, live: bool) -> impl IntoView {
+    let dir = match order {
+        LogOrder::Asc => "asc",
+        LogOrder::Desc => "desc",
+    };
+    let refresh = if live {
+        Some(LOGS_REFRESH_SECONDS)
+    } else {
+        None
+    };
+    let toggle = if live {
+        view! {
+            <a href={format!("/logs?sort={}&dir={}&live=0", sort.param(), dir)}>"Pause live updates"</a>
+        }
+        .into_any()
+    } else {
+        view! {
+            <a href={format!("/logs?sort={}&dir={}&live=1", sort.param(), dir)}>"Resume live updates"</a>
+        }
+        .into_any()
+    };
+    let live_note = if live {
+        format!(" The page refreshes itself every {LOGS_REFRESH_SECONDS} seconds.")
+    } else {
+        String::new()
+    };
+    view! {
+        <Page title="Logs".to_string() refresh=refresh>
             <section>
                 <h2>"Recent log"</h2>
                 <p class="muted">
-                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction."
+                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction." {live_note} " " {toggle}
                 </p>
                 <form method="post" action="/logs/clear">
                     <button type="submit">"Clear log"</button>
@@ -1324,7 +1567,7 @@ fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
     rows.push(log_level_row(&config.log_level));
     rows.push(text_row("log_format", &config.log_format));
     view! {
-        <Page title="Config".to_string()>
+        <Page title="Config".to_string() refresh=None>
             <section>
                 <h2>"Edit configuration"</h2>
                 <p class="muted">
@@ -1357,7 +1600,7 @@ fn DebugPage(state: Arc<AppState>, result: Option<DebugOutcome>) -> impl IntoVie
         .map(|token| masked(token))
         .unwrap_or_else(|| "none".to_string());
     view! {
-        <Page title="Debug".to_string()>
+        <Page title="Debug".to_string() refresh=None>
             <section>
                 <h2>"Test connection"</h2>
                 <p class="muted">

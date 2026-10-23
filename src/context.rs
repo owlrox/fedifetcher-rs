@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
-use crate::db::{self, is_private_post, mark_private_post};
+use crate::db::{self, TriggerPost, is_private_post, mark_private_post};
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::CancelToken;
@@ -62,6 +62,10 @@ pub async fn toot_context_can_be_fetched(toot: &Post, db: &SqlitePool) -> bool {
 /// returned: new ones, and already-known ones last seen longer ago than
 /// KNOWN_CONTEXT_RECHECK — the rest the home server already has, and
 /// re-resolving them would only chatter at the instance hosting them.
+///
+/// The toots given are recorded as trigger posts under `source`, so the data
+/// page can show what a run scanned — and fetch one post's context again on
+/// demand. `force` skips the recency check, for a manual fetch.
 pub async fn get_all_known_context_urls(
     server: &str,
     reply_toots: &[Post],
@@ -69,6 +73,8 @@ pub async fn get_all_known_context_urls(
     cancel: &CancelToken,
     state: &mut State,
     db: &SqlitePool,
+    source: &str,
+    force: bool,
 ) -> Vec<String> {
     let mut known_context_urls: IndexSet<String> = IndexSet::new();
     // what became of the toots the scan was given, so the summary line can
@@ -77,11 +83,15 @@ pub async fn get_all_known_context_urls(
         total: reply_toots.len(),
         ..Default::default()
     };
+    // every toot the scan is given, as a trigger post, recorded after the
+    // loop in one write
+    let mut triggers: Vec<TriggerPost> = Vec::with_capacity(reply_toots.len());
 
     for toot in reply_toots {
         if cancel.is_cancelled() {
             break;
         }
+        triggers.push(TriggerPost::from_post(toot, source));
         // a private toot is skipped before its URL is even resolved: its
         // context can never be fetched, and remembering it saves later runs
         // the ask
@@ -96,7 +106,7 @@ pub async fn get_all_known_context_urls(
             scan.unresolved += 1;
             continue;
         };
-        if state
+        if force || state
             .recently_checked_context
             .should_fetch(&toot.uri, toot.created_at)
         {
@@ -111,6 +121,13 @@ pub async fn get_all_known_context_urls(
         } else {
             scan.recently_checked += 1;
         }
+    }
+
+    // remember the posts this scan encountered, so the data page can list
+    // them and fetch one again on demand
+    match db::record_trigger_posts(db, &triggers, db::TRIGGER_POSTS_KEPT).await {
+        Ok(fresh) => debug!("Recorded {} trigger posts ({fresh} new)", triggers.len()),
+        Err(ex) => warn!("Could not record the trigger posts in the database: {ex}"),
     }
 
     let prefix = format!("https://{server}/");

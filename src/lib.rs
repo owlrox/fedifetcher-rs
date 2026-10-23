@@ -12,6 +12,7 @@ pub mod context;
 pub mod db;
 pub mod debug;
 pub mod error;
+pub mod fetch;
 pub mod http;
 pub mod lists;
 pub mod logging;

@@ -151,6 +151,8 @@ pub async fn add_post_with_context(
                 cancel,
                 state,
                 db,
+                "backfill",
+                false,
             )
             .await;
             add_context_urls(home, known_context_urls, cancel, state).await;
@@ -161,6 +163,8 @@ pub async fn add_post_with_context(
     false
 }
 
+/// Add the posts of the given accounts. `force` fetches an account even
+/// when it is already known — a run passes false, a manual fetch true.
 pub async fn add_user_posts(
     home: &HomeServer,
     followings: Vec<User>,
@@ -170,13 +174,14 @@ pub async fn add_user_posts(
     cancel: &CancelToken,
     state: &mut State,
     db: &SqlitePool,
+    force: bool,
 ) {
     let home_server = home.server.clone();
     for user in followings {
         if cancel.is_cancelled() {
             break;
         }
-        if !state.all_known_users.contains(&user.acct)
+        if (!state.all_known_users.contains(&user.acct) || force)
             && !user.url.starts_with(&format!("https://{home_server}/"))
         {
             let posts = get_user_posts(&user, target, &home_server, http, config, state, db).await;
