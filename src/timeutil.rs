@@ -62,6 +62,11 @@ pub fn parse(value: &str) -> Option<OffsetDateTime> {
         return Some(local_naive_to_utc(date));
     }
 
+    // The standard shape first — what the APIs send — needing no rewriting.
+    if let Ok(dt) = OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339) {
+        return Some(dt);
+    }
+
     // Normalize the separators RFC 3339 allows, then try the Python shape.
     let mut normalized = text.replace('T', " ");
     if let Some(stripped) = normalized.strip_suffix('Z') {
@@ -88,42 +93,29 @@ pub fn parse(value: &str) -> Option<OffsetDateTime> {
     if let Ok(dt) = PrimitiveDateTime::parse(&normalized, PY_TS_NAIVE) {
         return Some(local_naive_to_utc(dt));
     }
-    OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
+    None
 }
 
 /// Format a timestamp the way Python's `str(datetime)` does, in local time:
 /// `2026-10-22 01:23:45.123456+00:00`, dropping the fraction when it is zero.
 pub fn fmt_state_ts(dt: OffsetDateTime) -> String {
     let local = to_local(dt);
-    let micros = local.microsecond();
-    let fraction = if micros == 0 {
-        String::new()
-    } else {
-        format!(".{micros:06}")
-    };
-    let offset = local.offset();
-    let (sign, hours, minutes) = offset_parts(offset);
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}{fraction}{sign}{hours:02}:{minutes:02}",
-        local.year(),
-        u8::from(local.month()),
-        local.day(),
-        local.hour(),
-        local.minute(),
-        local.second(),
+        "{}{}",
+        fmt_local_naive(local),
+        offset_suffix(local.offset())
     )
 }
 
 /// Format a timestamp as a naive local datetime, the way the lock file is
 /// written: `2026-10-22 01:23:45.123456`.
 pub fn fmt_lock_ts(dt: OffsetDateTime) -> String {
-    let local = to_local(dt);
-    let micros = local.microsecond();
-    let fraction = if micros == 0 {
-        String::new()
-    } else {
-        format!(".{micros:06}")
-    };
+    fmt_local_naive(to_local(dt))
+}
+
+/// A local timestamp without its offset: `2026-10-22 01:23:45.123456`.
+fn fmt_local_naive(local: OffsetDateTime) -> String {
+    let fraction = subsecond_fraction(local.microsecond());
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}{fraction}",
         local.year(),
@@ -133,6 +125,22 @@ pub fn fmt_lock_ts(dt: OffsetDateTime) -> String {
         local.minute(),
         local.second(),
     )
+}
+
+/// The `+00:00` suffix of a UTC offset.
+fn offset_suffix(offset: UtcOffset) -> String {
+    let (sign, hours, minutes) = offset_parts(offset);
+    format!("{sign}{hours:02}:{minutes:02}")
+}
+
+/// The `.123456` fraction of a microsecond value, empty when it is zero —
+/// the way Python's `str(datetime)` drops a zero fraction.
+fn subsecond_fraction(micros: u32) -> String {
+    if micros == 0 {
+        String::new()
+    } else {
+        format!(".{micros:06}")
+    }
 }
 
 fn offset_parts(offset: UtcOffset) -> (char, i8, i8) {
@@ -155,11 +163,7 @@ pub fn fmt_timedelta(duration: Duration) -> String {
     let seconds = rest / 1_000_000;
     let micros = rest % 1_000_000;
 
-    let fraction = if micros == 0 {
-        String::new()
-    } else {
-        format!(".{micros:06}")
-    };
+    let fraction = subsecond_fraction(micros as u32);
     let hms = format!("{hours}:{minutes:02}:{seconds:02}{fraction}");
     if days == 0 {
         hms
