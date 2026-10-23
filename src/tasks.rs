@@ -61,7 +61,14 @@ async fn reply_toots_for_user(
     toots
 }
 
-async fn fetch_timeline_context(ctx: &mut Context<'_>, timeline_posts: Vec<Post>, source: &str) {
+/// Pull the context of the given timeline posts, recording them as trigger
+/// posts under `source`, and backfill any users they mention. The stream
+/// listener calls this for each post an `update` event brings.
+pub async fn fetch_timeline_context(
+    ctx: &mut Context<'_>,
+    timeline_posts: Vec<Post>,
+    source: &str,
+) {
     let known_context_urls = known_context_urls(ctx, &timeline_posts, source, false).await;
     add_context_urls(ctx, known_context_urls).await;
 

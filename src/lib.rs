@@ -21,6 +21,7 @@ pub mod run;
 pub mod servers;
 pub mod state;
 pub mod store;
+pub mod stream;
 pub mod tasks;
 pub mod timeutil;
 pub mod translate;

@@ -183,6 +183,33 @@ impl HttpClient {
             .await
     }
 
+    /// A long-lived GET whose body the caller reads incrementally: the
+    /// server's event stream. No timeout — the connection is meant to sit
+    /// idle between events — and redirects are not followed, so a redirect
+    /// to another host cannot silently lose the access token. The status is
+    /// the caller's to check.
+    pub async fn get_stream(&self, url: &str) -> Result<reqwest::Response> {
+        let mut headers = self.headers.clone().unwrap_or_default();
+        headers
+            .entry(reqwest::header::USER_AGENT)
+            .or_insert_with(|| {
+                HeaderValue::from_str(&self.user_agent()).unwrap_or(HeaderValue::from_static(""))
+            });
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        self.no_redirect_client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|ex| Error::Http {
+                url: url.to_string(),
+                source: ex,
+            })
+    }
+
     /// Get the URL the given URL redirects to.
     pub async fn get_redirect_url(&self, url: &str) -> Option<String> {
         let response = match self.request(Method::HEAD, url, None, None, false).await {

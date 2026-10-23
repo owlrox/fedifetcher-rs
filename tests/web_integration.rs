@@ -220,6 +220,14 @@ async fn the_config_page_has_tooltips_from_the_docs() {
         body.contains("title=\"Log a line for every page load"),
         "the page-load logging option explains itself"
     );
+    assert!(
+        body.contains("name=\"streaming\""),
+        "the streaming option is on the page"
+    );
+    assert!(
+        body.contains("title=\"Stream the home timeline over a long-lived connection"),
+        "the streaming option explains itself"
+    );
 }
 
 #[tokio::test]
@@ -1201,7 +1209,7 @@ async fn saving_the_config_page_writes_the_database() {
 
     let (status, location, _) = post_config(
         &base,
-        "server=example.social&new_access_token=smoke-secret-token-123&max_followers=5&from_lists=1&respect_robots_txt=0&http_timeout=9&hide_server_in_user_agent=1&log_page_loads=1",
+        "server=example.social&new_access_token=smoke-secret-token-123&max_followers=5&from_lists=1&respect_robots_txt=0&http_timeout=9&hide_server_in_user_agent=1&log_page_loads=1&streaming=1",
     )
     .await;
     assert_eq!(status, 303, "the POST must redirect");
@@ -1222,6 +1230,7 @@ async fn saving_the_config_page_writes_the_database() {
         saved.log_page_loads,
         "the page saves the page-load logging option"
     );
+    assert!(saved.streaming, "the page saves the streaming option");
 
     // the page shows the saved values, and still masks the token
     let (status, body) = get(&format!("{base}/config")).await;

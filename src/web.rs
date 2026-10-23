@@ -27,6 +27,7 @@ use crate::fetch;
 use crate::http::HttpClient;
 use crate::run::{run_once, CancelToken, Context, Pause};
 use crate::store::{lock, State, StateStore};
+use crate::stream;
 use crate::timeutil;
 use crate::VERSION;
 
@@ -93,6 +94,22 @@ pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std
             tracing::warn!("Could not mark interrupted runs: {ex}");
         }
         drop(guard);
+    }
+    // The home timeline stream, when the config asks for it: a long-lived
+    // connection that turns new posts into immediate trigger posts. It reads
+    // the config as it was at startup, and runs until the process stops.
+    if config.streaming {
+        if config.server.is_empty() || config.access_tokens.is_empty() {
+            tracing::warn!(
+                "streaming is enabled but the server or an access token is not configured; not streaming"
+            );
+        } else {
+            tokio::spawn(stream::listen(
+                config.clone(),
+                db.clone(),
+                CancelToken::new(),
+            ));
+        }
     }
     let app = app(config, db);
 
@@ -2170,6 +2187,7 @@ fn ConfigPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl
         config.reply_interval_in_hours,
     ));
     rows.push(int_row("home_timeline_length", config.home_timeline_length));
+    rows.push(bool_row("streaming", config.streaming));
     rows.push(int_row("max_followings", config.max_followings));
     rows.push(int_row("max_followers", config.max_followers));
     rows.push(int_row("max_follow_requests", config.max_follow_requests));

@@ -63,6 +63,10 @@ pub struct Config {
     /// Look for replies to posts in the API-Key owner's home timeline, up to
     /// this many posts
     pub home_timeline_length: i64,
+    /// Stream the home timeline over a long-lived connection, fetching
+    /// context for new posts as they arrive instead of at the next run
+    /// (serve mode only, with the first access token)
+    pub streaming: bool,
     /// Optional. Use together with max_followings or max_followers to backfill
     /// a specific user's followings/followers. If omitted, we use the account
     /// that owns the access token.
@@ -141,6 +145,7 @@ impl Default for Config {
             access_tokens: Vec::new(),
             reply_interval_in_hours: 0,
             home_timeline_length: 0,
+            streaming: false,
             user: String::new(),
             max_followings: 0,
             max_followers: 0,
@@ -264,6 +269,7 @@ impl Config {
             "home_timeline_length",
             Value::from(self.home_timeline_length),
         );
+        put("streaming", Value::Bool(self.streaming));
         put("user", Value::String(self.user.clone()));
         put("max_followings", Value::from(self.max_followings));
         put("max_followers", Value::from(self.max_followers));
@@ -397,6 +403,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "access_tokens"
             | "reply_interval_in_hours"
             | "home_timeline_length"
+            | "streaming"
             | "user"
             | "max_followings"
             | "max_followers"
@@ -438,6 +445,7 @@ pub fn option_description(name: &str) -> Option<&'static str> {
         "access_tokens" => "Required: tokens generated at https://<server>/settings/applications, needing read:search, read:statuses and admin:read:accounts scopes. Add one per user whose timelines you fetch.",
         "reply_interval_in_hours" => "Fetch remote replies to posts that have received replies from users on your own instance in this period",
         "home_timeline_length" => "Look for replies to posts in the API key owner's home timeline, up to this many posts",
+        "streaming" => "Stream the home timeline over a long-lived connection, and fetch context for new posts as they arrive instead of waiting for the next run. Serve mode only, with the first access token; applies on restart (default: disabled)",
         "user" => "Use together with max_followings or max_followers to backfill a specific user's followings/followers. If omitted, we use the account that owns the access token.",
         "max_followings" => "Backfill posts for new accounts followed by user. At most this many followings' posts",
         "max_followers" => "Backfill posts for new accounts following user. At most this many followers' posts",
@@ -481,6 +489,7 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
                 coerce_int(value).map(|v| config.reply_interval_in_hours = v)
             }
             "home_timeline_length" => coerce_int(value).map(|v| config.home_timeline_length = v),
+            "streaming" => coerce_bool(value).map(|v| config.streaming = v),
             "user" => coerce_string(value).map(|v| config.user = v),
             "max_followings" => coerce_int(value).map(|v| config.max_followings = v),
             "max_followers" => coerce_int(value).map(|v| config.max_followers = v),
@@ -686,6 +695,7 @@ mod tests {
             "access_tokens",
             "reply_interval_in_hours",
             "home_timeline_length",
+            "streaming",
             "user",
             "max_followings",
             "max_followers",
@@ -789,6 +799,7 @@ mod tests {
         assert_eq!(config.max_list_accounts, 10);
         assert_eq!(config.lock_hours, 24);
         assert!(!config.from_lists);
+        assert!(!config.streaming, "streaming is off by default");
         assert_eq!(config.log_level, "DEBUG");
         assert_eq!(config.log_format, "%(asctime)s: %(message)s");
         assert!(

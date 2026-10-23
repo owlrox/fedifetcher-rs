@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "fedifetcher"
-version = "1.1.9"
+version = "1.1.10"
 dependencies = [
  "axum",
  "clap",
@@ -2293,6 +2293,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -2312,12 +2313,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
