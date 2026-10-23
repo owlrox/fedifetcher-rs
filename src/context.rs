@@ -2,16 +2,25 @@
 
 use indexmap::IndexSet;
 use sqlx::SqlitePool;
+use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info, warn};
 
 use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
-use crate::db::{is_private_post, mark_private_post};
+use crate::db::{self, is_private_post, mark_private_post};
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::CancelToken;
 use crate::servers::get_server_info;
 use crate::store::{RepliedToot, State};
+use crate::timeutil;
+
+/// The minimum time between handling an already-known context post again.
+/// The home server has the post from the first time it was resolved, so
+/// re-resolving it would only chatter at the instance hosting it. A day
+/// keeps that to a recovery path — the state files can drop a URL from
+/// `seen_urls` — while still healing within a day.
+const KNOWN_CONTEXT_RECHECK: Duration = Duration::days(1);
 
 /// Whether the toot's context may be fetched, recording private toots.
 ///
@@ -48,7 +57,11 @@ pub async fn toot_context_can_be_fetched(toot: &Post, db: &SqlitePool) -> bool {
     }
 }
 
-/// Get the context toots of the given toots from their original server.
+/// Get the context toots of the given toots from their original server,
+/// recording them in the database. Only the posts that need handling are
+/// returned: new ones, and already-known ones last seen longer ago than
+/// KNOWN_CONTEXT_RECHECK — the rest the home server already has, and
+/// re-resolving them would only chatter at the instance hosting them.
 pub async fn get_all_known_context_urls(
     server: &str,
     reply_toots: &[Post],
@@ -101,7 +114,7 @@ pub async fn get_all_known_context_urls(
     }
 
     let prefix = format!("https://{server}/");
-    let known_context_urls: Vec<String> = known_context_urls
+    let found: Vec<String> = known_context_urls
         .into_iter()
         .filter(|url| {
             if url.starts_with(&prefix) {
@@ -112,9 +125,54 @@ pub async fn get_all_known_context_urls(
             }
         })
         .collect();
-    info!("{}", known_context_found_line(&known_context_urls, &scan));
 
-    known_context_urls
+    // record what the run found, and keep only what needs handling
+    let (to_handle, known) = match db::record_known_context_posts(db, &found).await {
+        Ok(previous) => {
+            let (to_handle, new, already_known) =
+                partition_known_context(&found, previous, timeutil::now());
+            (to_handle, Some((new, already_known)))
+        }
+        Err(ex) => {
+            warn!("Could not record the known context toots in the database: {ex}");
+            (found.clone(), None)
+        }
+    };
+
+    info!("{}", known_context_found_line(&found, &scan, known));
+
+    to_handle
+}
+
+/// Split the found context posts into what needs handling and what the
+/// database already knew about: a post is handled when it is new, or when
+/// it was last seen longer ago than KNOWN_CONTEXT_RECHECK. Returns the
+/// posts to handle, and the counts of new and already-known posts.
+fn partition_known_context(
+    found: &[String],
+    previous_last_seen: Vec<Option<String>>,
+    now: OffsetDateTime,
+) -> (Vec<String>, usize, usize) {
+    let mut to_handle = Vec::new();
+    let mut new = 0;
+    for (url, last_seen) in found.iter().zip(previous_last_seen) {
+        match last_seen {
+            None => {
+                new += 1;
+                to_handle.push(url.clone());
+            }
+            Some(last_seen) => {
+                let recently_seen = timeutil::parse(&last_seen)
+                    .map(|seen| now - seen < KNOWN_CONTEXT_RECHECK)
+                    // an unreadable timestamp is handled again, not trusted
+                    .unwrap_or(false);
+                if !recently_seen {
+                    to_handle.push(url.clone());
+                }
+            }
+        }
+    }
+    (to_handle, new, found.len() - new)
 }
 
 /// What became of the toots a context scan was given, so the summary line
@@ -139,21 +197,31 @@ struct ContextScan {
 /// toots found, comma separated. An empty set gets the bare count. What the
 /// scan did with its toots follows, so a bare "Found 0" says why; URLs on
 /// our own server are counted separately, as they are dropped, not found.
-fn known_context_found_line(urls: &[String], scan: &ContextScan) -> String {
+/// `known` is the (new, already known) split of the database record, so a
+/// run that found nothing new says so.
+fn known_context_found_line(
+    urls: &[String],
+    scan: &ContextScan,
+    known: Option<(usize, usize)>,
+) -> String {
     let found = if urls.is_empty() {
         "Found 0 known context toots".to_string()
     } else {
         format!("Found {} known context toots: {}", urls.len(), urls.join(", "))
     };
-    let local = if scan.local > 0 {
-        format!("; {} on our server", scan.local)
-    } else {
-        String::new()
-    };
-    format!(
-        "{found} (from {} toots: {} private, {} unresolved, {} already checked recently, {} fetched{local})",
+    let mut parts = vec![format!(
+        "from {} toots: {} private, {} unresolved, {} already checked recently, {} fetched",
         scan.total, scan.private, scan.unresolved, scan.recently_checked, scan.fetched
-    )
+    )];
+    if scan.local > 0 {
+        parts.push(format!("{} on our server", scan.local));
+    }
+    if let Some((new, already_known)) = known {
+        if !urls.is_empty() {
+            parts.push(format!("{new} new, {already_known} already known"));
+        }
+    }
+    format!("{found} ({})", parts.join("; "))
 }
 
 /// Get the server and ID of the toots the given toots replied to.
@@ -320,8 +388,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            known_context_found_line(&urls, &scan),
-            "Found 2 known context toots: https://remote.example/@alice/1, https://other.example/@bob/2 (from 5 toots: 0 private, 0 unresolved, 2 already checked recently, 3 fetched)"
+            known_context_found_line(&urls, &scan, Some((1, 1))),
+            "Found 2 known context toots: https://remote.example/@alice/1, https://other.example/@bob/2 (from 5 toots: 0 private, 0 unresolved, 2 already checked recently, 3 fetched; 1 new, 1 already known)"
         );
     }
 
@@ -335,12 +403,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            known_context_found_line(&[], &scan),
+            known_context_found_line(&[], &scan, Some((0, 0))),
             "Found 0 known context toots (from 3 toots: 1 private, 1 unresolved, 1 already checked recently, 0 fetched)"
         );
-        // no toots given at all
+        // no toots given at all, and no database record to report
         assert_eq!(
-            known_context_found_line(&[], &ContextScan::default()),
+            known_context_found_line(&[], &ContextScan::default(), None),
             "Found 0 known context toots (from 0 toots: 0 private, 0 unresolved, 0 already checked recently, 0 fetched)"
         );
     }
@@ -354,9 +422,55 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            known_context_found_line(&[], &scan),
+            known_context_found_line(&[], &scan, None),
             "Found 0 known context toots (from 1 toots: 0 private, 0 unresolved, 0 already checked recently, 1 fetched; 2 on our server)"
         );
+    }
+
+    #[test]
+    fn new_context_posts_are_all_handled() {
+        let found = vec![
+            "https://remote.example/@a/1".to_string(),
+            "https://remote.example/@a/2".to_string(),
+        ];
+        let (to_handle, new, known) =
+            partition_known_context(&found, vec![None, None], timeutil::now());
+        assert_eq!(to_handle, found);
+        assert_eq!((new, known), (2, 0));
+    }
+
+    #[test]
+    fn recently_known_context_posts_are_not_handled_again() {
+        let found = vec!["https://remote.example/@a/1".to_string()];
+        let recent = timeutil::fmt_state_ts(timeutil::now() - Duration::hours(1));
+        let (to_handle, new, known) =
+            partition_known_context(&found, vec![Some(recent)], timeutil::now());
+        assert!(
+            to_handle.is_empty(),
+            "seen within the re-check interval, so the home server already has it"
+        );
+        assert_eq!((new, known), (0, 1));
+    }
+
+    #[test]
+    fn stale_context_posts_are_handled_again() {
+        let found = vec!["https://remote.example/@a/1".to_string()];
+        let stale = timeutil::fmt_state_ts(timeutil::now() - Duration::days(2));
+        let (to_handle, new, known) =
+            partition_known_context(&found, vec![Some(stale)], timeutil::now());
+        assert_eq!(
+            to_handle, found,
+            "last seen beyond the re-check interval"
+        );
+        assert_eq!((new, known), (0, 1));
+
+        // an unreadable timestamp is handled again rather than trusted
+        let (to_handle, _, _) = partition_known_context(
+            &found,
+            vec![Some("not a timestamp".to_string())],
+            timeutil::now(),
+        );
+        assert_eq!(to_handle, found);
     }
 
     #[test]

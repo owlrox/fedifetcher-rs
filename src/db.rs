@@ -94,6 +94,16 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
     .execute(&pool)
     .await
     .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS known_context_posts (
+            uri TEXT PRIMARY KEY,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
     Ok(pool)
 }
 
@@ -383,6 +393,38 @@ pub async fn opted_out_account_reason(pool: &SqlitePool, acct: &str) -> Result<O
         .await
         .map_err(db_error)?;
     Ok(found.map(|row| row.get("reason")))
+}
+
+/// Record the context posts a run found, and report what the database
+/// already knew about each: `None` when the post is new, or the `last_seen`
+/// of the earlier record. `first_seen` is kept from the first record;
+/// `last_seen` is refreshed on every sighting.
+pub async fn record_known_context_posts(
+    pool: &SqlitePool,
+    uris: &[String],
+) -> Result<Vec<Option<String>>> {
+    let now = timeutil::fmt_state_ts(timeutil::now());
+    let mut previous = Vec::with_capacity(uris.len());
+    for uri in uris {
+        let last_seen: Option<String> =
+            sqlx::query_scalar("SELECT last_seen FROM known_context_posts WHERE uri = ?")
+                .bind(uri)
+                .fetch_optional(pool)
+                .await
+                .map_err(db_error)?;
+        sqlx::query(
+            "INSERT INTO known_context_posts (uri, first_seen, last_seen) VALUES (?, ?, ?)
+                ON CONFLICT(uri) DO UPDATE SET last_seen = excluded.last_seen",
+        )
+        .bind(uri)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+        previous.push(last_seen);
+    }
+    Ok(previous)
 }
 
 fn db_error(ex: sqlx::Error) -> Error {
@@ -681,7 +723,13 @@ mod tests {
         let pool = open(&config).await.unwrap();
 
         let tables = list_tables(&pool).await.unwrap();
-        for expected in ["logs", "opted_out_accounts", "private_posts", "runs"] {
+        for expected in [
+            "known_context_posts",
+            "logs",
+            "opted_out_accounts",
+            "private_posts",
+            "runs",
+        ] {
             assert!(tables.contains(&expected.to_string()), "{expected} listed");
         }
         assert!(
@@ -758,6 +806,60 @@ mod tests {
             [Some("y".to_string()), Some("text".to_string())]
         );
         assert_eq!(rows[2][1].as_deref(), Some("42"), "integers are text");
+    }
+
+    #[tokio::test]
+    async fn new_known_context_posts_are_reported_as_new() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let urls = vec!["https://remote.example/@a/1".to_string()];
+        let previous = record_known_context_posts(&pool, &urls).await.unwrap();
+        assert_eq!(previous, vec![None], "the post is new");
+        assert_eq!(table_count(&pool, "known_context_posts").await.unwrap(), 1);
+
+        // a sighting with nothing found records nothing
+        assert!(
+            record_known_context_posts(&pool, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn known_context_posts_keep_first_seen_and_refresh_last_seen() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let uri = "https://remote.example/@a/1";
+        let long_ago = timeutil::fmt_state_ts(timeutil::now() - time::Duration::days(30));
+        sqlx::query("INSERT INTO known_context_posts (uri, first_seen, last_seen) VALUES (?, ?, ?)")
+            .bind(uri)
+            .bind(&long_ago)
+            .bind(&long_ago)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let previous = record_known_context_posts(&pool, &[uri.to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            previous,
+            vec![Some(long_ago.clone())],
+            "the earlier last_seen is reported, so the caller can tell how recent it was"
+        );
+
+        let row: (String, String) =
+            sqlx::query_as("SELECT first_seen, last_seen FROM known_context_posts WHERE uri = ?")
+                .bind(uri)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, long_ago, "first_seen is kept from the first record");
+        assert_ne!(row.1, long_ago, "last_seen is refreshed");
+        assert!(timeutil::parse(&row.1).is_some(), "the refresh is a real timestamp");
     }
 
     #[tokio::test]
