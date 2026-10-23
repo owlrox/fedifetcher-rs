@@ -453,8 +453,9 @@ async fn drain_queued(handler: Handler, cancel: CancelToken) {
 }
 
 /// The base URL the event stream is served from: the streaming host the
-/// instance's v2 instance document names, or the API's own host when the
-/// document says nothing or cannot be read.
+/// instance's v2 instance document names — a WebSocket URL, mapped to its
+/// HTTP equivalent — or the API's own host when the document says nothing,
+/// cannot be read, or names nothing recognizable.
 async fn streaming_base(base: &str, http: &HttpClient) -> String {
     let url = format!("{base}/api/v2/instance");
     let response = match http.ignoring_robots().get(&url, None).await {
@@ -478,9 +479,31 @@ async fn streaming_base(base: &str, http: &HttpClient) -> String {
         .pointer("/configuration/urls/streaming")
         .and_then(Value::as_str)
     {
-        Some(streaming) if !streaming.is_empty() => streaming.trim_end_matches('/').to_string(),
+        Some(streaming) => http_base(streaming).unwrap_or_else(|| base.to_string()),
         _ => base.to_string(),
     }
+}
+
+/// The HTTP base of the event stream: the instance document names the
+/// streaming host as a WebSocket URL, and the stream here is read over
+/// HTTP, so the scheme is mapped — `wss` to `https`, `ws` to `http` — and
+/// an HTTP URL is taken as it is. Nothing recognizable gives None, and the
+/// caller falls back to the API's own host.
+fn http_base(streaming: &str) -> Option<String> {
+    let (scheme, host) = if let Some(host) = streaming.strip_prefix("wss://") {
+        ("https", host)
+    } else if let Some(host) = streaming.strip_prefix("ws://") {
+        ("http", host)
+    } else if let Some(host) = streaming.strip_prefix("https://") {
+        ("https", host)
+    } else {
+        ("http", streaming.strip_prefix("http://")?)
+    };
+    let host = host.trim_end_matches('/');
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}"))
 }
 
 /// Wait out the reconnect delay, re-checking the cancel flag as it goes.
@@ -669,6 +692,42 @@ mod tests {
             },
             crate::db::memory_pool(),
         )
+    }
+
+    #[test]
+    fn a_websocket_streaming_url_maps_to_http() {
+        assert_eq!(
+            http_base("wss://stream.example.com"),
+            Some("https://stream.example.com".to_string())
+        );
+        assert_eq!(
+            http_base("wss://stream.example.com/"),
+            Some("https://stream.example.com".to_string()),
+            "the trailing slash is trimmed"
+        );
+        assert_eq!(
+            http_base("ws://stream.example.com:4000"),
+            Some("http://stream.example.com:4000".to_string())
+        );
+    }
+
+    #[test]
+    fn an_http_streaming_url_is_taken_as_it_is() {
+        assert_eq!(
+            http_base("https://stream.example.com"),
+            Some("https://stream.example.com".to_string())
+        );
+        assert_eq!(
+            http_base("http://stream.example.com"),
+            Some("http://stream.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unrecognizable_streaming_url_gives_none() {
+        assert_eq!(http_base("ftp://stream.example.com"), None);
+        assert_eq!(http_base("wss://"), None, "no host");
+        assert_eq!(http_base(""), None);
     }
 
     #[tokio::test]

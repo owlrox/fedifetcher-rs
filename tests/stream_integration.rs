@@ -339,3 +339,57 @@ async fn an_update_during_a_run_is_queued_and_handled_after_it() {
         .expect("the queued update was handled once the lock came free");
     assert_eq!(recorded.source, "stream");
 }
+
+/// The instance document names the streaming host as a WebSocket URL; the
+/// stream is read over HTTP, so the scheme is mapped and the listener
+/// connects anyway.
+#[tokio::test]
+async fn a_websocket_streaming_url_is_read_over_http() {
+    let dir = common::tmp_dir();
+    let home = MockServer::start_async().await;
+    let (stream_url, connections) = sse_server(&[post_event(
+        "update",
+        "https://127.0.0.1:9/@alice/4",
+        "public",
+    )])
+    .await;
+    // the instance document names the stream's host as a WebSocket URL
+    home_with_stream(&home, &stream_url.replace("http://", "ws://")).await;
+    home.mock_async(|when, then| {
+        when.method(Method::GET).path("/api/v2/search");
+        then.status(200);
+    })
+    .await;
+
+    let mut config = common::test_config(&dir, &host(&home));
+    config.streaming = true;
+    let db = db::open(&config).await.unwrap();
+    let (listener, cancel) = start_listener(config, db.clone());
+
+    let db2 = db.clone();
+    until(|| {
+        let db = db2.clone();
+        async move {
+            db::trigger_post(&db, "https://127.0.0.1:9/@alice/4")
+                .await
+                .unwrap()
+                .is_some()
+        }
+    })
+    .await;
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(10), listener)
+        .await
+        .expect("the canceled listener stops promptly")
+        .expect("the listener did not panic");
+
+    assert!(
+        connections.load(Ordering::Relaxed) >= 1,
+        "the listener connected to the streaming host over HTTP"
+    );
+    let recorded = db::trigger_post(&db, "https://127.0.0.1:9/@alice/4")
+        .await
+        .unwrap()
+        .expect("the streamed post is recorded as a trigger post");
+    assert_eq!(recorded.source, "stream");
+}
