@@ -271,3 +271,71 @@ async fn a_refused_token_stops_the_listener() {
 
     assert_eq!(stream.calls(), 1, "the stream was tried once, not retried");
 }
+
+/// An update that arrives while a run holds the lock waits in the queue,
+/// and is handled as soon as the lock comes free.
+#[tokio::test]
+async fn an_update_during_a_run_is_queued_and_handled_after_it() {
+    let dir = common::tmp_dir();
+    let home = MockServer::start_async().await;
+    let (stream_url, connections) = sse_server(&[post_event(
+        "update",
+        "https://127.0.0.1:9/@alice/3",
+        "public",
+    )])
+    .await;
+    home_with_stream(&home, &stream_url).await;
+    home.mock_async(|when, then| {
+        when.method(Method::GET).path("/api/v2/search");
+        then.status(200);
+    })
+    .await;
+
+    let mut config = common::test_config(&dir, &host(&home));
+    config.streaming = true;
+    let db = db::open(&config).await.unwrap();
+
+    // a run holds the lock: the event is queued, not handled
+    let guard = fedifetcher::store::lock(&config).unwrap();
+    let (listener, cancel) = start_listener(config, db.clone());
+    let connections2 = connections.clone();
+    until(|| {
+        let connections = connections2.clone();
+        async move { connections.load(Ordering::Relaxed) >= 1 }
+    })
+    .await;
+    // the event has been read by now; give the handling a moment to queue it
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        db::trigger_post(&db, "https://127.0.0.1:9/@alice/3")
+            .await
+            .unwrap()
+            .is_none(),
+        "the update is not handled while the run holds the lock"
+    );
+
+    // the run ends: the queued update is handled
+    drop(guard);
+    let db2 = db.clone();
+    until(|| {
+        let db = db2.clone();
+        async move {
+            db::trigger_post(&db, "https://127.0.0.1:9/@alice/3")
+                .await
+                .unwrap()
+                .is_some()
+        }
+    })
+    .await;
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(10), listener)
+        .await
+        .expect("the canceled listener stops promptly")
+        .expect("the listener did not panic");
+
+    let recorded = db::trigger_post(&db, "https://127.0.0.1:9/@alice/3")
+        .await
+        .unwrap()
+        .expect("the queued update was handled once the lock came free");
+    assert_eq!(recorded.source, "stream");
+}

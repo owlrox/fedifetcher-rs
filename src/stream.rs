@@ -6,8 +6,11 @@
 //! the first access token. Every `update` event is a home timeline post,
 //! handled exactly as the home timeline scan handles one: recorded as a
 //! trigger post, and its context pulled. The lock file keeps the handling
-//! from overlapping a run.
+//! from overlapping a run; an event that arrives while a run holds the lock
+//! waits in a small queue, and is handled as soon as the lock comes free.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -20,8 +23,9 @@ use crate::api::mastodon::{masked, parse_post, report_mastodon_error, HomeServer
 use crate::config::Config;
 use crate::error::Error;
 use crate::http::HttpClient;
+use crate::posts::Post;
 use crate::run::{CancelToken, Context, Pause};
-use crate::store::{lock, StateStore};
+use crate::store::{lock, LockGuard, StateStore};
 use crate::tasks::fetch_timeline_context;
 
 /// Seconds to wait before reconnecting after the stream ends or fails,
@@ -43,6 +47,83 @@ const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 
 /// How often the reconnect wait re-checks the cancel flag.
 const CANCEL_POLL: Duration = Duration::from_millis(200);
+
+/// How many update events may wait for the lock a run holds. The latest
+/// are kept: the ones dropped off the front are the next run's home
+/// timeline scan's to find.
+const QUEUED_UPDATES: usize = 10;
+
+/// How often the drainer checks for queued events and for the lock coming
+/// free.
+const QUEUE_POLL: Duration = Duration::from_secs(1);
+
+/// How many drainer polls between lock attempts while the lock file
+/// exists. The attempt is what reclaims a lock a dead process left behind,
+/// and every failed attempt logs, so the frequent check is the file's
+/// existence alone.
+const STALE_LOCK_POLLS: u32 = 60;
+
+/// The update events waiting for the lock a run holds: the read loop pushes
+/// as events arrive, the drainer task takes them all once it has the lock.
+struct UpdateQueue {
+    posts: Mutex<VecDeque<Post>>,
+}
+
+impl UpdateQueue {
+    fn new() -> Self {
+        UpdateQueue {
+            posts: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Queue a post, unless it is already waiting. When the queue is full
+    /// the oldest waiting post makes room: the latest events are the ones
+    /// worth handling first.
+    fn push(&self, post: Post) {
+        let mut posts = self.posts.lock().unwrap();
+        if posts.iter().any(|waiting| waiting.url == post.url) {
+            return;
+        }
+        if posts.len() >= QUEUED_UPDATES {
+            posts.pop_front();
+        }
+        posts.push_back(post);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.posts.lock().unwrap().is_empty()
+    }
+
+    /// Take every waiting post.
+    fn take_all(&self) -> Vec<Post> {
+        self.posts.lock().unwrap().drain(..).collect()
+    }
+}
+
+/// What handling an update event needs: the settings, the state database,
+/// who to ask, and the queue events wait in while a run holds the lock.
+#[derive(Clone)]
+struct Handler {
+    config: Config,
+    db: SqlitePool,
+    http: HttpClient,
+    home: HomeServer,
+    queue: Arc<UpdateQueue>,
+}
+
+impl Handler {
+    fn new(config: &Config, db: &SqlitePool, scheme: &str, token: &str) -> Self {
+        let http = HttpClient::new(config.clone(), db.clone());
+        let home = HomeServer::with_scheme(&config.server, scheme, token, http.clone());
+        Handler {
+            config: config.clone(),
+            db: db.clone(),
+            http,
+            home,
+            queue: Arc::new(UpdateQueue::new()),
+        }
+    }
+}
 
 /// One server-sent event: its `event:` name, empty for the default
 /// "message", and its `data:` lines joined with newlines.
@@ -165,12 +246,15 @@ pub async fn listen_with_scheme(scheme: &str, config: Config, db: SqlitePool, ca
         warn!("streaming is enabled but no access token is configured; not streaming");
         return;
     };
-    let http = HttpClient::new(config.clone(), db.clone());
-    let home = HomeServer::with_scheme(&config.server, scheme, &token, http.clone());
+    let handler = Handler::new(&config, &db, scheme, &token);
     let base = format!("{scheme}://{}", config.server);
-    let stream_base = streaming_base(&base, &http).await;
+    let stream_base = streaming_base(&base, &handler.http).await;
     let url = format!("{stream_base}/api/v1/streaming/user");
     info!("Streaming home timeline updates from {url}");
+
+    // events that arrive while a run holds the lock wait in the handler's
+    // queue, and are handled as soon as it comes free
+    tokio::spawn(drain_queued(handler.clone(), cancel.clone()));
 
     let mut failures = 0usize;
     loop {
@@ -179,7 +263,7 @@ pub async fn listen_with_scheme(scheme: &str, config: Config, db: SqlitePool, ca
             return;
         }
         let connected = Instant::now();
-        match read_stream(&url, &token, &http, &cancel, &config, &db, &home).await {
+        match read_stream(&url, &token, &cancel, &handler).await {
             StreamEnd::Closed => debug!("The stream ended; reconnecting"),
             StreamEnd::Refused => {
                 // the token was refused; no retry would change that
@@ -211,16 +295,8 @@ enum StreamEnd {
 
 /// Connect to the stream and handle its events until it ends, goes silent,
 /// or the listener is canceled; returns why the reading stopped.
-async fn read_stream(
-    url: &str,
-    token: &str,
-    http: &HttpClient,
-    cancel: &CancelToken,
-    config: &Config,
-    db: &SqlitePool,
-    home: &HomeServer,
-) -> StreamEnd {
-    let response = match http.authenticated(token).get_stream(url).await {
+async fn read_stream(url: &str, token: &str, cancel: &CancelToken, handler: &Handler) -> StreamEnd {
+    let response = match handler.http.authenticated(token).get_stream(url).await {
         Ok(response) => response,
         Err(ex) => return StreamEnd::Failed(ex),
     };
@@ -279,7 +355,7 @@ async fn read_stream(
                 return StreamEnd::Closed;
             }
             if event.event == "update" {
-                handle_update(config, db, http, home, &event.data).await;
+                handle_update(handler, &event.data).await;
             }
         }
     }
@@ -287,15 +363,10 @@ async fn read_stream(
 
 /// Handle one `update` event: the post is a trigger post, exactly as the
 /// home timeline scan treats one — recorded, and its context pulled. The
-/// lock keeps the handling from overlapping a run; when one holds it, the
-/// event is skipped, because that run is scanning and will find the post.
-async fn handle_update(
-    config: &Config,
-    db: &SqlitePool,
-    http: &HttpClient,
-    home: &HomeServer,
-    data: &str,
-) {
+/// lock keeps the handling from overlapping a run; while one holds it, the
+/// post waits in the queue, and the drainer task handles it as soon as the
+/// lock comes free.
+async fn handle_update(handler: &Handler, data: &str) {
     let Ok(raw) = serde_json::from_str::<Value>(data) else {
         debug!("Stream: an update event whose payload is not JSON; ignored");
         return;
@@ -306,38 +377,79 @@ async fn handle_update(
     };
     debug!("Stream: update {}", post.url);
 
-    let lock = match lock(config) {
-        Ok(lock) => lock,
-        Err(ex) => {
-            debug!("Stream: not handling {} now: {ex}", post.url);
-            return;
+    match lock(&handler.config) {
+        Ok(lock) => {
+            handle_posts(handler, vec![post], lock).await;
         }
-    };
+        Err(ex) => {
+            debug!("Stream: queueing {}: {ex}", post.url);
+            handler.queue.push(post);
+        }
+    }
+}
 
-    let store = StateStore::new(config.clone());
-    let mut session = match store.session(db).await {
+/// Fetch the given posts' context in one session, with the lock held: the
+/// posts are recorded as trigger posts under the "stream" source, and the
+/// state is written back before the lock is released.
+async fn handle_posts(handler: &Handler, posts: Vec<Post>, lock: LockGuard) {
+    let store = StateStore::new(handler.config.clone());
+    let mut session = match store.session(&handler.db).await {
         Ok(session) => session,
         Err(ex) => {
-            warn!("Stream: could not load the state for {}: {ex}", post.url);
+            warn!("Stream: could not load the state: {ex}");
             return;
         }
     };
     {
         let mut ctx = Context {
-            config,
+            config: &handler.config,
             state: session.state(),
-            http,
-            home,
+            http: &handler.http,
+            home: &handler.home,
             cancel: CancelToken::new(),
             pause: Pause::new(),
-            db,
+            db: &handler.db,
         };
-        fetch_timeline_context(&mut ctx, vec![post], "stream").await;
+        fetch_timeline_context(&mut ctx, posts, "stream").await;
     }
     if let Err(ex) = session.finish().await {
         warn!("Stream: could not write the state back: {ex}");
     }
     drop(lock);
+}
+
+/// Handle the queued update events as soon as the lock a run holds comes
+/// free: wait the run out, then fetch them in one session. Runs until the
+/// listener is canceled.
+async fn drain_queued(handler: Handler, cancel: CancelToken) {
+    let mut polls = 0u32;
+    loop {
+        if cancel.is_canceled() {
+            debug!("The stream queue drainer stopped");
+            return;
+        }
+        if !handler.queue.is_empty() {
+            polls += 1;
+            // the lock file's existence is the cheap contention check; a
+            // real attempt is made when it is gone, and every
+            // STALE_LOCK_POLLS polls regardless, because the attempt is
+            // what reclaims a lock a dead process left behind (and every
+            // failed attempt logs)
+            if !handler.config.lock_path().exists() || polls.is_multiple_of(STALE_LOCK_POLLS) {
+                if let Ok(lock) = lock(&handler.config) {
+                    let posts = handler.queue.take_all();
+                    if posts.is_empty() {
+                        drop(lock);
+                    } else {
+                        debug!("Stream: handling {} queued update(s)", posts.len());
+                        handle_posts(&handler, posts, lock).await;
+                    }
+                    polls = 0;
+                }
+            }
+        }
+        sleep(QUEUE_POLL).await;
+    }
 }
 
 /// The base URL the event stream is served from: the streaming host the
@@ -477,6 +589,75 @@ mod tests {
         let events = events(&[b"id: 42\nretry: 1000\nevent: update\ndata: x\n\n"]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "x");
+    }
+
+    fn post(url: &str) -> Post {
+        parse_post(&serde_json::json!({
+            "id": "1",
+            "url": url,
+            "uri": url,
+            "created_at": "2026-10-23T10:00:00.000Z",
+            "visibility": "public",
+            "reblog": null,
+            "account": {"acct": "alice@example.com", "url": "https://example.com/@alice"},
+        }))
+        .expect("a post")
+    }
+
+    #[test]
+    fn the_queue_takes_every_waiting_post() {
+        let queue = UpdateQueue::new();
+        assert!(queue.is_empty());
+        queue.push(post("https://example.com/@alice/1"));
+        queue.push(post("https://example.com/@alice/2"));
+        let posts = queue.take_all();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0].url, "https://example.com/@alice/1");
+        assert!(queue.is_empty(), "take_all empties the queue");
+    }
+
+    #[test]
+    fn a_post_already_waiting_is_not_queued_twice() {
+        let queue = UpdateQueue::new();
+        queue.push(post("https://example.com/@alice/1"));
+        queue.push(post("https://example.com/@alice/1"));
+        assert_eq!(queue.take_all().len(), 1);
+    }
+
+    #[test]
+    fn a_full_queue_keeps_the_latest_posts() {
+        let queue = UpdateQueue::new();
+        for n in 0..QUEUED_UPDATES + 3 {
+            queue.push(post(&format!("https://example.com/@alice/{n}")));
+        }
+        let posts = queue.take_all();
+        assert_eq!(posts.len(), QUEUED_UPDATES);
+        assert_eq!(
+            posts[0].url, "https://example.com/@alice/3",
+            "the oldest waiting posts made room"
+        );
+        assert_eq!(
+            posts[QUEUED_UPDATES - 1].url,
+            format!("https://example.com/@alice/{}", QUEUED_UPDATES + 2)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drainer_stops_when_canceled() {
+        let config = Config {
+            server: "home.example".to_string(),
+            access_tokens: vec!["t".to_string()],
+            ..Default::default()
+        };
+        let db = crate::db::memory_pool();
+        let handler = Handler::new(&config, &db, "https", "t");
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let drainer = tokio::spawn(drain_queued(handler, cancel));
+        tokio::time::timeout(std::time::Duration::from_secs(5), drainer)
+            .await
+            .expect("the canceled drainer stops promptly")
+            .expect("the drainer did not panic");
     }
 
     fn http() -> HttpClient {
