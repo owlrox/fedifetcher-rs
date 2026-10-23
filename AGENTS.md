@@ -2,10 +2,12 @@
 
 ## Versioning
 
-Increment the patch version in `Cargo.toml` with every change (a point
-release): 1.0.0 was the original port of FediFetcher 8.2.3, and each
-revision since has bumped it (1.0.1, 1.0.2, 1.0.3, ...). Do not reuse a
-version for a new change.
+Increment the version in `Cargo.toml` with every change: the patch
+number for a point release (1.0.0 was the original port of FediFetcher
+8.2.3, and the revisions since bumped it 1.0.1, 1.0.2, 1.0.3, ...), or
+the minor number when the progress warrants a bigger step — 1.1.0 is
+this release, carrying the GPLv3 relicensing and the web UI rework. Do
+not reuse a version for a new change.
 
 The version surfaces in the web UI header, in `--version`, and in the
 startup log line — all read `env!("CARGO_PKG_VERSION")` — so the bump is
@@ -18,8 +20,12 @@ them in the same commit. Never push a version bump without its write-up,
 and never commit a change without its bump.
 
 End the commit subject with the version in parentheses — `Some change
-(1.0.36)` — so the message and `Cargo.toml` can be checked against each
-other (`git show <commit>:Cargo.toml`).
+(1.1.0)` — so the message and `Cargo.toml` can be checked against each
+other (`git show <commit>:Cargo.toml`). The convention took hold at
+1.0.19; commits before it bumped without naming a version. One commit
+after it broke the convention — 4f0b94f bumped 1.0.24 to 1.0.25 without
+naming it — and carries a git note recording the version
+(`git notes show 4f0b94f`) rather than a rewritten history.
 
 ## Style
 
