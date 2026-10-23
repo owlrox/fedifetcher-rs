@@ -6,30 +6,30 @@
 
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Query, State as AxumState};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::{get, post};
-use axum::Router;
 use leptos::prelude::*;
 use regex::Regex;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::api::mastodon::{masked, HomeServer};
+use crate::VERSION;
+use crate::api::mastodon::{HomeServer, masked};
 use crate::backfill::UserSet;
-use crate::config::{is_known_option, option_description, Config, RawValues};
+use crate::config::{Config, RawValues, is_known_option, option_description};
 use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
-use crate::run::{run_once, CancelToken, Context, Pause};
-use crate::store::{lock, State, StateStore};
+use crate::run::{CancelToken, Context, Pause, run_once};
+use crate::store::{State, StateStore, lock};
 use crate::stream;
 use crate::timeutil;
-use crate::VERSION;
 
 /// The most runs remembered for the dashboard's history.
 const HISTORY_CAPACITY: usize = 50;
@@ -1028,8 +1028,8 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str, forc
     };
     let (outcome, message) = do_fetch(state, kind, key, set, force).await;
     let finished = timeutil::now();
-    if let Some(id) = run_id {
-        if let Err(ex) = db::finish_run(
+    if let Some(id) = run_id
+        && let Err(ex) = db::finish_run(
             &state.db,
             id,
             &timeutil::fmt_state_ts(finished),
@@ -1037,9 +1037,8 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str, forc
             &message,
         )
         .await
-        {
-            tracing::warn!("Could not record the fetch's end in the database: {ex}");
-        }
+    {
+        tracing::warn!("Could not record the fetch's end in the database: {ex}");
     }
 }
 

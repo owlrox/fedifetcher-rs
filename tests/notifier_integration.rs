@@ -5,8 +5,8 @@ mod common;
 
 use fedifetcher::http::HttpClient;
 use fedifetcher::run::Notifier;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 use uuid::Uuid;
 
 async fn notifier(

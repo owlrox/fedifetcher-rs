@@ -644,10 +644,11 @@ impl HomeServer {
                 .and_then(Value::as_str)
                 .and_then(timeutil::parse);
             let account = notification.get("account").and_then(parse_user);
-            if let (Some(when), Some(account)) = (when, account) {
-                if when >= since && !accounts.contains(&account) {
-                    accounts.push(account);
-                }
+            if let (Some(when), Some(account)) = (when, account)
+                && when >= since
+                && !accounts.contains(&account)
+            {
+                accounts.push(account);
             }
         }
         Ok(accounts)

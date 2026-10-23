@@ -10,12 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use sqlx::SqlitePool;
 use time::{OffsetDateTime, UtcOffset};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::FmtContext;
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
@@ -82,7 +82,7 @@ pub fn setup(config: &Config, pool: SqlitePool) -> Result<LogDb> {
         other => {
             return Err(Error::Config(format!(
                 "Unknown level: {other:?} (DEBUG|INFO|WARNING|ERROR|CRITICAL)"
-            )))
+            )));
         }
     };
 
@@ -124,10 +124,10 @@ fn spawn_writer(pool: SqlitePool, mut rx: UnboundedReceiver<LogRow>) -> JoinHand
                 eprintln!("WARNING:FediFetcher:could not write a log line to the database: {ex}");
             }
             received += 1;
-            if received % PRUNE_EVERY == 0 {
-                if let Err(ex) = db::prune_logs(&pool, LOG_RETENTION).await {
-                    eprintln!("WARNING:FediFetcher:could not prune the log database: {ex}");
-                }
+            if received % PRUNE_EVERY == 0
+                && let Err(ex) = db::prune_logs(&pool, LOG_RETENTION).await
+            {
+                eprintln!("WARNING:FediFetcher:could not prune the log database: {ex}");
             }
         }
     })

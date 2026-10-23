@@ -31,10 +31,10 @@ pub fn default_state_dir() -> PathBuf {
     if std::path::Path::new(LEGACY_STATE_DIR).is_dir() {
         return PathBuf::from(LEGACY_STATE_DIR);
     }
-    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("fedifetcher");
-        }
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("fedifetcher");
     }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home)
@@ -442,40 +442,100 @@ pub fn is_known_option(name: &str) -> bool {
 pub fn option_description(name: &str) -> Option<&'static str> {
     Some(match name {
         "server" => "Required: the name of your server (e.g. mstdn.thms.uk)",
-        "access_tokens" => "Required: tokens generated at https://<server>/settings/applications, needing read:search, read:statuses and admin:read:accounts scopes. Add one per user whose timelines you fetch.",
-        "reply_interval_in_hours" => "Fetch remote replies to posts that have received replies from users on your own instance in this period",
-        "home_timeline_length" => "Look for replies to posts in the API key owner's home timeline, up to this many posts",
-        "streaming" => "Stream the home timeline over a long-lived connection, and fetch context for new posts as they arrive instead of waiting for the next run. Serve mode only, with the first access token; applies on restart (default: disabled)",
-        "user" => "Use together with max_followings or max_followers to backfill a specific user's followings/followers. If omitted, we use the account that owns the access token.",
-        "max_followings" => "Backfill posts for new accounts followed by user. At most this many followings' posts",
-        "max_followers" => "Backfill posts for new accounts following user. At most this many followers' posts",
-        "max_follow_requests" => "Backfill posts of the API key owners' pending follow requests. At most this many requesters' posts",
-        "max_bookmarks" => "Fetch remote replies to the API key owners' bookmarks. At most this many bookmarks",
-        "max_favorites" => "Fetch remote replies to the API key owners' favorites. At most this many favorites",
-        "from_notifications" => "Backfill accounts of anyone appearing in your notifications, during the last hours",
-        "from_lists" => "Fetch missing replies and/or backfill accounts from your lists. Disabled by default",
-        "max_list_length" => "How many posts to fetch replies for in each list. Ignored unless from_lists is set. Set to 0 to only backfill profiles in lists",
-        "max_list_accounts" => "How many accounts to backfill for in each list. Ignored unless from_lists is set. Set to 0 to only fetch replies in lists",
-        "max_posts_per_account" => "How many posts to fetch from each account we backfill. Above the 40 fetched by default means more requests to the remote server, and to your own server to pull each post in, so raising this makes FediFetcher considerably slower",
-        "backfill_with_context" => "Fetch remote replies when backfilling profiles (default: enabled)",
-        "backfill_mentioned_users" => "Backfill any mentioned users when fetching remote replies to timeline posts (default: enabled)",
-        "respect_robots_txt" => "Respect robots.txt when fetching from remote servers (default: enabled)",
-        "respect_user_opt_out" => "Skip accounts that have opted out (nobot tag, or not indexable or discoverable) when backfilling (default: enabled)",
-        "remember_users_for_hours" => "How long to remember users that you aren't following for, before trying to backfill them again",
+        "access_tokens" => {
+            "Required: tokens generated at https://<server>/settings/applications, needing read:search, read:statuses and admin:read:accounts scopes. Add one per user whose timelines you fetch."
+        }
+        "reply_interval_in_hours" => {
+            "Fetch remote replies to posts that have received replies from users on your own instance in this period"
+        }
+        "home_timeline_length" => {
+            "Look for replies to posts in the API key owner's home timeline, up to this many posts"
+        }
+        "streaming" => {
+            "Stream the home timeline over a long-lived connection, and fetch context for new posts as they arrive instead of waiting for the next run. Serve mode only, with the first access token; applies on restart (default: disabled)"
+        }
+        "user" => {
+            "Use together with max_followings or max_followers to backfill a specific user's followings/followers. If omitted, we use the account that owns the access token."
+        }
+        "max_followings" => {
+            "Backfill posts for new accounts followed by user. At most this many followings' posts"
+        }
+        "max_followers" => {
+            "Backfill posts for new accounts following user. At most this many followers' posts"
+        }
+        "max_follow_requests" => {
+            "Backfill posts of the API key owners' pending follow requests. At most this many requesters' posts"
+        }
+        "max_bookmarks" => {
+            "Fetch remote replies to the API key owners' bookmarks. At most this many bookmarks"
+        }
+        "max_favorites" => {
+            "Fetch remote replies to the API key owners' favorites. At most this many favorites"
+        }
+        "from_notifications" => {
+            "Backfill accounts of anyone appearing in your notifications, during the last hours"
+        }
+        "from_lists" => {
+            "Fetch missing replies and/or backfill accounts from your lists. Disabled by default"
+        }
+        "max_list_length" => {
+            "How many posts to fetch replies for in each list. Ignored unless from_lists is set. Set to 0 to only backfill profiles in lists"
+        }
+        "max_list_accounts" => {
+            "How many accounts to backfill for in each list. Ignored unless from_lists is set. Set to 0 to only fetch replies in lists"
+        }
+        "max_posts_per_account" => {
+            "How many posts to fetch from each account we backfill. Above the 40 fetched by default means more requests to the remote server, and to your own server to pull each post in, so raising this makes FediFetcher considerably slower"
+        }
+        "backfill_with_context" => {
+            "Fetch remote replies when backfilling profiles (default: enabled)"
+        }
+        "backfill_mentioned_users" => {
+            "Backfill any mentioned users when fetching remote replies to timeline posts (default: enabled)"
+        }
+        "respect_robots_txt" => {
+            "Respect robots.txt when fetching from remote servers (default: enabled)"
+        }
+        "respect_user_opt_out" => {
+            "Skip accounts that have opted out (nobot tag, or not indexable or discoverable) when backfilling (default: enabled)"
+        }
+        "remember_users_for_hours" => {
+            "How long to remember users that you aren't following for, before trying to backfill them again"
+        }
         "remember_hosts_for_days" => "How long to remember host info for, before checking again",
         "http_timeout" => "The timeout for any HTTP requests to your own, or other instances",
-        "rate_limit_cooldown" => "Seconds to wait between retries when a server rate limits us (HTTP 429): a comma-separated list, one entry per retry step, tried in order. When the list runs out, the request fails. Default: 0.5,2,8,32,128",
-        "hide_server_in_user_agent" => "Omit your server's name from the User-Agent FediFetcher sends to other servers (default: disabled)",
-        "instance_blocklist" => "A comma-separated list of instances that FediFetcher should never try to connect to",
-        "state_dir" => "Directory to store persistent files and possibly the lock file. Defaults to ./artifacts if that directory exists, and to $XDG_STATE_HOME/fedifetcher (usually ~/.local/state/fedifetcher) otherwise",
+        "rate_limit_cooldown" => {
+            "Seconds to wait between retries when a server rate limits us (HTTP 429): a comma-separated list, one entry per retry step, tried in order. When the list runs out, the request fails. Default: 0.5,2,8,32,128"
+        }
+        "hide_server_in_user_agent" => {
+            "Omit your server's name from the User-Agent FediFetcher sends to other servers (default: disabled)"
+        }
+        "instance_blocklist" => {
+            "A comma-separated list of instances that FediFetcher should never try to connect to"
+        }
+        "state_dir" => {
+            "Directory to store persistent files and possibly the lock file. Defaults to ./artifacts if that directory exists, and to $XDG_STATE_HOME/fedifetcher (usually ~/.local/state/fedifetcher) otherwise"
+        }
         "lock_file" => "Location of the lock file. Defaults to lock.lock in state_dir",
-        "lock_hours" => "How long a lock held by a live process is respected. Locks held by a dead process, or left by an older version, are reclaimed immediately",
-        "on_start" => "Pinged when processing is starting — use for 'dead man switch' monitoring of your task",
-        "on_done" => "Pinged when processing has completed — use for 'dead man switch' monitoring of your task",
-        "on_fail" => "Pinged when processing has failed — use for 'dead man switch' monitoring of your task",
-        "log_level" => "Severity of events to log: DEBUG, INFO, WARNING, ERROR or CRITICAL. Applies on restart",
+        "lock_hours" => {
+            "How long a lock held by a live process is respected. Locks held by a dead process, or left by an older version, are reclaimed immediately"
+        }
+        "on_start" => {
+            "Pinged when processing is starting — use for 'dead man switch' monitoring of your task"
+        }
+        "on_done" => {
+            "Pinged when processing has completed — use for 'dead man switch' monitoring of your task"
+        }
+        "on_fail" => {
+            "Pinged when processing has failed — use for 'dead man switch' monitoring of your task"
+        }
+        "log_level" => {
+            "Severity of events to log: DEBUG, INFO, WARNING, ERROR or CRITICAL. Applies on restart"
+        }
         "log_format" => "The log format. Applies on restart",
-        "log_page_loads" => "Log a line for every page load of the web UI, at DEBUG (default: disabled)",
+        "log_page_loads" => {
+            "Log a line for every page load of the web UI, at DEBUG (default: disabled)"
+        }
         _ => return None,
     })
 }
@@ -776,12 +836,14 @@ mod tests {
             .unwrap();
             assert!(!config.from_lists, "{falsy}");
         }
-        assert!(Config::from_values(values(vec![
-            ("server", json!("x")),
-            ("access_tokens", json!(["t"])),
-            ("from_lists", json!("maybe")),
-        ]))
-        .is_err());
+        assert!(
+            Config::from_values(values(vec![
+                ("server", json!("x")),
+                ("access_tokens", json!(["t"])),
+                ("from_lists", json!("maybe")),
+            ]))
+            .is_err()
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info, warn};
 
 use crate::api::{client_for, find_post};
-use crate::db::{self, is_private_post, mark_private_post, TriggerPost};
+use crate::db::{self, TriggerPost, is_private_post, mark_private_post};
 use crate::posts::Post;
 use crate::run::Context;
 use crate::servers::server_info;
@@ -236,10 +236,10 @@ fn known_context_found_line(
     if scan.local > 0 {
         parts.push(format!("{} on our server", scan.local));
     }
-    if let Some((new, already_known)) = known {
-        if !urls.is_empty() {
-            parts.push(format!("{new} new, {already_known} already known"));
-        }
+    if let Some((new, already_known)) = known
+        && !urls.is_empty()
+    {
+        parts.push(format!("{new} new, {already_known} already known"));
     }
     format!("{found} ({})", parts.join("; "))
 }

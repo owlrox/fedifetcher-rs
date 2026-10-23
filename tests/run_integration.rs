@@ -2,10 +2,10 @@
 
 mod common;
 
-use fedifetcher::run::{run_once, CancelToken, Pause};
+use fedifetcher::run::{CancelToken, Pause, run_once};
 use fedifetcher::timeutil;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 
 #[tokio::test]
 async fn a_run_with_nothing_enabled_still_succeeds() {

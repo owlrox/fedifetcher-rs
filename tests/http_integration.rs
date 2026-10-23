@@ -7,7 +7,7 @@ mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fedifetcher::http::HttpClient;
-use fedifetcher::{db, timeutil, VERSION};
+use fedifetcher::{VERSION, db, timeutil};
 use httpmock::prelude::*;
 use httpmock::{Method, Mock};
 

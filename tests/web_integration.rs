@@ -5,8 +5,8 @@ mod common;
 
 use fedifetcher::api::mastodon::masked;
 use fedifetcher::web;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 
 const TOKEN: &str = "smoke-secret-token-123";
 

@@ -4,12 +4,12 @@
 mod common;
 
 use fedifetcher::api::mastodon::HomeServer;
-use fedifetcher::backfill::{user_posts, UserSet};
+use fedifetcher::backfill::{UserSet, user_posts};
 use fedifetcher::http::HttpClient;
 use fedifetcher::store::State;
 use fedifetcher::users::User;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 
 #[tokio::test]
 async fn an_account_that_opted_out_is_logged_and_not_fetched() {

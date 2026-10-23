@@ -13,10 +13,10 @@ use tracing::error;
 use crate::error::{Error, Result};
 use crate::http::HttpClient;
 use crate::posts::Post;
-use crate::servers::{server_info, ApiFlavor, ServerInfo};
+use crate::servers::{ApiFlavor, ServerInfo, server_info};
 use crate::state::ServerCache;
 use crate::store::State;
-use crate::urls::{host_of, PostRef};
+use crate::urls::{PostRef, host_of};
 
 pub use lemmy::LemmyApi;
 pub use mastodon::{HomeServer, MastodonApi};

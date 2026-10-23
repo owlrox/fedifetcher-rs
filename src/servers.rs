@@ -126,10 +126,9 @@ impl ServerInfo {
             .get("metadata")
             .and_then(|m| m.get("features"))
             .and_then(Value::as_array)
+            && features.iter().any(|f| f.as_str() == Some("mastodon_api"))
         {
-            if features.iter().any(|f| f.as_str() == Some("mastodon_api")) {
-                apis.insert(ApiFlavor::Mastodon);
-            }
+            apis.insert(ApiFlavor::Mastodon);
         }
 
         Some(ServerInfo {
@@ -495,7 +494,9 @@ pub async fn nodeinfo(
     match ServerInfo::from_nodeinfo(&server, &nodeinfo) {
         Some(info) => Ok(info),
         None => {
-            error!("error getting server {server} info from nodeinfo. Exception: missing software name");
+            error!(
+                "error getting server {server} info from nodeinfo. Exception: missing software name"
+            );
             Err(Error::Fetch(format!(
                 "error getting server {server} info from nodeinfo. Exception: missing software name"
             )))

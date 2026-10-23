@@ -5,7 +5,7 @@
 
 mod common;
 
-use fedifetcher::api::{client_for, find_post, Client};
+use fedifetcher::api::{Client, client_for, find_post};
 use fedifetcher::http::HttpClient;
 use fedifetcher::servers::{ApiFlavor, ServerInfo};
 use fedifetcher::store::State;

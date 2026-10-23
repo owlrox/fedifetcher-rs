@@ -1448,10 +1448,12 @@ mod tests {
                 .unwrap();
         }
         clear_logs(&pool).await.unwrap();
-        assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // clearing an empty log is fine, and new lines still arrive
         clear_logs(&pool).await.unwrap();
         insert_log(&pool, &log_row("after clearing")).await.unwrap();
@@ -1484,10 +1486,12 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
         prune_logs(&pool, 100).await.unwrap();
-        assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1599,9 +1603,11 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
 
-        assert!(!is_private_post(&pool, "https://remote.example/@a/1")
-            .await
-            .unwrap());
+        assert!(
+            !is_private_post(&pool, "https://remote.example/@a/1")
+                .await
+                .unwrap()
+        );
         assert!(
             mark_private_post(&pool, "https://remote.example/@a/1")
                 .await
@@ -1614,12 +1620,16 @@ mod tests {
                 .unwrap(),
             "marking again records nothing new"
         );
-        assert!(is_private_post(&pool, "https://remote.example/@a/1")
-            .await
-            .unwrap());
-        assert!(!is_private_post(&pool, "https://remote.example/@a/2")
-            .await
-            .unwrap());
+        assert!(
+            is_private_post(&pool, "https://remote.example/@a/1")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !is_private_post(&pool, "https://remote.example/@a/2")
+                .await
+                .unwrap()
+        );
         drop(pool);
 
         let pool = open(&config).await.unwrap();
@@ -1787,10 +1797,12 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
 
-        assert!(trigger_post(&pool, "https://remote.example/@a/1")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            trigger_post(&pool, "https://remote.example/@a/1")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             record_trigger_posts(
                 &pool,
@@ -2229,10 +2241,10 @@ mod tests {
         .unwrap();
         assert_eq!(info.software, "mastodon");
         assert!(info.supports(crate::servers::ApiFlavor::Mastodon));
-        assert!(crate::servers::ServerInfo::from_state(
-            state.seen_hosts().get("down.example").unwrap()
-        )
-        .is_none());
+        assert!(
+            crate::servers::ServerInfo::from_state(state.seen_hosts().get("down.example").unwrap())
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2351,10 +2363,12 @@ mod tests {
         assert_eq!(table_count(&pool, "known_context_posts").await.unwrap(), 1);
 
         // a sighting with nothing found records nothing
-        assert!(record_known_context_posts(&pool, &[])
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            record_known_context_posts(&pool, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -2403,35 +2417,41 @@ mod tests {
         let pool = open(&config).await.unwrap();
         let columns = table_columns(&pool, "logs").await.unwrap();
 
-        assert!(table_rows(
-            &pool,
-            "logs; DROP TABLE logs",
-            &columns,
-            "id",
-            LogOrder::Asc,
-            10
-        )
-        .await
-        .is_err());
-        assert!(table_rows(
-            &pool,
-            "logs",
-            &columns,
-            "id; DROP TABLE logs",
-            LogOrder::Asc,
-            10
-        )
-        .await
-        .is_err());
+        assert!(
+            table_rows(
+                &pool,
+                "logs; DROP TABLE logs",
+                &columns,
+                "id",
+                LogOrder::Asc,
+                10
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            table_rows(
+                &pool,
+                "logs",
+                &columns,
+                "id; DROP TABLE logs",
+                LogOrder::Asc,
+                10
+            )
+            .await
+            .is_err()
+        );
         assert!(
             table_rows(&pool, "logs", &columns, "not_a_column", LogOrder::Asc, 10)
                 .await
                 .is_err(),
             "a sort column must be a real column"
         );
-        assert!(table_columns(&pool, "logs\"; DROP TABLE logs")
-            .await
-            .is_err());
+        assert!(
+            table_columns(&pool, "logs\"; DROP TABLE logs")
+                .await
+                .is_err()
+        );
         assert!(table_count(&pool, "").await.is_err());
         // and the table survives
         assert!(table_count(&pool, "logs").await.is_ok());

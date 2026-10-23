@@ -6,13 +6,13 @@
 use tracing::{error, info, warn};
 
 use crate::api::mastodon::HomeServer;
-use crate::backfill::{add_user_posts, Force, UserSet};
+use crate::backfill::{Force, UserSet, add_user_posts};
 use crate::context::{add_context_urls, known_context_urls};
 use crate::db;
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::Context;
-use crate::servers::{server_info, ApiFlavor, ServerInfo};
+use crate::servers::{ApiFlavor, ServerInfo, server_info};
 use crate::store::State;
 use crate::timeutil;
 use crate::users::User;

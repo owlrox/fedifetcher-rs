@@ -52,10 +52,10 @@ pub fn parse(value: &str) -> Option<OffsetDateTime> {
         return None;
     }
 
-    if text.bytes().all(|b| b.is_ascii_digit()) {
-        if let Ok(secs) = text.parse::<i64>() {
-            return OffsetDateTime::from_unix_timestamp(secs).ok();
-        }
+    if text.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(secs) = text.parse::<i64>()
+    {
+        return OffsetDateTime::from_unix_timestamp(secs).ok();
     }
 
     if let Ok(date) = PrimitiveDateTime::parse(text, DATE_ONLY) {

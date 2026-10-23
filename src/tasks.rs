@@ -4,7 +4,7 @@
 use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info};
 
-use crate::backfill::{add_user_posts, filter_known_users, Force, UserSet};
+use crate::backfill::{Force, UserSet, add_user_posts, filter_known_users};
 use crate::config::Config;
 use crate::context::{add_context_urls, context_urls, known_context_urls, replied_toot_server_ids};
 use crate::error::Result;

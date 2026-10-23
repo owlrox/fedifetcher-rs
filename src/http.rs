@@ -5,20 +5,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, LINK};
 use reqwest::Method;
+use reqwest::header::{HeaderMap, HeaderValue, LINK};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
+use crate::VERSION;
 use crate::config::Config;
 use crate::db;
 use crate::error::{Error, Result};
 use crate::robots::RobotFileParser;
 use crate::timeutil;
 use crate::urls::{netloc_of, scheme_of};
-use crate::VERSION;
 
 /// A response with the body already read: FediFetcher never streams.
 pub struct Response {
@@ -342,11 +342,10 @@ fn retry_delay(headers: &HeaderMap, url: &str, backoff: f64) -> Duration {
     if let Some(value) = headers
         .get("x-ratelimit-reset")
         .and_then(|v| v.to_str().ok())
+        && let Some(reset_at) = timeutil::parse(value)
     {
-        if let Some(reset_at) = timeutil::parse(value) {
-            wait = (reset_at - now).whole_microseconds() as f64 / 1_000_000.0 + 1.0;
-            reset = reset_at;
-        }
+        wait = (reset_at - now).whole_microseconds() as f64 / 1_000_000.0 + 1.0;
+        reset = reset_at;
     }
     let wait = wait.max(0.0);
     warn!(

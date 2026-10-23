@@ -123,9 +123,11 @@ mod tests {
     #[test]
     fn a_database_error_converts_with_its_message() {
         let error = Error::from(sqlx::Error::RowNotFound);
-        assert!(error
-            .to_string()
-            .starts_with("Database error: no rows returned"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("Database error: no rows returned")
+        );
         assert!(matches!(error, Error::Db(_)));
     }
 
@@ -133,9 +135,11 @@ mod tests {
     fn a_json_error_converts_with_its_message() {
         let json = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
         let error = Error::from(json);
-        assert!(error
-            .to_string()
-            .starts_with("Error parsing response as JSON: "));
+        assert!(
+            error
+                .to_string()
+                .starts_with("Error parsing response as JSON: ")
+        );
         assert!(matches!(error, Error::Json(_)));
     }
 }

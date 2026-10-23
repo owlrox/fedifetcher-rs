@@ -15,8 +15,8 @@ use fedifetcher::servers::ServerInfo;
 use fedifetcher::store::State;
 use fedifetcher::timeutil;
 use fedifetcher::users::User;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 
 /// The mock server's host, without the scheme.
 fn host(server: &MockServer) -> String {

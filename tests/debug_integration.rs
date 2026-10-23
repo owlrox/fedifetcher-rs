@@ -6,8 +6,8 @@ mod common;
 
 use fedifetcher::debug::{account_posts, lookup_account, test_connection, verify_credentials};
 use fedifetcher::http::HttpClient;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 use serde_json::json;
 
 async fn client(dir: &std::path::Path) -> HttpClient {

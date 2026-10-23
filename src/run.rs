@@ -1,22 +1,22 @@
 //! One run of FediFetcher: the lock, the state, and the tasks.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::VERSION;
 use crate::api::mastodon::HomeServer;
 use crate::config::Config;
 use crate::db;
 use crate::error::Result;
-use crate::http::{build_callback_url, HttpClient};
-use crate::store::{lock, Session, State, StateStore, ROBOTS_MAX_AGE};
+use crate::http::{HttpClient, build_callback_url};
+use crate::store::{ROBOTS_MAX_AGE, Session, State, StateStore, lock};
 use crate::tasks::run_enabled_tasks;
 use crate::timeutil;
-use crate::VERSION;
 
 /// Pings the configured callback urls, for dead man's switch monitoring.
 pub struct Notifier {
@@ -236,7 +236,9 @@ async fn run_once_inner(
         warn!("respect_robots_txt is disabled: remote servers' robots.txt will not be respected");
     }
     if !config.respect_user_opt_out {
-        warn!("respect_user_opt_out is disabled: accounts that have opted out will still be backfilled");
+        warn!(
+            "respect_user_opt_out is disabled: accounts that have opted out will still be backfilled"
+        );
     }
 
     let http = HttpClient::new(config.clone(), db.clone());

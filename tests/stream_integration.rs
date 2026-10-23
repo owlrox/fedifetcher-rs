@@ -5,14 +5,14 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fedifetcher::db;
 use fedifetcher::run::CancelToken;
 use fedifetcher::stream;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The mock server's host, without the scheme.

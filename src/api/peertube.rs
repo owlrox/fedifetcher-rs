@@ -210,7 +210,9 @@ impl PeerTubeApi {
                     }
                 },
                 Err(ex) => {
-                    error!("Error parsing comments on video {post_id} from {post_url}. Exception: {ex}");
+                    error!(
+                        "Error parsing comments on video {post_id} from {post_url}. Exception: {ex}"
+                    );
                     Vec::new()
                 }
             };

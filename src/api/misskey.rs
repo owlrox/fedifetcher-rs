@@ -351,11 +351,13 @@ mod tests {
 
     #[test]
     fn parse_post_rejects_a_note_without_id_or_date() {
-        assert!(parse_post(
-            &json!({"createdAt": "2026-10-22T01:23:45Z"}),
-            "https://misskey.example"
-        )
-        .is_none());
+        assert!(
+            parse_post(
+                &json!({"createdAt": "2026-10-22T01:23:45Z"}),
+                "https://misskey.example"
+            )
+            .is_none()
+        );
         assert!(parse_post(&json!({"id": "1"}), "https://misskey.example").is_none());
     }
 

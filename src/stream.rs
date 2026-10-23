@@ -19,14 +19,14 @@ use sqlx::SqlitePool;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::api::mastodon::{masked, parse_post, report_mastodon_error, HomeServer};
+use crate::api::mastodon::{HomeServer, masked, parse_post, report_mastodon_error};
 use crate::config::Config;
 use crate::db;
 use crate::error::Error;
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::{CancelToken, Context, Pause};
-use crate::store::{lock, LockGuard, StateStore};
+use crate::store::{LockGuard, StateStore, lock};
 use crate::tasks::fetch_timeline_context;
 use crate::timeutil;
 
@@ -337,7 +337,7 @@ async fn read_stream(url: &str, token: &str, cancel: &CancelToken, handler: &Han
                 return StreamEnd::Failed(Error::HttpRead {
                     url: url.to_string(),
                     source: ex,
-                })
+                });
             }
             // the server closed the stream
             Ok(None) => return StreamEnd::Closed,
@@ -480,17 +480,17 @@ async fn drain_queued(handler: Handler, cancel: CancelToken) {
             // STALE_LOCK_POLLS polls regardless, because the attempt is
             // what reclaims a lock a dead process left behind (and every
             // failed attempt logs)
-            if !handler.config.lock_path().exists() || polls.is_multiple_of(STALE_LOCK_POLLS) {
-                if let Ok(lock) = lock(&handler.config) {
-                    let posts = handler.queue.take_all();
-                    if posts.is_empty() {
-                        drop(lock);
-                    } else {
-                        debug!("Stream: handling {} queued update(s)", posts.len());
-                        handle_posts(&handler, posts, lock).await;
-                    }
-                    polls = 0;
+            if (!handler.config.lock_path().exists() || polls.is_multiple_of(STALE_LOCK_POLLS))
+                && let Ok(lock) = lock(&handler.config)
+            {
+                let posts = handler.queue.take_all();
+                if posts.is_empty() {
+                    drop(lock);
+                } else {
+                    debug!("Stream: handling {} queued update(s)", posts.len());
+                    handle_posts(&handler, posts, lock).await;
                 }
+                polls = 0;
             }
         }
         sleep(QUEUE_POLL).await;

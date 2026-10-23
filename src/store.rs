@@ -463,9 +463,11 @@ mod tests {
                 .contains("old@remote.example"),
             "a user remembered longer ago than remember_users_for_hours is forgotten"
         );
-        assert!(loaded
-            .recently_checked_users()
-            .contains("fresh@remote.example"));
+        assert!(
+            loaded
+                .recently_checked_users()
+                .contains("fresh@remote.example")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

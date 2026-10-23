@@ -10,8 +10,8 @@ use fedifetcher::api::mastodon::{HomeServer, MastodonApi};
 use fedifetcher::api::misskey::MisskeyApi;
 use fedifetcher::api::peertube::PeerTubeApi;
 use fedifetcher::http::HttpClient;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 
 const ALLOW_ALL: &str = "User-agent: *\nAllow: /\n";
 

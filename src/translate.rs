@@ -18,10 +18,10 @@ use tracing::debug;
 /// the string; every pattern here is anchored the same way.
 pub fn first_name_in(patterns: &[Regex], url: &str) -> Option<String> {
     for pattern in patterns {
-        if let Some(captures) = pattern.captures(url) {
-            if let Some(name) = captures.name("name") {
-                return Some(name.as_str().to_string());
-            }
+        if let Some(captures) = pattern.captures(url)
+            && let Some(name) = captures.name("name")
+        {
+            return Some(name.as_str().to_string());
         }
     }
     None

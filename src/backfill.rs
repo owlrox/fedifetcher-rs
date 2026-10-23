@@ -76,32 +76,33 @@ pub async fn user_posts(
     target: UserSet,
     force_opt_out: bool,
 ) -> Option<Vec<Post>> {
-    if ctx.config.respect_user_opt_out && !force_opt_out {
-        if let Some(reason) = opt_out_reason(user) {
-            // the skip costs no requests — it happens before any server is
-            // contacted — but the account is recorded so the log line fires
-            // the first time only; the account is still re-checked each run,
-            // so one that later opts in is fetched after all
-            let first_seen = match mark_opted_out_account(ctx.db, &user.acct, reason).await {
-                Ok(first_seen) => first_seen,
-                Err(ex) => {
-                    warn!("Could not record opted-out account {}: {ex}", user.acct);
-                    true
-                }
-            };
-            if first_seen {
-                info!(
-                    "Skipping {}: the account has opted out ({reason})",
-                    user.acct
-                );
-            } else {
-                debug!(
-                    "Skipping {}: the account has opted out ({reason})",
-                    user.acct
-                );
+    if ctx.config.respect_user_opt_out
+        && !force_opt_out
+        && let Some(reason) = opt_out_reason(user)
+    {
+        // the skip costs no requests — it happens before any server is
+        // contacted — but the account is recorded so the log line fires
+        // the first time only; the account is still re-checked each run,
+        // so one that later opts in is fetched after all
+        let first_seen = match mark_opted_out_account(ctx.db, &user.acct, reason).await {
+            Ok(first_seen) => first_seen,
+            Err(ex) => {
+                warn!("Could not record opted-out account {}: {ex}", user.acct);
+                true
             }
-            return None;
+        };
+        if first_seen {
+            info!(
+                "Skipping {}: the account has opted out ({reason})",
+                user.acct
+            );
+        } else {
+            debug!(
+                "Skipping {}: the account has opted out ({reason})",
+                user.acct
+            );
         }
+        return None;
     }
     let Some(host) = host_of(&user.url) else {
         error!("Error parsing Profile URL {}", user.url);

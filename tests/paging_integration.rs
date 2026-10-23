@@ -3,10 +3,10 @@
 
 mod common;
 
-use fedifetcher::api::mastodon::{get_paginated, StopAt};
+use fedifetcher::api::mastodon::{StopAt, get_paginated};
 use fedifetcher::http::HttpClient;
-use httpmock::prelude::*;
 use httpmock::Method;
+use httpmock::prelude::*;
 use serde_json::json;
 
 async fn client(dir: &std::path::Path) -> HttpClient {

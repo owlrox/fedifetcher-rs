@@ -20,7 +20,7 @@ FediFetcher-rs is a Rust port of the Python [FediFetcher](https://github.com/nan
 
 ## Requirements
 
-- A recent stable [Rust](https://rustup.rs/) toolchain (the project is edition 2021)
+- A recent stable [Rust](https://rustup.rs/) toolchain (Rust 1.99.1+, edition 2024)
 - A C compiler (for the bundled SQLite)
 
 ## Building from source
