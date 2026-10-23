@@ -97,7 +97,8 @@ async fn post_ids_are_read_in_each_flavors_own_url_shapes() {
             .as_deref(),
         Some("12345")
     );
-    // /notes/ is a Misskey post; on a Mastodon server it is nothing
+    // /notes/ is a Misskey post shape. Iceshrimp hands it out too: it
+    // speaks the Mastodon API, so the Mastodon client reads it as well
     assert_eq!(
         misskey
             .post_id_from("https://example.social/notes/abc123")
@@ -108,6 +109,14 @@ async fn post_ids_are_read_in_each_flavors_own_url_shapes() {
     assert_eq!(
         mastodon
             .post_id_from("https://example.social/notes/abc123")
+            .await
+            .as_deref(),
+        Some("abc123")
+    );
+    // a video URL is none of the Mastodon client's business
+    assert_eq!(
+        mastodon
+            .post_id_from("https://example.social/w/abc123")
             .await,
         None
     );

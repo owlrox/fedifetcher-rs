@@ -30,13 +30,17 @@ pub const PAGE_SIZE: i64 = 40;
 // is why nothing asks this of a server it has not identified first.
 //
 // every way this family addresses a post. Pixelfed is here too: it speaks the
-// Mastodon API, so its /p/user/id URLs are this client's to read.
+// Mastodon API, so its /p/user/id URLs are this client's to read. Iceshrimp
+// is here for the same reason: it speaks the Mastodon API but hands out
+// Misskey-style /notes/id URLs, where the id is the status id the API
+// addresses the post by.
 static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r"^https?://[^/]+/@[^/]+/(?P<name>[^/]+)",
         r"^https?://[^/]+/users/[^/]+/statuses/(?P<name>[^/]+)",
         r"^https?://[^/]+/notice/(?P<name>[^/]+)",
         r"^https?://[^/]+/p/[^/]+/(?P<name>[^/]+)",
+        r"^https?://[^/]+/notes/(?P<name>[^/]+)",
     ]
     .iter()
     .map(|p| anchored(p))
@@ -919,6 +923,13 @@ mod tests {
         assert_eq!(
             api.post_id_from("https://example.com/p/alice/abc").await,
             Some("abc".to_string())
+        );
+        // Iceshrimp addresses a post this way, with the status id the
+        // Mastodon API knows it by
+        assert_eq!(
+            api.post_id_from("https://example.com/notes/asloypdjeaoyizzm")
+                .await,
+            Some("asloypdjeaoyizzm".to_string())
         );
         assert_eq!(api.post_id_from("https://example.com/other").await, None);
     }
