@@ -53,8 +53,8 @@ async fn the_callback_is_really_sent() {
 
     notify.starting().await;
 
-    assert_eq!(ping.hits(), 1);
-    assert_eq!(robots.hits(), 0, "callbacks ignore robots.txt");
+    assert_eq!(ping.calls(), 1);
+    assert_eq!(robots.calls(), 0, "callbacks ignore robots.txt");
 }
 
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn callbacks_carry_the_run_id() {
 
     notify.starting().await;
 
-    assert_eq!(ping.hits(), 1);
+    assert_eq!(ping.calls(), 1);
 }
 
 #[tokio::test]
@@ -106,7 +106,7 @@ async fn the_done_callback_reports_how_long_it_took() {
 
     notify.done("all finished").await;
 
-    assert_eq!(ping.hits(), 1);
+    assert_eq!(ping.calls(), 1);
 }
 
 #[tokio::test]
@@ -125,7 +125,7 @@ async fn unset_callbacks_are_not_called() {
     notify.done("finished").await;
     notify.failed("broke").await;
 
-    assert_eq!(any.hits(), 0);
+    assert_eq!(any.calls(), 0);
 }
 
 #[tokio::test]

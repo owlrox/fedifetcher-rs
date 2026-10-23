@@ -51,8 +51,8 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
     drop(guard);
 
     assert!(posts.is_none(), "an opted-out account is skipped");
-    assert_eq!(nodeinfo.hits(), 0, "nothing is fetched for the account");
-    assert_eq!(robots.hits(), 0, "nothing is fetched for the account");
+    assert_eq!(nodeinfo.calls(), 0, "nothing is fetched for the account");
+    assert_eq!(robots.calls(), 0, "nothing is fetched for the account");
     let logged = logs.text();
     let line = logged
         .lines()
@@ -169,11 +169,11 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
         "both runs skip the account"
     );
     assert_eq!(
-        nodeinfo.hits(),
+        nodeinfo.calls(),
         0,
         "no run fetches the account's server info"
     );
-    assert_eq!(robots.hits(), 0, "no run fetches the account's robots.txt");
+    assert_eq!(robots.calls(), 0, "no run fetches the account's robots.txt");
 
     let logged = logs.text();
     let skip_lines: Vec<&str> = logged

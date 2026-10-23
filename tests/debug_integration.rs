@@ -45,8 +45,8 @@ async fn the_connection_test_reports_instance_and_account() {
 
     assert_eq!(info["version"], "4.2.0");
     assert_eq!(account["acct"], "me");
-    assert_eq!(instance.hits(), 1);
-    assert_eq!(verify.hits(), 1, "the token goes as a Bearer header");
+    assert_eq!(instance.calls(), 1);
+    assert_eq!(verify.calls(), 1, "the token goes as a Bearer header");
 }
 
 #[tokio::test]
@@ -105,7 +105,11 @@ async fn a_user_lookup_returns_the_account() {
 
     assert_eq!(account["id"], "42");
     assert_eq!(account["display_name"], "Someone");
-    assert_eq!(lookup.hits(), 1, "a leading @ is trimmed before the lookup");
+    assert_eq!(
+        lookup.calls(),
+        1,
+        "a leading @ is trimmed before the lookup"
+    );
 }
 
 #[tokio::test]
@@ -161,7 +165,7 @@ async fn posts_are_fetched_for_the_looked_up_user() {
     assert_eq!(account["acct"], "someone");
     assert_eq!(posts.len(), 2);
     assert_eq!(posts[0]["id"], "9");
-    assert_eq!(statuses.hits(), 1, "the limit goes to the server");
+    assert_eq!(statuses.calls(), 1, "the limit goes to the server");
 }
 
 #[tokio::test]

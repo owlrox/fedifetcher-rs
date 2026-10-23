@@ -71,7 +71,7 @@ async fn get_sends_our_user_agent() {
         .get(&format!("{}/api", server.base_url()), None)
         .await
         .expect("get should succeed");
-    assert_eq!(api.hits(), 1);
+    assert_eq!(api.calls(), 1);
 }
 
 #[tokio::test]
@@ -128,8 +128,8 @@ async fn requests_the_robots_file_forbids_are_refused() {
         err.to_string().contains("prohibited by robots.txt"),
         "{err}"
     );
-    assert_eq!(robots.hits(), 1);
-    assert_eq!(api.hits(), 0);
+    assert_eq!(robots.calls(), 1);
+    assert_eq!(api.calls(), 0);
 }
 
 #[tokio::test]
@@ -158,8 +158,8 @@ async fn robots_is_not_consulted_when_disabled_in_the_config() {
         .await
         .expect("with robots.txt support off, the request should go ahead");
     assert_eq!(resp.status, 200);
-    assert_eq!(robots.hits(), 0);
-    assert_eq!(api.hits(), 1);
+    assert_eq!(robots.calls(), 0);
+    assert_eq!(api.calls(), 1);
 }
 
 #[tokio::test]
@@ -187,8 +187,8 @@ async fn a_client_ignoring_robots_is_not_checked() {
         .await
         .expect("a client ignoring robots.txt should not be checked");
     assert_eq!(resp.status, 200);
-    assert_eq!(robots.hits(), 0);
-    assert_eq!(api.hits(), 1);
+    assert_eq!(robots.calls(), 0);
+    assert_eq!(api.calls(), 1);
 }
 
 #[tokio::test]
@@ -213,7 +213,7 @@ async fn blocklisted_hosts_are_never_contacted() {
         .err()
         .expect("a blocklisted host must be refused");
     assert!(err.to_string().contains("blocklist"), "{err}");
-    assert_eq!(api.hits(), 0);
+    assert_eq!(api.calls(), 0);
 }
 
 #[tokio::test]
@@ -249,8 +249,8 @@ async fn a_host_blocked_by_robots_txt_is_logged_as_such() {
         err.to_string().contains("prohibited by robots.txt"),
         "{err}"
     );
-    assert_eq!(api.hits(), 0);
-    assert_eq!(robots.hits(), 1);
+    assert_eq!(api.calls(), 0);
+    assert_eq!(robots.calls(), 1);
     let logged = logs.text();
     let line = logged
         .lines()
@@ -290,7 +290,7 @@ async fn a_blocklisted_host_is_logged_as_such() {
     drop(guard);
 
     assert!(err.to_string().contains("blocklist"), "{err}");
-    assert_eq!(api.hits(), 0);
+    assert_eq!(api.calls(), 0);
     let logged = logs.text();
     let line = logged
         .lines()
@@ -320,7 +320,7 @@ async fn rate_limited_requests_are_retried_after_the_reset() {
         .mock_async(|when, then| {
             when.method(Method::GET)
                 .path("/api")
-                .matches(|_| RATE_LIMITED_HITS.fetch_add(1, Ordering::SeqCst) == 0);
+                .is_true(|_| RATE_LIMITED_HITS.fetch_add(1, Ordering::SeqCst) == 0);
             then.status(429).header("x-ratelimit-reset", reset);
         })
         .await;
@@ -328,7 +328,7 @@ async fn rate_limited_requests_are_retried_after_the_reset() {
         .mock_async(|when, then| {
             when.method(Method::GET)
                 .path("/api")
-                .matches(|_| RATE_LIMITED_HITS.load(Ordering::SeqCst) >= 1);
+                .is_true(|_| RATE_LIMITED_HITS.load(Ordering::SeqCst) >= 1);
             then.status(200).body("{}");
         })
         .await;
@@ -341,8 +341,8 @@ async fn rate_limited_requests_are_retried_after_the_reset() {
         .await
         .expect("the retry after the reset should succeed");
     assert_eq!(resp.status, 200);
-    assert_eq!(limited.hits(), 1);
-    assert_eq!(ok.hits(), 1);
+    assert_eq!(limited.calls(), 1);
+    assert_eq!(ok.calls(), 1);
 }
 
 static BACKOFF_HITS: AtomicUsize = AtomicUsize::new(0);
@@ -355,7 +355,7 @@ async fn rate_limited_requests_back_off_without_a_reset_header() {
         .mock_async(|when, then| {
             when.method(Method::GET)
                 .path("/api")
-                .matches(|_| BACKOFF_HITS.fetch_add(1, Ordering::SeqCst) < 2);
+                .is_true(|_| BACKOFF_HITS.fetch_add(1, Ordering::SeqCst) < 2);
             then.status(429);
         })
         .await;
@@ -363,7 +363,7 @@ async fn rate_limited_requests_back_off_without_a_reset_header() {
         .mock_async(|when, then| {
             when.method(Method::GET)
                 .path("/api")
-                .matches(|_| BACKOFF_HITS.load(Ordering::SeqCst) >= 2);
+                .is_true(|_| BACKOFF_HITS.load(Ordering::SeqCst) >= 2);
             then.status(200).body("{}");
         })
         .await;
@@ -378,8 +378,8 @@ async fn rate_limited_requests_back_off_without_a_reset_header() {
         .await
         .expect("the third try should succeed");
     assert_eq!(resp.status, 200);
-    assert_eq!(limited.hits(), 2);
-    assert_eq!(ok.hits(), 1);
+    assert_eq!(limited.calls(), 2);
+    assert_eq!(ok.calls(), 1);
 }
 
 #[tokio::test]
@@ -408,7 +408,7 @@ async fn rate_limiting_gives_up_eventually() {
         "{err}"
     );
     // the initial request, plus one per retry
-    assert_eq!(limited.hits(), 3);
+    assert_eq!(limited.calls(), 3);
 }
 
 #[tokio::test]
@@ -430,8 +430,8 @@ async fn robots_is_read_from_the_network_once_then_remembered() {
     client.get(&url, None).await.expect("first get");
     client.get(&url, None).await.expect("second get");
 
-    assert_eq!(robots.hits(), 1, "robots.txt should be fetched only once");
-    assert_eq!(api.hits(), 2);
+    assert_eq!(robots.calls(), 1, "robots.txt should be fetched only once");
+    assert_eq!(api.calls(), 2);
 }
 
 #[tokio::test]
@@ -452,16 +452,16 @@ async fn robots_is_cached_in_the_database_between_clients() {
 
     let first = HttpClient::new(config.clone(), db.clone());
     first.get(&url, None).await.expect("first client");
-    assert_eq!(robots.hits(), 1);
+    assert_eq!(robots.calls(), 1);
 
     let second = HttpClient::new(config, db.clone());
     second.get(&url, None).await.expect("second client");
     assert_eq!(
-        robots.hits(),
+        robots.calls(),
         1,
         "the second client should read the cached robots.txt"
     );
-    assert_eq!(api.hits(), 2);
+    assert_eq!(api.calls(), 2);
 
     assert_eq!(
         db::robots_cached(&db, &robots_url).await.unwrap(),
@@ -499,8 +499,8 @@ async fn a_refused_robots_file_denies_everything() {
         err.to_string().contains("prohibited by robots.txt"),
         "{err}"
     );
-    assert_eq!(robots.hits(), 1);
-    assert_eq!(api.hits(), 0);
+    assert_eq!(robots.calls(), 1);
+    assert_eq!(api.calls(), 0);
 }
 
 #[tokio::test]
@@ -577,7 +577,7 @@ async fn get_redirect_url_returns_the_url_when_it_does_not_redirect() {
         client.get_redirect_url(&url).await.as_deref(),
         Some(url.as_str())
     );
-    assert_eq!(object.hits(), 1);
+    assert_eq!(object.calls(), 1);
 }
 
 #[tokio::test]
@@ -602,7 +602,7 @@ async fn get_redirect_url_follows_a_302() {
             .as_deref(),
         Some("/notice/123")
     );
-    assert_eq!(object.hits(), 1);
+    assert_eq!(object.calls(), 1);
 }
 
 #[tokio::test]
@@ -650,7 +650,7 @@ async fn get_redirect_url_honours_the_blocklist() {
             .await,
         None
     );
-    assert_eq!(object.hits(), 0);
+    assert_eq!(object.calls(), 0);
 }
 
 #[tokio::test]
@@ -679,8 +679,8 @@ async fn get_redirect_url_honours_robots() {
             .await,
         None
     );
-    assert_eq!(robots.hits(), 1);
-    assert_eq!(object.hits(), 0);
+    assert_eq!(robots.calls(), 1);
+    assert_eq!(object.calls(), 0);
 }
 
 #[tokio::test]
@@ -711,8 +711,8 @@ async fn authenticated_clients_send_their_token_and_skip_robots() {
         .await
         .expect("an authenticated client does not get checked against robots.txt");
     assert_eq!(resp.status, 200);
-    assert_eq!(api.hits(), 1);
-    assert_eq!(robots.hits(), 0, "robots.txt is never asked about");
+    assert_eq!(api.calls(), 1);
+    assert_eq!(robots.calls(), 0, "robots.txt is never asked about");
 }
 
 #[tokio::test]
@@ -730,15 +730,10 @@ async fn the_original_client_is_unaffected_by_deriving_one() {
         .await;
     let plain = server
         .mock_async(|when, then| {
-            when.method(Method::GET).path("/plain").matches(|req| {
-                req.headers
-                    .as_ref()
-                    .map(|headers| {
-                        headers
-                            .iter()
-                            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
-                    })
-                    .unwrap_or(true)
+            when.method(Method::GET).path("/plain").is_true(|req| {
+                req.headers_vec()
+                    .iter()
+                    .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
             });
             then.status(200).body("{}");
         })
@@ -757,8 +752,8 @@ async fn the_original_client_is_unaffected_by_deriving_one() {
         .await
         .expect("plain get");
 
-    assert_eq!(authed.hits(), 1);
-    assert_eq!(plain.hits(), 1, "the original client sends no token");
+    assert_eq!(authed.calls(), 1);
+    assert_eq!(plain.calls(), 1, "the original client sends no token");
 }
 
 #[tokio::test]
@@ -789,5 +784,5 @@ async fn post_sends_the_body_as_json_and_the_client_headers() {
         .await
         .expect("post should succeed");
     assert_eq!(resp.status, 200);
-    assert_eq!(api.hits(), 1);
+    assert_eq!(api.calls(), 1);
 }

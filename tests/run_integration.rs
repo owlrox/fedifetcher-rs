@@ -66,7 +66,7 @@ async fn a_held_lock_stops_the_run() {
         dir.join("lock.lock").exists(),
         "the foreign lock is not ours to remove"
     );
-    assert_eq!(fail.hits(), 1, "the failure callback should fire");
+    assert_eq!(fail.calls(), 1, "the failure callback should fire");
 }
 
 /// A lock in the old format (no recorded process) is reclaimed, not blocking.
@@ -125,8 +125,8 @@ async fn a_run_fires_the_lifecycle_callbacks() {
         .expect("the run should succeed");
 
     assert!(message.starts_with("Processing finished in "), "{message}");
-    assert_eq!(start.hits(), 1);
-    assert_eq!(done.hits(), 1);
+    assert_eq!(start.calls(), 1);
+    assert_eq!(done.calls(), 1);
 }
 
 /// A lock left behind by a dead process does not block the next run.

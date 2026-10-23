@@ -113,7 +113,7 @@ async fn force_post_context_resolves_the_post_and_records_it() {
     fetch::force_post_context(&mut ctx, &uri).await;
 
     assert_eq!(
-        search.hits(),
+        search.calls(),
         1,
         "the post itself is resolved on our server"
     );
@@ -154,7 +154,7 @@ async fn force_post_context_skips_a_post_recorded_as_private() {
     fetch::force_post_context(&mut ctx, &uri).await;
     drop(guard);
 
-    assert_eq!(search.hits(), 0, "a private post is not even resolved");
+    assert_eq!(search.calls(), 0, "a private post is not even resolved");
     assert!(
         logs.text().contains("recorded as private"),
         "{}",
@@ -204,12 +204,12 @@ async fn force_user_posts_refuses_an_opted_out_account() {
     drop(guard);
 
     assert_eq!(
-        nodeinfo.hits(),
+        nodeinfo.calls(),
         0,
         "nothing is fetched for an opted-out account"
     );
     assert_eq!(
-        robots.hits(),
+        robots.calls(),
         0,
         "nothing is fetched for an opted-out account"
     );
@@ -263,7 +263,7 @@ async fn force_resolve_url_adds_the_url_to_seen_urls() {
         })
         .await;
     fetch::force_resolve_url(&home, &mut state, url).await;
-    assert_eq!(search.hits(), 1);
+    assert_eq!(search.calls(), 1);
     assert!(state.seen_urls.contains(url));
 
     let refused = "https://remote.example/@alice/2";

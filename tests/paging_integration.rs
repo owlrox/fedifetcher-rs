@@ -26,12 +26,7 @@ async fn follows_link_headers_until_the_server_runs_out() {
         .mock_async(|when, then| {
             when.method(Method::GET)
                 .path("/api/v1/timelines/home")
-                .matches(|req| {
-                    req.query_params
-                        .as_ref()
-                        .map(|params| params.iter().all(|(key, _)| key != "max_id"))
-                        .unwrap_or(true)
-                });
+                .is_true(|req| req.query_params().iter().all(|(key, _)| key != "max_id"));
             then.status(200)
                 .header(
                     "Link",
@@ -65,8 +60,8 @@ async fn follows_link_headers_until_the_server_runs_out() {
     .expect("paging should succeed");
 
     assert_eq!(items.len(), 3);
-    assert_eq!(page1.hits(), 1);
-    assert_eq!(page2.hits(), 1);
+    assert_eq!(page1.calls(), 1);
+    assert_eq!(page2.calls(), 1);
 }
 
 #[tokio::test]
@@ -113,8 +108,8 @@ async fn stops_once_it_has_the_count_it_wanted() {
 
     // pages arrive whole: the second page is read to its end before stopping
     assert_eq!(items.len(), 4);
-    assert_eq!(page1.hits(), 1);
-    assert_eq!(page2.hits(), 1);
+    assert_eq!(page1.calls(), 1);
+    assert_eq!(page2.calls(), 1);
 }
 
 #[tokio::test]
@@ -125,12 +120,7 @@ async fn an_empty_page_ends_the_search() {
         .mock_async(|when, then| {
             when.method(Method::GET)
                 .path("/api/v1/timelines/home")
-                .matches(|req| {
-                    req.query_params
-                        .as_ref()
-                        .map(|params| params.iter().all(|(key, _)| key != "max_id"))
-                        .unwrap_or(true)
-                });
+                .is_true(|req| req.query_params().iter().all(|(key, _)| key != "max_id"));
             then.status(200)
                 .header(
                     "Link",
@@ -164,7 +154,7 @@ async fn an_empty_page_ends_the_search() {
     .expect("paging should succeed");
 
     assert_eq!(items.len(), 2);
-    assert_eq!(page2.hits(), 1);
+    assert_eq!(page2.calls(), 1);
 }
 
 #[tokio::test]
@@ -200,8 +190,8 @@ async fn stops_when_there_is_no_next_link() {
     .expect("paging should succeed");
 
     assert_eq!(items.len(), 2);
-    assert_eq!(page1.hits(), 1);
-    assert_eq!(page2.hits(), 0, "without a next link there is no page 2");
+    assert_eq!(page1.calls(), 1);
+    assert_eq!(page2.calls(), 0, "without a next link there is no page 2");
 }
 
 #[tokio::test]

@@ -8,7 +8,7 @@
 
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 
 use crate::config::{Config, RawValues};
 use crate::error::{Error, Result};
@@ -248,8 +248,12 @@ async fn migrate_trigger_posts(pool: &SqlitePool) -> Result<()> {
     ];
     for (column, kind) in missing {
         if !columns.iter().any(|name| name == column) {
+            // the column and kind come from the hardcoded list above
             let sql = format!("ALTER TABLE trigger_posts ADD COLUMN {column} {kind}");
-            sqlx::query(&sql).execute(pool).await.map_err(db_error)?;
+            sqlx::query(AssertSqlSafe(sql))
+                .execute(pool)
+                .await
+                .map_err(db_error)?;
         }
     }
     Ok(())
@@ -539,7 +543,10 @@ pub async fn list_tables(pool: &SqlitePool) -> Result<Vec<String>> {
 /// view.
 pub async fn table_columns(pool: &SqlitePool, table: &str) -> Result<Vec<String>> {
     let sql = format!("PRAGMA table_info({})", quote_ident(table)?);
-    let rows = sqlx::query(&sql).fetch_all(pool).await.map_err(db_error)?;
+    let rows = sqlx::query(AssertSqlSafe(sql))
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
     Ok(rows
         .iter()
         .map(|row| row.get::<String, _>("name"))
@@ -549,7 +556,7 @@ pub async fn table_columns(pool: &SqlitePool, table: &str) -> Result<Vec<String>
 /// How many rows a table has.
 pub async fn table_count(pool: &SqlitePool, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {}", quote_ident(table)?);
-    let count: i64 = sqlx::query_scalar(&sql)
+    let count: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
         .fetch_one(pool)
         .await
         .map_err(db_error)?;
@@ -592,7 +599,7 @@ pub async fn table_rows(
         "SELECT {} FROM {table_q} ORDER BY {table_q}.{sort_q} {direction} LIMIT ?",
         select.join(", ")
     );
-    let rows = sqlx::query(&sql)
+    let rows = sqlx::query(AssertSqlSafe(sql))
         .bind(max)
         .fetch_all(pool)
         .await
@@ -1071,7 +1078,10 @@ async fn load_timestamped_set(
     key_column: &str,
 ) -> Result<TimestampedSet> {
     let sql = format!("SELECT {key_column}, first_seen FROM {table} ORDER BY rowid");
-    let rows = sqlx::query(&sql).fetch_all(pool).await.map_err(db_error)?;
+    let rows = sqlx::query(AssertSqlSafe(sql))
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
     let mut set = TimestampedSet::new();
     for row in rows {
         let item: String = row.get(key_column);
@@ -1091,7 +1101,7 @@ async fn save_timestamped_set(
     max_entries: usize,
 ) -> Result<()> {
     let delete = format!("DELETE FROM {table}");
-    sqlx::query(&delete)
+    sqlx::query(AssertSqlSafe(delete))
         .execute(&mut **tx)
         .await
         .map_err(db_error)?;
@@ -1099,7 +1109,7 @@ async fn save_timestamped_set(
     let start = entries.len().saturating_sub(max_entries);
     let insert = format!("INSERT INTO {table} ({key_column}, first_seen) VALUES (?, ?)");
     for (item, when) in &entries[start..] {
-        sqlx::query(&insert)
+        sqlx::query(AssertSqlSafe(insert.clone()))
             .bind(*item)
             .bind(timeutil::fmt_state_ts(*when))
             .execute(&mut **tx)
