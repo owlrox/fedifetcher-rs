@@ -317,8 +317,10 @@ async fn the_dashboard_shows_a_running_run_with_its_elapsed_time() {
         "the running run is in the history"
     );
     assert!(
-        body.contains("running for"),
-        "its end time cell shows how long it has run"
+        body.contains(
+            "<td> </td><td><span class=\"badge running\">running</span></td><td>running for"
+        ),
+        "the finished cell is blank and the message cell carries the elapsed time"
     );
     assert!(
         body.contains("badge running"),

@@ -1581,8 +1581,13 @@ fn Dashboard(
                                             _ => "error",
                                         };
                                         // a run still going has no end time;
-                                        // its cell shows how long it has run
+                                        // its message says how long it has run
                                         let finished = if record.outcome == "running" {
+                                            String::new()
+                                        } else {
+                                            record.finished.clone()
+                                        };
+                                        let message = if record.outcome == "running" {
                                             match timeutil::parse(&record.started) {
                                                 Some(since) => format!(
                                                     "running for {}",
@@ -1591,14 +1596,14 @@ fn Dashboard(
                                                 None => "running".to_string(),
                                             }
                                         } else {
-                                            record.finished.clone()
+                                            record.message.clone()
                                         };
                                         view! {
                                             <tr>
                                                 <td>{record.started}</td>
                                                 <td>{finished}</td>
                                                 <td><span class=format!("badge {badge}")>{record.outcome}</span></td>
-                                                <td>{record.message}</td>
+                                                <td>{message}</td>
                                             </tr>
                                         }
                                     })
