@@ -78,7 +78,7 @@ pub async fn force_post_context(ctx: &mut Context<'_>, uri: &str) {
 
     // then its context, ignoring how recently it was last checked
     let context_urls = known_context_urls(ctx, std::slice::from_ref(&post), "manual", true).await;
-    add_context_urls(ctx.home, context_urls, &ctx.cancel, ctx.state).await;
+    add_context_urls(ctx, context_urls).await;
 }
 
 /// Backfill one account's posts now, even when it is already known. `acct`

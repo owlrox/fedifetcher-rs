@@ -148,7 +148,7 @@ pub async fn add_post_with_context(ctx: &mut Context<'_>, post: &Post) -> bool {
             }
             let known_context_urls =
                 known_context_urls(ctx, std::slice::from_ref(post), "backfill", false).await;
-            add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;
+            add_context_urls(ctx, known_context_urls).await;
         }
         return true;
     }
@@ -168,7 +168,7 @@ pub async fn add_user_posts(
 ) {
     let home_server = ctx.home.server.clone();
     for user in followings {
-        if ctx.cancel.is_canceled() {
+        if ctx.check_in().await {
             break;
         }
         if (!ctx.state.all_known_users().contains(&user.acct) || force.known)
@@ -180,7 +180,7 @@ pub async fn add_user_posts(
                 let mut count = 0;
                 let mut failed = 0;
                 for post in posts {
-                    if ctx.cancel.is_canceled() {
+                    if ctx.check_in().await {
                         break;
                     }
                     if !post.is_boost() && !ctx.state.seen_urls().contains(&post.url) {

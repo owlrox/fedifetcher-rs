@@ -26,7 +26,7 @@ use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
-use crate::run::{run_once, CancelToken, Context};
+use crate::run::{run_once, CancelToken, Context, Pause};
 use crate::store::{lock, State, StateStore};
 use crate::timeutil;
 use crate::VERSION;
@@ -62,6 +62,9 @@ struct AppState {
     /// Set by the stop button; the running run checks it between tasks and
     /// items, and finishes early when it is set.
     cancel: CancelToken,
+    /// Set by the pause button; the running run holds between tasks and
+    /// items until it is cleared — or stopped.
+    pause: Pause,
 }
 
 struct UiState {
@@ -108,12 +111,15 @@ pub fn app(config: Config, db: SqlitePool) -> Router {
         }),
         run_guard: Arc::new(AsyncMutex::new(())),
         cancel: CancelToken::new(),
+        pause: Pause::new(),
     });
 
     Router::new()
         .route("/", get(dashboard))
         .route("/run", post(run))
         .route("/stop", post(stop))
+        .route("/pause", post(pause))
+        .route("/resume", post(resume))
         .route("/fetch", post(manual_fetch))
         .route("/data", get(data))
         .route("/hosts", get(data_redirect))
@@ -758,6 +764,7 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     if let Ok(guard) = state.run_guard.clone().try_lock_owned() {
         tracing::info!("POST /run: run triggered from the web UI");
         state.cancel.reset();
+        state.pause.resume();
         let started = timeutil::now();
         // the run is recorded the moment it starts, so the dashboard's
         // history shows it while it is still going
@@ -776,7 +783,8 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
 
             let config = state.config.lock().unwrap().clone();
             let cancel = state.cancel.clone();
-            let outcome = run_once(config.clone(), cancel.clone(), &state.db).await;
+            let pause = state.pause.clone();
+            let outcome = run_once(config.clone(), cancel.clone(), pause.clone(), &state.db).await;
             let finished = timeutil::now();
             let (outcome_label, message) = match &outcome {
                 Ok(message) if cancel.is_canceled() => ("stopped".to_string(), message.clone()),
@@ -818,6 +826,33 @@ async fn stop(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
         tracing::info!("POST /stop: stop requested for the running FediFetcher run");
     } else {
         tracing::debug!("POST /stop: no run in progress; nothing to stop");
+    }
+    Redirect::to("/")
+}
+
+/// Ask the running FediFetcher to pause: set the flag the run waits on
+/// between tasks and items, then redirect back to the dashboard. Pausing an
+/// idle UI is harmless — the next run clears the flag first.
+async fn pause(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
+    let running = matches!(state.ui.lock().unwrap().status, RunStatus::Running { .. });
+    state.pause.pause();
+    if running {
+        tracing::info!("POST /pause: pause requested for the running FediFetcher run");
+    } else {
+        tracing::debug!("POST /pause: no run in progress; nothing to pause");
+    }
+    Redirect::to("/")
+}
+
+/// Let a paused run continue: clear the flag the run waits on, then
+/// redirect back to the dashboard. Resuming an unpaused UI is harmless.
+async fn resume(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
+    let paused = state.pause.is_paused();
+    state.pause.resume();
+    if paused {
+        tracing::info!("POST /resume: the paused FediFetcher run continues");
+    } else {
+        tracing::debug!("POST /resume: no run is paused; nothing to resume");
     }
     Redirect::to("/")
 }
@@ -897,12 +932,15 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str, forc
             return;
         }
     };
+    // a manual fetch is its own thing, with its own signals: it never
+    // pauses, and the run's stop button does not stop it
     let mut ctx = Context {
         config: &config,
         state: session.state(),
         http: &http,
         home: &home,
         cancel: CancelToken::new(),
+        pause: Pause::new(),
         db: &state.db,
     };
     match kind {
@@ -1089,10 +1127,12 @@ ul.tokens { margin: 0.2rem 0; padding-left: 1.2rem; }
 ul.tokens label { color: #888; }
 form.fetch { margin: 0; }
 form.fetch button { font-size: 0.8rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
+form.run { margin: 0.25rem 0; }
 .badge { padding: 0.1rem 0.5rem; border-radius: 0.4rem; font-size: 0.8rem; color: #fff; }
 .badge.ok { background: #2a8; }
 .badge.error { background: #c44; }
 .badge.running { background: #c83; }
+.badge.paused { background: #48c; }
 .badge.stopped { background: #777; }
 .badge.debug { background: #777; }
 .badge.info { background: #48c; }
@@ -1161,15 +1201,27 @@ fn live_toggle(live: bool) -> AnyView {
 #[component]
 fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State, live: bool) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
-    let (status_label, status_class, is_running) = {
+    let (status_label, status_class, is_running, is_paused) = {
         let ui = state.ui.lock().unwrap();
         match &ui.status {
-            RunStatus::Idle => ("Idle".to_string(), "ok".to_string(), false),
-            RunStatus::Running { since } => (
-                format!("Running since {}", timeutil::fmt_state_ts(*since)),
-                "running".to_string(),
-                true,
-            ),
+            RunStatus::Idle => ("Idle".to_string(), "ok".to_string(), false, false),
+            RunStatus::Running { since } => {
+                if state.pause.is_paused() {
+                    (
+                        format!("Paused (running since {})", timeutil::fmt_state_ts(*since)),
+                        "paused".to_string(),
+                        true,
+                        true,
+                    )
+                } else {
+                    (
+                        format!("Running since {}", timeutil::fmt_state_ts(*since)),
+                        "running".to_string(),
+                        true,
+                        false,
+                    )
+                }
+            }
         }
     };
     let tasks = config.enabled_tasks();
@@ -1211,10 +1263,26 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State, live: bool
                     <span class=format!("badge {status_class}")>{status_label}</span>
                 </p>
                 {if is_running {
+                    let pause_button = if is_paused {
+                        view! {
+                            <form class="run" method="post" action="/resume">
+                                <button type="submit">"Resume the paused FediFetcher"</button>
+                            </form>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <form class="run" method="post" action="/pause">
+                                <button type="submit">"Pause the running FediFetcher"</button>
+                            </form>
+                        }.into_any()
+                    };
                     view! {
-                        <form class="run" method="post" action="/stop">
-                            <button type="submit">"Stop the running FediFetcher"</button>
-                        </form>
+                        <>
+                            {pause_button}
+                            <form class="run" method="post" action="/stop">
+                                <button type="submit">"Stop the running FediFetcher"</button>
+                            </form>
+                        </>
                     }.into_any()
                 } else {
                     view! {

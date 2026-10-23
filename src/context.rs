@@ -5,14 +5,12 @@ use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info, warn};
 
-use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
 use crate::db::{self, is_private_post, mark_private_post, TriggerPost};
-use crate::http::HttpClient;
 use crate::posts::Post;
-use crate::run::{CancelToken, Context};
+use crate::run::Context;
 use crate::servers::server_info;
-use crate::store::{RepliedToot, State};
+use crate::store::RepliedToot;
 use crate::timeutil;
 
 /// The minimum time between handling an already-known context post again.
@@ -87,7 +85,7 @@ pub async fn known_context_urls(
     let mut triggers: Vec<TriggerPost> = Vec::with_capacity(reply_toots.len());
 
     for toot in reply_toots {
-        if ctx.cancel.is_canceled() {
+        if ctx.check_in().await {
             break;
         }
         triggers.push(TriggerPost::from_post(toot, source));
@@ -114,14 +112,8 @@ pub async fn known_context_urls(
                 .recently_checked_context_mut()
                 .mark_fetched(&toot.uri, toot.created_at);
             scan.fetched += 1;
-            let context = toot_context_urls(
-                &parsed_url.server,
-                &parsed_url.post_id,
-                &url,
-                ctx.http,
-                ctx.state,
-            )
-            .await;
+            let context =
+                toot_context_urls(ctx, &parsed_url.server, &parsed_url.post_id, &url).await;
             for item in context {
                 known_context_urls.insert(item);
             }
@@ -254,18 +246,15 @@ fn known_context_found_line(
 
 /// Get the server and ID of the toots the given toots replied to.
 pub async fn replied_toot_server_ids(
-    server: &str,
+    ctx: &mut Context<'_>,
     reply_toots: &[Post],
-    http: &HttpClient,
-    cancel: &CancelToken,
-    state: &mut State,
 ) -> Vec<RepliedToot> {
     let mut replied = Vec::new();
     for toot in reply_toots {
-        if cancel.is_canceled() {
+        if ctx.check_in().await {
             break;
         }
-        if let Some(entry) = replied_toot_server_id(server, toot, http, state).await {
+        if let Some(entry) = replied_toot_server_id(ctx, toot).await {
             replied.push(entry);
         }
     }
@@ -273,12 +262,7 @@ pub async fn replied_toot_server_ids(
 }
 
 /// Get the server and ID of the toot the given toot replied to.
-pub async fn replied_toot_server_id(
-    server: &str,
-    toot: &Post,
-    http: &HttpClient,
-    state: &mut State,
-) -> Option<RepliedToot> {
+async fn replied_toot_server_id(ctx: &mut Context<'_>, toot: &Post) -> Option<RepliedToot> {
     let mentions: Vec<_> = toot
         .mentions
         .iter()
@@ -291,25 +275,25 @@ pub async fn replied_toot_server_id(
     // only ever asked of reply toots, which always name the post replied to
     let reply_id = toot.in_reply_to_id.as_ref()?;
 
-    let o_url = format!("https://{server}/@{}/{reply_id}", mention.acct);
-    if let Some(cached) = state.replied_toot_server_ids().get(&o_url) {
+    let o_url = format!("https://{}/@{}/{reply_id}", ctx.config.server, mention.acct);
+    if let Some(cached) = ctx.state.replied_toot_server_ids().get(&o_url) {
         // a cache entry that survived a run is JSON, so the PostRef is a list
         return cached.clone();
     }
 
-    let url = http.get_redirect_url(&o_url).await?;
+    let url = ctx.http.get_redirect_url(&o_url).await?;
 
-    match find_post(&url, state, http).await {
+    match find_post(&url, ctx.state, ctx.http).await {
         Some(post_ref) => {
             let entry = RepliedToot { url, post_ref };
-            state
+            ctx.state
                 .replied_toot_server_ids_mut()
                 .insert(o_url, Some(entry.clone()));
             Some(entry)
         }
         None => {
             // find_post has already logged why the URL could not be parsed
-            state.replied_toot_server_ids_mut().insert(o_url, None);
+            ctx.state.replied_toot_server_ids_mut().insert(o_url, None);
             None
         }
     }
@@ -317,23 +301,19 @@ pub async fn replied_toot_server_id(
 
 /// Get the URLs of the context toots of the given toots.
 pub async fn context_urls(
-    server: &str,
+    ctx: &mut Context<'_>,
     replied_toot_ids: Vec<RepliedToot>,
-    http: &HttpClient,
-    cancel: &CancelToken,
-    state: &mut State,
 ) -> Vec<String> {
     let mut urls = Vec::new();
     // the filter is the outer server's, not the replied-toot's own: a post on
     // our server never needs fetching from anywhere
-    let prefix = format!("https://{server}/");
+    let prefix = format!("https://{}/", ctx.config.server);
     for entry in replied_toot_ids {
-        if cancel.is_canceled() {
+        if ctx.check_in().await {
             break;
         }
         let RepliedToot { url, post_ref } = entry;
-        let context =
-            toot_context_urls(&post_ref.server, &post_ref.post_id, &url, http, state).await;
+        let context = toot_context_urls(ctx, &post_ref.server, &post_ref.post_id, &url).await;
         for context_url in context {
             if !context_url.starts_with(&prefix) {
                 urls.push(context_url);
@@ -344,19 +324,18 @@ pub async fn context_urls(
 }
 
 /// Get the URLs of the context toots of the given toot.
-pub async fn toot_context_urls(
+async fn toot_context_urls(
+    ctx: &mut Context<'_>,
     server: &str,
     toot_id: &str,
     toot_url: &str,
-    http: &HttpClient,
-    state: &mut State,
 ) -> Vec<String> {
-    let Some(post_server) = server_info(server, state.seen_hosts_mut(), http).await else {
+    let Some(post_server) = server_info(server, ctx.state.seen_hosts_mut(), ctx.http).await else {
         error!("server {server} not found for post");
         return Vec::new();
     };
 
-    let Some(client) = client_for(&post_server, http) else {
+    let Some(client) = client_for(&post_server, ctx.http) else {
         return Vec::new();
     };
 
@@ -364,23 +343,18 @@ pub async fn toot_context_urls(
 }
 
 /// Add the given toot URLs to the server.
-pub async fn add_context_urls(
-    home: &HomeServer,
-    context_urls: Vec<String>,
-    cancel: &CancelToken,
-    state: &mut State,
-) {
+pub async fn add_context_urls(ctx: &mut Context<'_>, context_urls: Vec<String>) {
     let total = context_urls.len();
     let mut count = 0;
     let mut failed = 0;
     let mut already_seen = 0;
     for url in context_urls {
-        if cancel.is_canceled() {
+        if ctx.check_in().await {
             break;
         }
-        if !state.seen_urls().contains(&url) {
-            if home.resolve(&url).await {
-                state.seen_urls_mut().add(&url, None);
+        if !ctx.state.seen_urls().contains(&url) {
+            if ctx.home.resolve(&url).await {
+                ctx.state.seen_urls_mut().add(&url, None);
                 count += 1;
             } else {
                 failed += 1;

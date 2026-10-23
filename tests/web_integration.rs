@@ -866,6 +866,123 @@ async fn the_stop_button_stops_a_running_run() {
 }
 
 #[tokio::test]
+async fn the_pause_button_pauses_a_running_run_and_resume_continues_it() {
+    // the start callback answers slowly, so the run is observably in
+    // progress past the moment it is paused
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/start");
+            then.status(200).delay(std::time::Duration::from_secs(2));
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.on_start = Some(format!("{}/start", server.base_url()));
+    let (base, _) = spawn_ui_with(config).await;
+
+    let resp = client().post(format!("{base}/run")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+
+    // while the run is going, the dashboard offers to pause it
+    let mut running_page = String::new();
+    for _ in 0..100 {
+        let (_, page) = get(&format!("{base}/")).await;
+        if page.contains("Running since") {
+            running_page = page;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        running_page.contains("Running since"),
+        "the run should be running"
+    );
+    assert!(running_page.contains("Pause the running FediFetcher"));
+    assert!(running_page.contains("Stop the running FediFetcher"));
+    assert!(!running_page.contains("Resume the paused FediFetcher"));
+
+    let resp = client().post(format!("{base}/pause")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    assert_eq!(resp.headers().get("Location").unwrap(), "/");
+
+    // the dashboard shows the pause: the badge, and a resume button in
+    // place of the pause one — stop stays available
+    let mut paused_page = String::new();
+    for _ in 0..100 {
+        let (_, page) = get(&format!("{base}/")).await;
+        if page.contains("badge paused") {
+            paused_page = page;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        paused_page.contains("badge paused"),
+        "the status badge should say paused"
+    );
+    assert!(paused_page.contains("Paused (running since"));
+    assert!(paused_page.contains("Resume the paused FediFetcher"));
+    assert!(paused_page.contains("Stop the running FediFetcher"));
+    assert!(!paused_page.contains("Pause the running FediFetcher"));
+
+    // the callback has finished by now, and the run would have finished
+    // with it — a paused run holds instead
+    tokio::time::sleep(std::time::Duration::from_millis(2800)).await;
+    let (_, page) = get(&format!("{base}/")).await;
+    assert!(
+        !page.contains("Processing finished in"),
+        "a paused run holds past the point it would finish"
+    );
+    assert!(page.contains("badge paused"));
+
+    let resp = client()
+        .post(format!("{base}/resume"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    assert_eq!(resp.headers().get("Location").unwrap(), "/");
+
+    // the resume sets the run going again: the run shows as running, or
+    // has already finished — it was holding at its last checkpoint, so
+    // finishing is what the resume set loose. The poll waits for a
+    // consistent page: the dashboard reads the status and the run history
+    // at two moments, so a page can briefly show the finished status next
+    // to the still-running history row.
+    let mut resumed_page = String::new();
+    for _ in 0..100 {
+        let (_, page) = get(&format!("{base}/")).await;
+        if page.contains("Running since") || page.contains("Processing finished in") {
+            resumed_page = page;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        !resumed_page.is_empty(),
+        "the resume should set the run going again"
+    );
+    assert!(!resumed_page.contains("Resume the paused FediFetcher"));
+
+    // and the run finishes once it is going again
+    let mut body = String::new();
+    for _ in 0..100 {
+        let (_, page) = get(&format!("{base}/")).await;
+        if page.contains("Processing finished in") {
+            body = page;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        body.contains("Processing finished in"),
+        "the resumed run should finish"
+    );
+    assert!(body.contains(">Idle<"), "the run should be over");
+}
+
+#[tokio::test]
 async fn saving_the_config_page_writes_the_database() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "");

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::config::Config;
 use fedifetcher::http::HttpClient;
-use fedifetcher::run::{CancelToken, Context};
+use fedifetcher::run::{CancelToken, Context, Pause};
 use fedifetcher::store::State;
 
 /// A fresh temporary directory, unique to this test.
@@ -54,6 +54,7 @@ pub fn run_context<'a>(
         http,
         home,
         cancel: CancelToken::new(),
+        pause: Pause::new(),
         db,
     }
 }

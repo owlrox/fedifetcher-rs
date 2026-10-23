@@ -92,7 +92,8 @@ async fn main() -> ExitCode {
 
     match mode {
         Mode::Run => {
-            let result = run::run_once(config, run::CancelToken::new(), &db).await;
+            let result =
+                run::run_once(config, run::CancelToken::new(), run::Pause::new(), &db).await;
             // wait for the log lines already received to reach the database
             log_db.shutdown().await;
             match result {

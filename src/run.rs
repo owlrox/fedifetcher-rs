@@ -111,24 +111,85 @@ impl CancelToken {
     }
 }
 
+/// How often a paused run re-checks its signals: how quickly a resume or
+/// a stop takes effect while the run is holding.
+const PAUSE_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// A cooperative pause signal for a run: set from the web UI's pause
+/// button, waited on between tasks and between the items of the long
+/// loops.
+///
+/// Cloning shares the flag, so the web UI's copy and the run's copy see
+/// the same pause. Like a stop, a pause cannot interrupt an in-flight
+/// HTTP request — the run holds at its next checkpoint — and a stop lands
+/// while paused.
+#[derive(Clone, Default)]
+pub struct Pause {
+    paused: Arc<AtomicBool>,
+}
+
+impl Pause {
+    pub fn new() -> Self {
+        Pause::default()
+    }
+
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    /// Clear the flag, so a paused run continues — and the next run starts
+    /// unpaused.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Hold while paused, until the run is resumed or stopped.
+    async fn wait(&self, cancel: &CancelToken) {
+        while self.is_paused() && !cancel.is_canceled() {
+            tokio::time::sleep(PAUSE_POLL).await;
+        }
+    }
+}
+
 /// Everything a run or a manual fetch needs: the settings, what we
-/// remember, who to ask, and how to stop.
+/// remember, who to ask, and how to stop or hold it.
 pub struct Context<'a> {
     pub config: &'a Config,
     pub state: &'a mut State,
     pub http: &'a HttpClient,
     pub home: &'a HomeServer,
     pub cancel: CancelToken,
+    pub pause: Pause,
     pub db: &'a SqlitePool,
+}
+
+impl Context<'_> {
+    /// The run's checkpoint, called between tasks and between the items of
+    /// the long loops: hold while the run is paused, then report whether it
+    /// was stopped. A stop during a pause still ends the run.
+    pub async fn check_in(&self) -> bool {
+        self.pause.wait(&self.cancel).await;
+        self.cancel.is_canceled()
+    }
 }
 
 /// Do one run, and report the message it finished with.
 ///
 /// The state is written back even when a task fails part way through, and the
 /// lock is released either way. A run whose `cancel` was set finishes early
-/// and reports "Stopped.". Posts found private are recorded in `db`, so
-/// later runs skip them without asking again.
-pub async fn run_once(config: Config, cancel: CancelToken, db: &SqlitePool) -> Result<String> {
+/// and reports "Stopped."; a paused run holds at its checkpoints until it is
+/// resumed or stopped. Posts found private are recorded in `db`, so later
+/// runs skip them without asking again.
+pub async fn run_once(
+    config: Config,
+    cancel: CancelToken,
+    pause: Pause,
+    db: &SqlitePool,
+) -> Result<String> {
     info!("Starting FediFetcher v{VERSION}");
     if !config.respect_robots_txt {
         warn!("respect_robots_txt is disabled: remote servers' robots.txt will not be respected");
@@ -164,7 +225,7 @@ pub async fn run_once(config: Config, cancel: CancelToken, db: &SqlitePool) -> R
     // Delete any old robots.txt entries so we can re-download them
     http.robots().discard_stale(ROBOTS_MAX_AGE).await;
 
-    let result = run_tasks(&config, &http, &mut session, &cancel, db).await;
+    let result = run_tasks(&config, &http, &mut session, &cancel, &pause, db).await;
 
     // the session writes the state back, failures included
     if let Err(ex) = session.finish().await {
@@ -205,6 +266,7 @@ async fn run_tasks(
     http: &HttpClient,
     session: &mut Session,
     cancel: &CancelToken,
+    pause: &Pause,
     db: &SqlitePool,
 ) -> Result<()> {
     if cancel.is_canceled() {
@@ -217,6 +279,8 @@ async fn run_tasks(
         debug!("Enabled tasks: {}", tasks.join(", "));
     }
     for token in &config.access_tokens {
+        // hold between servers while paused; a stop during the pause ends it
+        pause.wait(cancel).await;
         if cancel.is_canceled() {
             break;
         }
@@ -227,6 +291,7 @@ async fn run_tasks(
             http,
             home: &home,
             cancel: cancel.clone(),
+            pause: pause.clone(),
             db,
         };
         run_enabled_tasks(&mut ctx).await?;
@@ -258,5 +323,66 @@ mod tests {
 
         token.reset();
         assert!(!clone.is_canceled(), "reset clears it for all clones");
+    }
+
+    #[test]
+    fn pause_starts_unpaused_and_shares_its_flag() {
+        let pause = Pause::new();
+        assert!(!pause.is_paused());
+
+        let clone = pause.clone();
+        pause.pause();
+        assert!(pause.is_paused());
+        assert!(clone.is_paused(), "clones share the flag");
+
+        pause.resume();
+        assert!(!clone.is_paused(), "resume clears it for all clones");
+    }
+
+    #[tokio::test]
+    async fn check_in_holds_while_paused_until_resumed_or_stopped() {
+        let config = Config::default();
+        let db = crate::db::memory_pool();
+        let http = HttpClient::new(config.clone(), db.clone());
+        let home = HomeServer::new(&config.server, "token", http.clone());
+        let mut state = State::default();
+        let cancel = CancelToken::new();
+        let pause = Pause::new();
+        let ctx = Context {
+            config: &config,
+            state: &mut state,
+            http: &http,
+            home: &home,
+            cancel: cancel.clone(),
+            pause: pause.clone(),
+            db: &db,
+        };
+
+        // neither paused nor stopped: passes straight through
+        assert!(!ctx.check_in().await);
+
+        // paused: holds, until resumed
+        pause.pause();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), ctx.check_in())
+                .await
+                .is_err(),
+            "a paused run holds at the checkpoint"
+        );
+        pause.resume();
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(1), ctx.check_in())
+                .await
+                .expect("resumed, so the checkpoint passes"),
+            "a resumed run goes on"
+        );
+
+        // a stop lands even while paused
+        pause.pause();
+        cancel.cancel();
+        assert!(
+            ctx.check_in().await,
+            "a stop during a pause still ends the run"
+        );
     }
 }

@@ -4,35 +4,27 @@
 use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info};
 
-use crate::api::mastodon::HomeServer;
 use crate::backfill::{add_user_posts, filter_known_users, Force, UserSet};
 use crate::config::Config;
 use crate::context::{add_context_urls, context_urls, known_context_urls, replied_toot_server_ids};
 use crate::error::Result;
 use crate::posts::Post;
-use crate::run::{CancelToken, Context};
-use crate::store::State;
+use crate::run::Context;
 use crate::timeutil;
 use crate::users::User;
 
 /// Get all replies to other users by the given users in the last day.
-pub async fn reply_toots(
-    home: &HomeServer,
-    user_ids: &[String],
-    reply_interval_hours: i64,
-    cancel: &CancelToken,
-    state: &mut State,
-) -> Vec<Post> {
+pub async fn reply_toots(ctx: &mut Context<'_>, user_ids: &[String]) -> Vec<Post> {
     // a post's date is UTC, so the window has to be measured in UTC too:
     // local time here quietly shortened the interval east of UTC and
     // lengthened it west
-    let replies_since = timeutil::now() - Duration::hours(reply_interval_hours);
+    let replies_since = timeutil::now() - Duration::hours(ctx.config.reply_interval_in_hours);
     let mut reply_toots = Vec::new();
     for user_id in user_ids {
-        if cancel.is_canceled() {
+        if ctx.check_in().await {
             break;
         }
-        reply_toots.extend(reply_toots_for_user(user_id, home, replies_since, state).await);
+        reply_toots.extend(reply_toots_for_user(ctx, user_id, replies_since).await);
     }
     info!("Found {} reply toots", reply_toots.len());
     reply_toots
@@ -40,17 +32,16 @@ pub async fn reply_toots(
 
 /// Get replies by the user to other users since the given date.
 async fn reply_toots_for_user(
+    ctx: &mut Context<'_>,
     user_id: &str,
-    home: &HomeServer,
     reply_since: OffsetDateTime,
-    state: &mut State,
 ) -> Vec<Post> {
-    let statuses = match home.account_statuses(user_id).await {
+    let statuses = match ctx.home.account_statuses(user_id).await {
         Ok(statuses) => statuses,
         Err(ex) => {
             error!(
                 "Error getting replies for user {user_id} on server {}: {ex}",
-                home.server
+                ctx.home.server
             );
             return Vec::new();
         }
@@ -60,7 +51,7 @@ async fn reply_toots_for_user(
         .into_iter()
         .filter(|toot| {
             toot.in_reply_to_id.is_some()
-                && !state.seen_urls().contains(&toot.url)
+                && !ctx.state.seen_urls().contains(&toot.url)
                 && toot.created_at > reply_since
         })
         .collect();
@@ -72,7 +63,7 @@ async fn reply_toots_for_user(
 
 async fn fetch_timeline_context(ctx: &mut Context<'_>, timeline_posts: Vec<Post>, source: &str) {
     let known_context_urls = known_context_urls(ctx, &timeline_posts, source, false).await;
-    add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;
+    add_context_urls(ctx, known_context_urls).await;
 
     // Backfill any post authors, and any mentioned users
     if ctx.config.backfill_mentioned_users {
@@ -165,33 +156,12 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
         .home
         .active_user_ids(ctx.config.reply_interval_in_hours as f64)
         .await?;
-    let reply_toots = reply_toots(
-        ctx.home,
-        &user_ids,
-        ctx.config.reply_interval_in_hours,
-        &ctx.cancel,
-        ctx.state,
-    )
-    .await;
+    let reply_toots = reply_toots(ctx, &user_ids).await;
     let known_context_urls = known_context_urls(ctx, &reply_toots, "replies", false).await;
     ctx.state.seen_urls_mut().update(known_context_urls);
-    let replied_toot_ids = replied_toot_server_ids(
-        &ctx.config.server,
-        &reply_toots,
-        ctx.http,
-        &ctx.cancel,
-        ctx.state,
-    )
-    .await;
-    let context_urls = context_urls(
-        &ctx.config.server,
-        replied_toot_ids,
-        ctx.http,
-        &ctx.cancel,
-        ctx.state,
-    )
-    .await;
-    add_context_urls(ctx.home, context_urls, &ctx.cancel, ctx.state).await;
+    let replied_toot_ids = replied_toot_server_ids(ctx, &reply_toots).await;
+    let context_urls = context_urls(ctx, replied_toot_ids).await;
+    add_context_urls(ctx, context_urls).await;
     Ok(())
 }
 
@@ -323,7 +293,7 @@ async fn fetch_favorite_context(ctx: &mut Context<'_>) -> Result<()> {
 
 async fn pull_context_for(ctx: &mut Context<'_>, posts: Vec<Post>, source: &str) {
     let known_context_urls = known_context_urls(ctx, &posts, source, false).await;
-    add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;
+    add_context_urls(ctx, known_context_urls).await;
 }
 
 /// The user whose followings and followers are backfilled, if a specific one
@@ -338,55 +308,56 @@ fn config_user(config: &Config) -> Option<&str> {
 
 /// Run each task whose setting asks for it, in the Python original's order.
 ///
-/// A canceled run stops between tasks: whatever finished is kept, and the
-/// run reports that it was stopped.
+/// A paused run holds between tasks, and a canceled run stops between
+/// tasks: whatever finished is kept, and the run reports that it was
+/// stopped.
 pub async fn run_enabled_tasks(ctx: &mut Context<'_>) -> Result<()> {
     if ctx.config.from_lists {
         fetch_from_lists(ctx).await?;
     }
-    if ctx.cancel.is_canceled() {
+    if ctx.check_in().await {
         return Ok(());
     }
     if ctx.config.reply_interval_in_hours > 0 {
         fetch_reply_context(ctx).await?;
     }
-    if ctx.cancel.is_canceled() {
+    if ctx.check_in().await {
         return Ok(());
     }
     if ctx.config.home_timeline_length > 0 {
         fetch_home_timeline(ctx).await?;
     }
-    if ctx.cancel.is_canceled() {
+    if ctx.check_in().await {
         return Ok(());
     }
     if ctx.config.max_followings > 0 {
         backfill_followings(ctx).await?;
     }
-    if ctx.cancel.is_canceled() {
+    if ctx.check_in().await {
         return Ok(());
     }
     if ctx.config.max_followers > 0 {
         backfill_followers(ctx).await?;
     }
-    if ctx.cancel.is_canceled() {
+    if ctx.check_in().await {
         return Ok(());
     }
     if ctx.config.max_follow_requests > 0 {
         backfill_follow_requests(ctx).await?;
     }
-    if ctx.cancel.is_canceled() {
+    if ctx.check_in().await {
         return Ok(());
     }
     if ctx.config.from_notifications > 0 {
         backfill_from_notifications(ctx).await?;
     }
-    if ctx.cancel.is_canceled() {
+    if ctx.check_in().await {
         return Ok(());
     }
     if ctx.config.max_bookmarks > 0 {
         fetch_bookmark_context(ctx).await?;
     }
-    if ctx.cancel.is_canceled() {
+    if ctx.check_in().await {
         return Ok(());
     }
     if ctx.config.max_favorites > 0 {

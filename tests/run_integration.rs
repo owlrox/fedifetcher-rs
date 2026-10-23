@@ -2,7 +2,7 @@
 
 mod common;
 
-use fedifetcher::run::{run_once, CancelToken};
+use fedifetcher::run::{run_once, CancelToken, Pause};
 use fedifetcher::timeutil;
 use httpmock::prelude::*;
 use httpmock::Method;
@@ -13,7 +13,7 @@ async fn a_run_with_nothing_enabled_still_succeeds() {
     let config = common::test_config(&dir, "example.social");
     let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, CancelToken::new(), &db)
+    let message = run_once(config, CancelToken::new(), Pause::new(), &db)
         .await
         .expect("a run with nothing enabled should succeed");
 
@@ -56,7 +56,7 @@ async fn a_held_lock_stops_the_run() {
     config.on_fail = Some(format!("{}/fail", server.base_url()));
     let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let err = run_once(config, CancelToken::new(), &db)
+    let err = run_once(config, CancelToken::new(), Pause::new(), &db)
         .await
         .expect_err("a held lock must stop the run");
 
@@ -82,7 +82,7 @@ async fn a_legacy_lock_without_a_recorded_process_is_reclaimed() {
     .unwrap();
     let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, CancelToken::new(), &db)
+    let message = run_once(config, CancelToken::new(), Pause::new(), &db)
         .await
         .expect("a lock that names no live process must not block the run");
 
@@ -120,7 +120,7 @@ async fn a_run_fires_the_lifecycle_callbacks() {
     config.on_done = Some(format!("{}/done", server.base_url()));
     let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, CancelToken::new(), &db)
+    let message = run_once(config, CancelToken::new(), Pause::new(), &db)
         .await
         .expect("the run should succeed");
 
@@ -152,7 +152,7 @@ async fn a_lock_held_by_a_dead_process_is_reclaimed() {
     .unwrap();
     let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, CancelToken::new(), &db)
+    let message = run_once(config, CancelToken::new(), Pause::new(), &db)
         .await
         .expect("a dead holder's lock must not block the run");
 
@@ -175,7 +175,7 @@ async fn a_canceled_run_stops_before_doing_anything() {
     cancel.cancel();
     let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, cancel, &db)
+    let message = run_once(config, cancel, Pause::new(), &db)
         .await
         .expect("a stopped run is not a failure");
 
@@ -189,4 +189,84 @@ async fn a_canceled_run_stops_before_doing_anything() {
         !dir.join("lock.lock").exists(),
         "the lock should be released"
     );
+}
+
+/// A paused run holds at its checkpoint past the point it would finish,
+/// and finishes once it is resumed.
+#[tokio::test]
+async fn a_paused_run_holds_until_resumed() {
+    // the start callback answers slowly, so the run is observably in
+    // progress past the moment it is paused
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/start");
+            then.status(200).delay(std::time::Duration::from_secs(2));
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.on_start = Some(format!("{}/start", server.base_url()));
+    let db = fedifetcher::db::open(&config).await.unwrap();
+
+    let cancel = CancelToken::new();
+    let pause = Pause::new();
+    let running = {
+        let (config, db) = (config.clone(), db.clone());
+        let (cancel, pause) = (cancel.clone(), pause.clone());
+        tokio::spawn(async move { run_once(config, cancel, pause, &db).await })
+    };
+
+    // pause the run while it is waiting on the start callback
+    pause.pause();
+    // the callback finishes, and the run would finish with it — but a
+    // paused run holds at its next checkpoint instead
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(
+        !running.is_finished(),
+        "a paused run holds past the point it would finish"
+    );
+
+    pause.resume();
+    let message = running
+        .await
+        .unwrap()
+        .expect("the resumed run should succeed");
+    assert!(message.starts_with("Processing finished in "), "{message}");
+}
+
+/// A stop lands while the run is paused, and the run reports it was stopped.
+#[tokio::test]
+async fn a_stop_lands_while_the_run_is_paused() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/start");
+            then.status(200).delay(std::time::Duration::from_secs(2));
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.on_start = Some(format!("{}/start", server.base_url()));
+    let db = fedifetcher::db::open(&config).await.unwrap();
+
+    let cancel = CancelToken::new();
+    let pause = Pause::new();
+    let running = {
+        let (config, db) = (config.clone(), db.clone());
+        let (cancel, pause) = (cancel.clone(), pause.clone());
+        tokio::spawn(async move { run_once(config, cancel, pause, &db).await })
+    };
+
+    // pause the run, let it reach its checkpoint (past the callback), then
+    // stop it while it is holding
+    pause.pause();
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    cancel.cancel();
+
+    let message = running
+        .await
+        .unwrap()
+        .expect("a stopped run is not a failure");
+    assert_eq!(message, "Stopped.");
 }
