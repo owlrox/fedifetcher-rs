@@ -49,7 +49,7 @@ impl Notifier {
         };
         let mut all = vec![("rid".to_string(), self.run_id.to_string())];
         all.extend(params);
-        if let Err(ex) = self.http.get(&build_callback_url(url, &all), None, 5, 0.5).await {
+        if let Err(ex) = self.http.get(&build_callback_url(url, &all), None).await {
             error!("Error getting callback url: {ex}");
         }
     }

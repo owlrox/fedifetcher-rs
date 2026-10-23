@@ -259,7 +259,7 @@ pub async fn get_nodeinfo(
     http: &HttpClient,
 ) -> Result<ServerInfo, String> {
     let url = format!("https://{server}/.well-known/nodeinfo");
-    let resp = match http.get(&url, Some(Duration::from_secs(30)), 5, 0.5).await {
+    let resp = match http.get(&url, Some(Duration::from_secs(30))).await {
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting host node info for {server}. Exception: {ex}");
@@ -339,7 +339,7 @@ pub async fn get_nodeinfo(
     }
 
     let resp = match http
-        .get(&node_location, Some(Duration::from_secs(30)), 5, 0.5)
+        .get(&node_location, Some(Duration::from_secs(30)))
         .await
     {
         Ok(resp) => resp,
@@ -406,7 +406,7 @@ fn extract_node_location(resp: &crate::http::Response) -> Result<Option<String>,
 
 pub async fn get_server_from_host_meta(server: &str, http: &HttpClient) -> Option<String> {
     let url = format!("https://{server}/.well-known/host-meta");
-    let resp = match http.get(&url, Some(Duration::from_secs(30)), 5, 0.5).await {
+    let resp = match http.get(&url, Some(Duration::from_secs(30))).await {
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting host meta for {server}. Exception: {ex}");

@@ -162,38 +162,27 @@ impl HttpClient {
     }
 
     /// Make a get request while providing our user agent, and respecting rate
-    /// limits.
-    pub async fn get(
-        &self,
-        url: &str,
-        timeout: Option<Duration>,
-        max_tries: i64,
-        backoff: f64,
-    ) -> Result<Response> {
-        self.request(Method::GET, url, None, timeout, max_tries, backoff, true)
-            .await
+    /// limits. A 429 is retried along the configured cooldown series: one wait
+    /// per entry of `rate_limit_cooldown`, in order, until the series runs out.
+    pub async fn get(&self, url: &str, timeout: Option<Duration>) -> Result<Response> {
+        self.request(Method::GET, url, None, timeout, true).await
     }
 
     /// Make a post request while providing our user agent, and respecting
-    /// rate limits.
+    /// rate limits, on the same cooldown series as `get`.
     pub async fn post(
         &self,
         url: &str,
         json: &Value,
         timeout: Option<Duration>,
-        max_tries: i64,
-        backoff: f64,
     ) -> Result<Response> {
-        self.request(Method::POST, url, Some(json), timeout, max_tries, backoff, true)
+        self.request(Method::POST, url, Some(json), timeout, true)
             .await
     }
 
     /// Get the URL the given URL redirects to.
     pub async fn get_redirect_url(&self, url: &str) -> Option<String> {
-        let response = match self
-            .request(Method::HEAD, url, None, None, 5, 0.5, false)
-            .await
-        {
+        let response = match self.request(Method::HEAD, url, None, None, false).await {
             Ok(response) => response,
             Err(ex) => {
                 tracing::error!("Error getting redirect URL for URL {url}. Exception: {ex}");
@@ -224,8 +213,6 @@ impl HttpClient {
         url: &str,
         json: Option<&Value>,
         timeout: Option<Duration>,
-        mut max_tries: i64,
-        mut backoff: f64,
         allow_redirects: bool,
     ) -> Result<Response> {
         let mut headers = self.headers.clone().unwrap_or_default();
@@ -261,6 +248,12 @@ impl HttpClient {
             &self.no_redirect_client
         };
 
+        // the configured cooldown series: retry step i waits cooldown[i]
+        // seconds (or until the server's reset header says), and when the
+        // series is exhausted the request fails
+        let cooldown = &self.config.rate_limit_cooldown;
+        let mut step = 0usize;
+
         loop {
             let mut request = client
                 .request(method.clone(), url)
@@ -290,16 +283,15 @@ impl HttpClient {
                 });
             }
 
-            if max_tries <= 0 {
+            let Some(&backoff) = cooldown.get(step) else {
                 return Err(Error(format!(
                     "Maximum number of retries exceeded for rate limited request {url}"
                 )));
-            }
+            };
 
             let wait = retry_delay(&response_headers(&response), url, backoff);
             sleep(wait).await;
-            max_tries -= 1;
-            backoff *= 4.0;
+            step += 1;
         }
     }
 }
@@ -410,7 +402,7 @@ impl RobotsCache {
         // we can't change the User Agent
         let entry = match self
             .fetcher
-            .get(robots_url, Some(Duration::from_secs(2)), 5, 0.5)
+            .get(robots_url, Some(Duration::from_secs(2)))
             .await
         {
             Ok(response) if response.status == 401 || response.status == 403 => {

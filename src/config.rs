@@ -106,6 +106,10 @@ pub struct Config {
     pub remember_hosts_for_days: i64,
     /// The timeout for any HTTP requests to your own, or other instances
     pub http_timeout: i64,
+    /// Seconds to wait between retries when a server rate limits us (HTTP
+    /// 429): one entry per retry step, tried in order; when the list runs
+    /// out, the request fails
+    pub rate_limit_cooldown: Vec<f64>,
     /// Omit your server's name from the User-Agent sent to other servers
     /// (default: disabled)
     pub hide_server_in_user_agent: bool,
@@ -154,6 +158,7 @@ impl Default for Config {
             remember_users_for_hours: 24 * 7,
             remember_hosts_for_days: 30,
             http_timeout: 5,
+            rate_limit_cooldown: vec![0.5, 2.0, 8.0, 32.0, 128.0],
             hide_server_in_user_agent: false,
             instance_blocklist: Vec::new(),
             state_dir: default_state_dir(),
@@ -263,6 +268,15 @@ impl Config {
         put("remember_users_for_hours", Value::from(self.remember_users_for_hours));
         put("remember_hosts_for_days", Value::from(self.remember_hosts_for_days));
         put("http_timeout", Value::from(self.http_timeout));
+        put(
+            "rate_limit_cooldown",
+            Value::Array(
+                self.rate_limit_cooldown
+                    .iter()
+                    .map(|seconds| Value::from(*seconds))
+                    .collect(),
+            ),
+        );
         put(
             "hide_server_in_user_agent",
             Value::Bool(self.hide_server_in_user_agent),
@@ -406,6 +420,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "remember_users_for_hours"
             | "remember_hosts_for_days"
             | "http_timeout"
+            | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
             | "instance_blocklist"
             | "state_dir"
@@ -445,6 +460,7 @@ pub fn option_description(name: &str) -> Option<&'static str> {
         "remember_users_for_hours" => "How long to remember users that you aren't following for, before trying to backfill them again",
         "remember_hosts_for_days" => "How long to remember host info for, before checking again",
         "http_timeout" => "The timeout for any HTTP requests to your own, or other instances",
+        "rate_limit_cooldown" => "Seconds to wait between retries when a server rate limits us (HTTP 429): a comma-separated list, one entry per retry step, tried in order. When the list runs out, the request fails. Default: 0.5,2,8,32,128",
         "hide_server_in_user_agent" => "Omit your server's name from the User-Agent FediFetcher sends to other servers (default: disabled)",
         "instance_blocklist" => "A comma-separated list of instances that FediFetcher should never try to connect to",
         "state_dir" => "Directory to store persistent files and possibly the lock file. Defaults to ./artifacts if that directory exists, and to $XDG_STATE_HOME/fedifetcher (usually ~/.local/state/fedifetcher) otherwise",
@@ -492,6 +508,9 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
                 coerce_int(value).map(|v| config.remember_hosts_for_days = v)
             }
             "http_timeout" => coerce_int(value).map(|v| config.http_timeout = v),
+            "rate_limit_cooldown" => {
+                coerce_seconds(value).map(|v| config.rate_limit_cooldown = v)
+            }
             "hide_server_in_user_agent" => {
                 coerce_bool(value).map(|v| config.hide_server_in_user_agent = v)
             }
@@ -595,6 +614,50 @@ fn coerce_list(value: &Value) -> CoerceResult<Vec<String>> {
     }
 }
 
+/// A list of seconds, as a comma-separated string or an array of numbers.
+/// Every entry must be a finite, non-negative number: a negative or NaN
+/// delay would panic when the wait is built.
+fn coerce_seconds(value: &Value) -> CoerceResult<Vec<f64>> {
+    let parse = |text: &str| {
+        let seconds: f64 = text
+            .trim()
+            .parse()
+            .map_err(|_| format!("{text:?} is not a number of seconds"))?;
+        if seconds.is_finite() && seconds >= 0.0 {
+            Ok(seconds)
+        } else {
+            Err(format!("{text:?} is not a number of seconds"))
+        }
+    };
+    match value {
+        // a comma-separated string, as on the command line
+        Value::String(text) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(parse)
+            .collect(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Number(n) => n
+                    .as_f64()
+                    .ok_or_else(|| format!("{item} is not a number of seconds"))
+                    .and_then(|seconds| {
+                        if seconds.is_finite() && seconds >= 0.0 {
+                            Ok(seconds)
+                        } else {
+                            Err(format!("{item} is not a number of seconds"))
+                        }
+                    }),
+                Value::String(text) => parse(text),
+                _ => Err(format!("{item} is not a number of seconds")),
+            })
+            .collect(),
+        _ => Err(format!("{value} is not a list of seconds")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +706,7 @@ mod tests {
             "remember_users_for_hours",
             "remember_hosts_for_days",
             "http_timeout",
+            "rate_limit_cooldown",
             "hide_server_in_user_agent",
             "instance_blocklist",
             "state_dir",
@@ -787,6 +851,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.instance_blocklist, vec!["a.example", "b.example"]);
+    }
+
+    #[test]
+    fn the_rate_limit_cooldown_defaults_to_the_historical_series() {
+        let config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        // what the hardcoded 0.5s backoff growing fourfold each step waited
+        assert_eq!(
+            config.rate_limit_cooldown,
+            vec![0.5, 2.0, 8.0, 32.0, 128.0]
+        );
+    }
+
+    #[test]
+    fn the_rate_limit_cooldown_accepts_comma_strings_and_arrays() {
+        let config = build_config(
+            values(vec![
+                ("server", json!("x")),
+                ("access_tokens", json!(["t"])),
+                ("rate_limit_cooldown", json!("1, 2.5, 10")),
+            ]),
+            RawValues::new(),
+            RawValues::new(),
+        )
+        .unwrap();
+        assert_eq!(config.rate_limit_cooldown, vec![1.0, 2.5, 10.0]);
+
+        let config = build_config(
+            values(vec![
+                ("server", json!("x")),
+                ("access_tokens", json!(["t"])),
+                ("rate_limit_cooldown", json!([1, 2.5, 10])),
+            ]),
+            RawValues::new(),
+            RawValues::new(),
+        )
+        .unwrap();
+        assert_eq!(config.rate_limit_cooldown, vec![1.0, 2.5, 10.0]);
+
+        // an empty list means no retries at all
+        let config = build_config(
+            values(vec![
+                ("server", json!("x")),
+                ("access_tokens", json!(["t"])),
+                ("rate_limit_cooldown", json!("")),
+            ]),
+            RawValues::new(),
+            RawValues::new(),
+        )
+        .unwrap();
+        assert!(config.rate_limit_cooldown.is_empty());
+    }
+
+    #[test]
+    fn the_rate_limit_cooldown_rejects_impossible_delays() {
+        for bad in [json!("soon"), json!([-1, 2]), json!(["nan"]), json!(42)] {
+            let result = build_config(
+                values(vec![
+                    ("server", json!("x")),
+                    ("access_tokens", json!(["t"])),
+                    ("rate_limit_cooldown", bad.clone()),
+                ]),
+                RawValues::new(),
+                RawValues::new(),
+            );
+            assert!(result.is_err(), "{bad} should not parse");
+        }
+    }
+
+    #[test]
+    fn the_rate_limit_cooldown_round_trips_through_raw_values() {
+        let mut config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        config.rate_limit_cooldown = vec![0.25, 1.0, 60.0];
+        let raw = config.to_raw_values();
+        let rebuilt = build_config(raw, RawValues::new(), RawValues::new()).unwrap();
+        assert_eq!(rebuilt.rate_limit_cooldown, vec![0.25, 1.0, 60.0]);
     }
 
     #[test]

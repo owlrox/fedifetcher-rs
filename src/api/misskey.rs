@@ -146,7 +146,7 @@ impl MisskeyApi {
         );
         let resp = match self
             .http
-            .post(&url, &serde_json::json!({ "username": username }), None, 5, 0.5)
+            .post(&url, &serde_json::json!({ "username": username }), None)
             .await
         {
             Ok(resp) => resp,
@@ -218,7 +218,7 @@ impl MisskeyApi {
             ),
         ] {
             let url = format!("{}/api/notes/{endpoint}", self.base);
-            let resp = match self.http.post(&url, &params, None, 5, 0.5).await {
+            let resp = match self.http.post(&url, &params, None).await {
                 Ok(resp) => resp,
                 Err(ex) => {
                     error!("Error getting post {post_id} from {post_url}. Exception: {ex}");
@@ -270,7 +270,7 @@ async fn notes(
     }
 
     let url = format!("{base}/api/users/notes");
-    let resp = match http.post(&url, &params, None, 5, 0.5).await {
+    let resp = match http.post(&url, &params, None).await {
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting posts by user {username} from {webserver}. Exception: {ex}");

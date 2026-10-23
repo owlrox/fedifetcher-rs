@@ -171,7 +171,7 @@ impl MastodonApi {
     /// Look up the numeric id the API addresses an account by.
     pub async fn user_id(&self, user: &str) -> Result<String> {
         let url = format!("{}/api/v1/accounts/lookup?acct={user}", self.base);
-        let response = self.http.get(&url, None, 5, 0.5).await?;
+        let response = self.http.get(&url, None).await?;
 
         if response.status == 200 {
             return response
@@ -253,7 +253,7 @@ impl MastodonApi {
 
     pub async fn fetch_context_urls(&self, post_id: &str, post_url: &str) -> Vec<String> {
         let url = format!("{}/api/v1/statuses/{post_id}/context", self.base);
-        let resp = match self.http.get(&url, None, 5, 0.5).await {
+        let resp = match self.http.get(&url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
                 error!("Error getting context for toot {post_url}. Exception: {ex}");
@@ -297,7 +297,7 @@ async fn statuses(
         url.push_str(&format!("&max_id={max_id}"));
     }
 
-    let response = match http.get(&url, None, 5, 0.5).await {
+    let response = match http.get(&url, None).await {
         Ok(response) => response,
         Err(ex) => {
             error!("Error getting posts for user {username}: {ex}");
@@ -391,7 +391,6 @@ pub async fn get_paginated(
     url: &str,
     stop_at: &StopAt,
     timeout: Option<Duration>,
-    max_tries: i64,
     http: &HttpClient,
     required_scope: &str,
     token_hint: Option<&str>,
@@ -406,7 +405,7 @@ pub async fn get_paginated(
 
     let mut result: Vec<Value> = Vec::new();
     loop {
-        let response = http.get(&next_url, timeout, max_tries, 0.5).await?;
+        let response = http.get(&next_url, timeout).await?;
         if response.status != 200 {
             return Err(report_mastodon_error(
                 &format!("Error getting URL {next_url}"),
@@ -502,7 +501,6 @@ impl HomeServer {
             &format!("{}{path}", self.base),
             stop_at,
             None,
-            5,
             &self.http,
             required_scope,
             Some(&self.token_hint),
@@ -516,7 +514,7 @@ impl HomeServer {
         }
 
         let url = format!("{}/api/v1/accounts/verify_credentials", self.base);
-        let resp = self.http.get(&url, None, 5, 0.5).await?;
+        let resp = self.http.get(&url, None).await?;
         if resp.status != 200 {
             return Err(report_mastodon_error(
                 &format!("Error verifying credentials on server {}", self.server),
@@ -620,7 +618,7 @@ impl HomeServer {
         let since = timeutil::now_local()
             - time::Duration::seconds_f64((reply_interval_hours / 24.0 + 1.0) * 86_400.0);
         let url = format!("{}/api/v1/admin/accounts", self.base);
-        let resp = self.http.get(&url, None, 5, 0.5).await?;
+        let resp = self.http.get(&url, None).await?;
         if resp.status != 200 {
             return Err(report_mastodon_error(
                 &format!("Error getting user IDs on server {}", self.server),
@@ -662,7 +660,7 @@ impl HomeServer {
             "{}/api/v1/accounts/{user_id}/statuses?exclude_replies=false&limit=40",
             self.base
         );
-        let resp = self.http.get(&url, None, 5, 0.5).await?;
+        let resp = self.http.get(&url, None).await?;
 
         if resp.status != 200 {
             return Err(report_mastodon_error(
@@ -686,7 +684,7 @@ impl HomeServer {
             self.base
         );
 
-        let resp = match self.http.get(&search_url, None, 5, 0.5).await {
+        let resp = match self.http.get(&search_url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
                 error!("Error adding url {search_url} to server {}. Exception: {ex}", self.server);

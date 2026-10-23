@@ -165,7 +165,7 @@ impl LemmyApi {
                     let url = format!(
                         "{base}/api/v3/{path}&sort=New&limit={wanted}&page={page}"
                     );
-                    let response = match http.get(&url, None, 5, 0.5).await {
+                    let response = match http.get(&url, None).await {
                         Ok(response) => response,
                         Err(ex) => {
                             error!("Error getting {describe}: {ex}");
@@ -216,7 +216,7 @@ impl LemmyApi {
     /// Get the URLs of the context toots of the given toot.
     async fn comment_context(&self, comment_id: &str, post_url: &str) -> Vec<String> {
         let url = format!("{}/api/v3/comment?id={comment_id}", self.base);
-        let resp = match self.http.get(&url, None, 5, 0.5).await {
+        let resp = match self.http.get(&url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
                 error!("Error getting comment {comment_id} from {post_url}. Exception: {ex}");
@@ -264,7 +264,7 @@ impl LemmyApi {
     async fn post_comments(&self, post_id: &str, post_url: &str) -> Vec<String> {
         let mut urls: Vec<String> = Vec::new();
         let url = format!("{}/api/v3/post?id={post_id}", self.base);
-        let resp = match self.http.get(&url, None, 5, 0.5).await {
+        let resp = match self.http.get(&url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
                 error!("Error getting post {post_id} from {post_url}. Exception: {ex}");
@@ -305,7 +305,7 @@ impl LemmyApi {
             "{}/api/v3/comment/list?post_id={post_id}&sort=New&limit=50",
             self.base
         );
-        let resp = match self.http.get(&url, None, 5, 0.5).await {
+        let resp = match self.http.get(&url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
                 error!("Error getting comments for post {post_id} from {post_url}. Exception: {ex}");

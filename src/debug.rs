@@ -40,7 +40,7 @@ pub async fn test_connection(base: &str, token: &str, http: &HttpClient) -> Resu
 /// GET /api/v1/instance: what the server says it is. Needs no token.
 pub async fn instance_info(base: &str, http: &HttpClient) -> Result<Value> {
     let url = format!("{base}/api/v1/instance");
-    let resp = http.ignoring_robots().get(&url, None, 5, 0.5).await?;
+    let resp = http.ignoring_robots().get(&url, None).await?;
     if resp.status != 200 {
         return Err(Error(format!(
             "Error getting instance info from {base}. Status code: {}",
@@ -53,7 +53,7 @@ pub async fn instance_info(base: &str, http: &HttpClient) -> Result<Value> {
 /// GET /api/v1/accounts/verify_credentials: is the token valid?
 pub async fn verify_credentials(base: &str, token: &str, http: &HttpClient) -> Result<Value> {
     let url = format!("{base}/api/v1/accounts/verify_credentials");
-    let resp = http.authenticated(token).get(&url, None, 5, 0.5).await?;
+    let resp = http.authenticated(token).get(&url, None).await?;
     if resp.status != 200 {
         return Err(report_mastodon_error(
             &format!("Error verifying credentials on server {base}"),
@@ -69,7 +69,7 @@ pub async fn verify_credentials(base: &str, token: &str, http: &HttpClient) -> R
 pub async fn lookup_account(base: &str, acct: &str, token: &str, http: &HttpClient) -> Result<Value> {
     let acct = acct.trim().trim_start_matches('@');
     let url = format!("{base}/api/v1/accounts/lookup?acct={}", encode(acct));
-    let resp = http.authenticated(token).get(&url, None, 5, 0.5).await?;
+    let resp = http.authenticated(token).get(&url, None).await?;
     if resp.status == 200 {
         return resp.json();
     }
@@ -98,7 +98,7 @@ pub async fn account_posts(
         .and_then(Value::as_str)
         .ok_or_else(|| Error("account has no id".to_string()))?;
     let url = format!("{base}/api/v1/accounts/{id}/statuses?exclude_replies=false&limit={limit}");
-    let resp = http.authenticated(token).get(&url, None, 5, 0.5).await?;
+    let resp = http.authenticated(token).get(&url, None).await?;
     if resp.status != 200 {
         return Err(report_mastodon_error(
             &format!("Error getting posts for user {acct} on server {base}"),

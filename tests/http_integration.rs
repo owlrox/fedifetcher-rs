@@ -68,7 +68,7 @@ async fn get_sends_our_user_agent() {
     allow_all_robots(&server).await;
 
     client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .ok()
         .expect("get should succeed");
@@ -85,7 +85,7 @@ async fn a_failed_request_names_the_cause() {
 
     // port 1 on localhost refuses connections: no server and no network
     // needed to produce a transport error
-    let message = match client.get("http://127.0.0.1:1/api", None, 5, 0.5).await {
+    let message = match client.get("http://127.0.0.1:1/api", None).await {
         Ok(_) => panic!("a refused connection is an error"),
         Err(err) => err.to_string(),
     };
@@ -120,7 +120,7 @@ async fn requests_the_robots_file_forbids_are_refused() {
     let client = HttpClient::new(config, db);
 
     let err = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .err()
         .expect("a robots.txt that forbids everything must refuse the request");
@@ -151,7 +151,7 @@ async fn robots_is_not_consulted_when_disabled_in_the_config() {
     let client = HttpClient::new(config, db);
 
     let resp = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .ok()
         .expect("with robots.txt support off, the request should go ahead");
@@ -181,7 +181,7 @@ async fn a_client_ignoring_robots_is_not_checked() {
     let client = HttpClient::new(config, db).ignoring_robots();
 
     let resp = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .ok()
         .expect("a client ignoring robots.txt should not be checked");
@@ -207,7 +207,7 @@ async fn blocklisted_hosts_are_never_contacted() {
     let client = HttpClient::new(config, db);
 
     let err = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .err()
         .expect("a blocklisted host must be refused");
@@ -238,7 +238,7 @@ async fn a_host_blocked_by_robots_txt_is_logged_as_such() {
     let logs = common::LogCapture::new();
     let guard = logs.install();
     let err = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .err()
         .expect("a robots.txt that forbids everything must refuse the request");
@@ -279,7 +279,7 @@ async fn a_blocklisted_host_is_logged_as_such() {
     let logs = common::LogCapture::new();
     let guard = logs.install();
     let err = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .err()
         .expect("a blocklisted host must be refused");
@@ -330,7 +330,7 @@ async fn rate_limited_requests_are_retried_after_the_reset() {
     let client = HttpClient::new(config, db);
 
     let resp = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .ok()
         .expect("the retry after the reset should succeed");
@@ -361,12 +361,14 @@ async fn rate_limited_requests_back_off_without_a_reset_header() {
             then.status(200).body("{}");
         })
         .await;
-    let config = common::test_config(&dir, "example.social");
+    let mut config = common::test_config(&dir, "example.social");
+    // two steps, so the third try succeeds: the series is walked in order
+    config.rate_limit_cooldown = vec![0.01, 0.04];
     let db = common::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let resp = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.01)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .ok()
         .expect("the third try should succeed");
@@ -385,12 +387,14 @@ async fn rate_limiting_gives_up_eventually() {
             then.status(429);
         })
         .await;
-    let config = common::test_config(&dir, "example.social");
+    let mut config = common::test_config(&dir, "example.social");
+    // two steps: the initial request, plus one per step, then it gives up
+    config.rate_limit_cooldown = vec![0.01, 0.01];
     let db = common::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let err = client
-        .get(&format!("{}/api", server.base_url()), None, 2, 0.01)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .err()
         .expect("a request that never stops being rate limited must fail");
@@ -418,8 +422,8 @@ async fn robots_is_read_from_the_network_once_then_remembered() {
     let client = HttpClient::new(config, db);
     let url = format!("{}/api", server.base_url());
 
-    client.get(&url, None, 5, 0.5).await.ok().expect("first get");
-    client.get(&url, None, 5, 0.5).await.ok().expect("second get");
+    client.get(&url, None).await.ok().expect("first get");
+    client.get(&url, None).await.ok().expect("second get");
 
     assert_eq!(robots.hits(), 1, "robots.txt should be fetched only once");
     assert_eq!(api.hits(), 2);
@@ -442,11 +446,11 @@ async fn robots_is_cached_in_the_database_between_clients() {
     let db = common::test_db(&config).await;
 
     let first = HttpClient::new(config.clone(), db.clone());
-    first.get(&url, None, 5, 0.5).await.ok().expect("first client");
+    first.get(&url, None).await.ok().expect("first client");
     assert_eq!(robots.hits(), 1);
 
     let second = HttpClient::new(config, db.clone());
-    second.get(&url, None, 5, 0.5).await.ok().expect("second client");
+    second.get(&url, None).await.ok().expect("second client");
     assert_eq!(
         robots.hits(),
         1,
@@ -482,7 +486,7 @@ async fn a_refused_robots_file_denies_everything() {
     let client = HttpClient::new(config, db);
 
     let err = client
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .err()
         .expect("a refused robots.txt must deny everything");
@@ -696,7 +700,7 @@ async fn authenticated_clients_send_their_token_and_skip_robots() {
 
     let resp = client
         .authenticated("secret")
-        .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/api", server.base_url()), None)
         .await
         .ok()
         .expect("an authenticated client does not get checked against robots.txt");
@@ -739,12 +743,12 @@ async fn the_original_client_is_unaffected_by_deriving_one() {
 
     client
         .authenticated("secret")
-        .get(&format!("{}/authed", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/authed", server.base_url()), None)
         .await
         .ok()
         .expect("authenticated get");
     client
-        .get(&format!("{}/plain", server.base_url()), None, 5, 0.5)
+        .get(&format!("{}/plain", server.base_url()), None)
         .await
         .ok()
         .expect("plain get");
@@ -777,8 +781,6 @@ async fn post_sends_the_body_as_json_and_the_client_headers() {
             &format!("{}/api", server.base_url()),
             &serde_json::json!({"key": "value"}),
             None,
-            5,
-            0.5,
         )
         .await
         .ok()

@@ -143,6 +143,10 @@ struct ConfigArgs {
     #[arg(long = "http-timeout")]
     http_timeout: Option<String>,
 
+    /// A comma-separated list of seconds to wait between retries when a server rate limits us (HTTP 429): one entry per retry step, tried in order. When the list runs out, the request fails. Default: 0.5,2,8,32,128
+    #[arg(long = "rate-limit-cooldown")]
+    rate_limit_cooldown: Option<String>,
+
     /// A comma-separated array of instances that FediFetcher should never try to connect to
     #[arg(long = "instance-blocklist")]
     instance_blocklist: Option<String>,
@@ -317,6 +321,7 @@ fn args_to_raw(args: &ConfigArgs) -> RawValues {
     put("remember_users_for_hours", &args.remember_users_for_hours);
     put("remember_hosts_for_days", &args.remember_hosts_for_days);
     put("http_timeout", &args.http_timeout);
+    put("rate_limit_cooldown", &args.rate_limit_cooldown);
     put("instance_blocklist", &args.instance_blocklist);
     put("state_dir", &args.state_dir);
     put("lock_file", &args.lock_file);

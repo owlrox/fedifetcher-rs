@@ -151,7 +151,7 @@ impl PeerTubeApi {
                     let url = format!(
                         "{base}/api/v1/{collection}/{username}/videos?start={start}&count={wanted}"
                     );
-                    let response = match http.get(&url, None, 5, 0.5).await {
+                    let response = match http.get(&url, None).await {
                         Ok(response) => response,
                         Err(ex) => {
                             error!(
@@ -186,7 +186,7 @@ impl PeerTubeApi {
             "{}/api/v1/videos/{post_id}/comment-threads",
             self.base
         );
-        let resp = match self.http.get(&url, None, 5, 0.5).await {
+        let resp = match self.http.get(&url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
                 error!("Error getting comments on video {post_id} from {post_url}. Exception: {ex}");
