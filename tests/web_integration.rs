@@ -577,8 +577,18 @@ async fn the_logs_page_filters_lines_by_level() {
         "every pill is on when no level is filtered out"
     );
     assert!(
-        body.contains("<a href=\"/logs?sort=ts&amp;dir=desc\" title=\"Every level is shown\" class=\"badge all\">All</a>"),
-        "the All pill is on: {body}"
+        body.contains("<a href=\"/logs?levels=&amp;sort=ts&amp;dir=desc\" title=\"Hide every level\" class=\"badge all\">All</a>"),
+        "the All pill is on and hides every level: {body}"
+    );
+    // clicking it unchecks every level: the page it links to shows nothing
+    let (_, body) = get(&format!("{base}/logs?levels=&sort=ts&dir=desc")).await;
+    assert!(
+        !body.contains("an info line"),
+        "the All pill's view has no level selected"
+    );
+    assert!(
+        body.contains("No log entries at the selected levels."),
+        "the All pill's view says why it is empty"
     );
 
     // only WARNING and ERROR
@@ -602,7 +612,7 @@ async fn the_logs_page_filters_lines_by_level() {
         body.contains("<a href=\"/logs?levels=INFO,WARNING,ERROR&amp;sort=ts&amp;dir=desc\" title=\"Show INFO lines\" class=\"badge off info\">INFO</a>"),
         "the INFO pill is off and shows INFO: {body}"
     );
-    // the All pill resets the filter, keeping the sort
+    // the All pill checks every level back on, keeping the sort
     assert!(
         body.contains("<a href=\"/logs?sort=ts&amp;dir=desc\" title=\"Show every level\" class=\"badge off all\">All</a>"),
         "the All pill is off and shows every level: {body}"
@@ -667,6 +677,11 @@ async fn the_logs_page_with_no_level_selected_shows_no_lines() {
             "the {level} pill is off and shows {level}"
         );
     }
+    // the All pill checks every level back on
+    assert!(
+        body.contains("<a href=\"/logs?sort=ts&amp;dir=desc\" title=\"Show every level\" class=\"badge off all\">All</a>"),
+        "the All pill is off and shows every level again"
+    );
 }
 
 #[tokio::test]

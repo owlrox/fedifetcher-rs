@@ -1978,7 +1978,7 @@ fn LogsPage(
             <section>
                 <h2>"Recent log"</h2>
                 <p class="muted">
-                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction. Click a level to show only that level's lines." {live_note}
+                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction. Click a level pill to hide or show that level's lines; All shows every level, or none." {live_note}
                 </p>
                 <p class="levels">
                     <span class="label">"Levels:"</span>
@@ -2026,8 +2026,9 @@ fn LogsPage(
     }
 }
 
-/// The filter row's "All" pill: back to every level, keeping the sort.
-/// Solid while every level is shown, an outline while a level is hidden.
+/// The filter row's "All" pill: a toggle between every level and none,
+/// keeping the sort. Solid while every level is shown, an outline
+/// otherwise — clicking it flips between the two, like a level pill.
 fn all_levels_pill(levels: Option<&[String]>, sort: LogSort, order: LogOrder) -> AnyView {
     let shown = levels.is_none_or(|set| set.len() == LOG_LEVELS.len());
     let class = if shown {
@@ -2036,11 +2037,16 @@ fn all_levels_pill(levels: Option<&[String]>, sort: LogSort, order: LogOrder) ->
         "badge off all".to_string()
     };
     let title = if shown {
-        "Every level is shown".to_string()
+        "Hide every level".to_string()
     } else {
         "Show every level".to_string()
     };
-    view! { <a class={class} href={logs_url(None, sort, order)} title={title}>"All"</a> }.into_any()
+    let href = if shown {
+        logs_url(Some(&[]), sort, order)
+    } else {
+        logs_url(None, sort, order)
+    };
+    view! { <a class={class} href={href} title={title}>"All"</a> }.into_any()
 }
 
 /// One level's filter pill: a link that flips the level in the query
