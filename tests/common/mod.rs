@@ -6,7 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
+use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::config::Config;
+use fedifetcher::http::HttpClient;
+use fedifetcher::run::{CancelToken, Context};
+use fedifetcher::store::State;
 
 /// A fresh temporary directory, unique to this test.
 pub fn tmp_dir() -> PathBuf {
@@ -33,6 +37,25 @@ pub fn test_config(dir: &Path, server: &str) -> Config {
 /// Open the database in the config's state directory, creating the schema.
 pub async fn test_db(config: &Config) -> sqlx::SqlitePool {
     fedifetcher::db::open(config).await.unwrap()
+}
+
+/// A run context over the given pieces, for tests that call the fetch
+/// functions directly.
+pub fn run_context<'a>(
+    config: &'a Config,
+    state: &'a mut State,
+    http: &'a HttpClient,
+    home: &'a HomeServer,
+    db: &'a sqlx::SqlitePool,
+) -> Context<'a> {
+    Context {
+        config,
+        state,
+        http,
+        home,
+        cancel: CancelToken::new(),
+        db,
+    }
 }
 
 /// Captures tracing output, for tests that assert on what gets logged.

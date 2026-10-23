@@ -10,7 +10,7 @@ use crate::api::{client_for, find_post};
 use crate::db::{self, is_private_post, mark_private_post, TriggerPost};
 use crate::http::HttpClient;
 use crate::posts::Post;
-use crate::run::CancelToken;
+use crate::run::{CancelToken, Context};
 use crate::servers::server_info;
 use crate::store::{RepliedToot, State};
 use crate::timeutil;
@@ -69,14 +69,9 @@ pub async fn context_fetchable(toot: &Post, db: &SqlitePool) -> bool {
 /// The toots given are recorded as trigger posts under `source`, so the data
 /// page can show what a run scanned — and fetch one post's context again on
 /// demand. `force` skips the recency check, for a manual fetch.
-#[allow(clippy::too_many_arguments)]
 pub async fn known_context_urls(
-    server: &str,
+    ctx: &mut Context<'_>,
     reply_toots: &[Post],
-    http: &HttpClient,
-    cancel: &CancelToken,
-    state: &mut State,
-    db: &SqlitePool,
     source: &str,
     force: bool,
 ) -> Vec<String> {
@@ -92,36 +87,48 @@ pub async fn known_context_urls(
     let mut triggers: Vec<TriggerPost> = Vec::with_capacity(reply_toots.len());
 
     for toot in reply_toots {
-        if cancel.is_cancelled() {
+        if ctx.cancel.is_cancelled() {
             break;
         }
         triggers.push(TriggerPost::from_post(toot, source));
         // a private toot is skipped before its URL is even resolved: its
         // context can never be fetched, and remembering it saves later runs
         // the ask
-        if !context_fetchable(toot, db).await {
+        if !context_fetchable(toot, ctx.db).await {
             scan.private += 1;
             continue;
         }
         // a boost is only ever a pointer: the replies are on the original
         let url = toot.original().url.clone();
-        let Some(parsed_url) =
-            find_post(&url, &mut state.parsed_urls, &mut state.seen_hosts, http).await
+        let Some(parsed_url) = find_post(
+            &url,
+            &mut ctx.state.parsed_urls,
+            &mut ctx.state.seen_hosts,
+            ctx.http,
+        )
+        .await
         else {
             scan.unresolved += 1;
             continue;
         };
         if force
-            || state
+            || ctx
+                .state
                 .recently_checked_context
                 .should_fetch(&toot.uri, toot.created_at)
         {
-            state
+            ctx.state
                 .recently_checked_context
                 .mark_fetched(&toot.uri, toot.created_at);
             scan.fetched += 1;
-            let context =
-                toot_context_urls(&parsed_url.server, &parsed_url.post_id, &url, http, state).await;
+            let context = toot_context_urls(
+                &parsed_url.server,
+                &parsed_url.post_id,
+                &url,
+                ctx.http,
+                ctx.state,
+            )
+            .await;
             for item in context {
                 known_context_urls.insert(item);
             }
@@ -132,12 +139,12 @@ pub async fn known_context_urls(
 
     // remember the posts this scan encountered, so the data page can list
     // them and fetch one again on demand
-    match db::record_trigger_posts(db, &triggers, db::TRIGGER_POSTS_KEPT).await {
+    match db::record_trigger_posts(ctx.db, &triggers, db::TRIGGER_POSTS_KEPT).await {
         Ok(fresh) => debug!("Recorded {} trigger posts ({fresh} new)", triggers.len()),
         Err(ex) => warn!("Could not record the trigger posts in the database: {ex}"),
     }
 
-    let prefix = format!("https://{server}/");
+    let prefix = format!("https://{}/", ctx.config.server);
     let found: Vec<String> = known_context_urls
         .into_iter()
         .filter(|url| {
@@ -151,7 +158,7 @@ pub async fn known_context_urls(
         .collect();
 
     // record what the run found, and keep only what needs handling
-    let (to_handle, known) = match db::record_known_context_posts(db, &found).await {
+    let (to_handle, known) = match db::record_known_context_posts(ctx.db, &found).await {
         Ok(previous) => {
             let (to_handle, new, already_known) =
                 partition_known_context(&found, previous, timeutil::now());

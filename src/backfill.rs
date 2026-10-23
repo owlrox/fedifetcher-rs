@@ -3,14 +3,13 @@
 use sqlx::SqlitePool;
 use tracing::{debug, error, info, warn};
 
-use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
 use crate::config::Config;
 use crate::context::{add_context_urls, context_fetchable, known_context_urls};
 use crate::db::mark_opted_out_account;
 use crate::http::HttpClient;
 use crate::posts::Post;
-use crate::run::CancelToken;
+use crate::run::Context;
 use crate::servers::server_info;
 use crate::state::TimestampedSet;
 use crate::store::State;
@@ -126,45 +125,28 @@ pub async fn user_posts(
         .await
 }
 
-pub async fn add_post_with_context(
-    post: &Post,
-    home: &HomeServer,
-    http: &HttpClient,
-    config: &Config,
-    cancel: &CancelToken,
-    state: &mut State,
-    db: &SqlitePool,
-) -> bool {
-    if home.resolve(&post.url).await {
-        state.seen_urls.add(&post.url, None);
-        if post.may_have_context() && config.backfill_with_context {
+pub async fn add_post_with_context(ctx: &mut Context<'_>, post: &Post) -> bool {
+    if ctx.home.resolve(&post.url).await {
+        ctx.state.seen_urls.add(&post.url, None);
+        if post.may_have_context() && ctx.config.backfill_with_context {
             // a private post is skipped before its URL is even resolved
-            if !context_fetchable(post, db).await {
+            if !context_fetchable(post, ctx.db).await {
                 return true;
             }
             if find_post(
                 &post.url,
-                &mut state.parsed_urls,
-                &mut state.seen_hosts,
-                http,
+                &mut ctx.state.parsed_urls,
+                &mut ctx.state.seen_hosts,
+                ctx.http,
             )
             .await
             .is_none()
             {
                 return true;
             }
-            let known_context_urls = known_context_urls(
-                &home.server,
-                std::slice::from_ref(post),
-                http,
-                cancel,
-                state,
-                db,
-                "backfill",
-                false,
-            )
-            .await;
-            add_context_urls(home, known_context_urls, cancel, state).await;
+            let known_context_urls =
+                known_context_urls(ctx, std::slice::from_ref(post), "backfill", false).await;
+            add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;
         }
         return true;
     }
@@ -174,41 +156,42 @@ pub async fn add_post_with_context(
 
 /// Add the posts of the given accounts. `force` fetches an account even
 /// when it is already known — a run passes false, a manual fetch true.
-#[allow(clippy::too_many_arguments)]
 pub async fn add_user_posts(
-    home: &HomeServer,
+    ctx: &mut Context<'_>,
     followings: Vec<User>,
     target: UserSet,
-    http: &HttpClient,
-    config: &Config,
-    cancel: &CancelToken,
-    state: &mut State,
-    db: &SqlitePool,
     force: bool,
 ) {
-    let home_server = home.server.clone();
+    let home_server = ctx.home.server.clone();
     for user in followings {
-        if cancel.is_cancelled() {
+        if ctx.cancel.is_cancelled() {
             break;
         }
-        if (!state.all_known_users.contains(&user.acct) || force)
+        if (!ctx.state.all_known_users.contains(&user.acct) || force)
             && !user.url.starts_with(&format!("https://{home_server}/"))
         {
-            let posts = user_posts(&user, target, &home_server, http, config, state, db).await;
+            let posts = user_posts(
+                &user,
+                target,
+                &home_server,
+                ctx.http,
+                ctx.config,
+                ctx.state,
+                ctx.db,
+            )
+            .await;
 
             if let Some(posts) = posts {
                 let mut count = 0;
                 let mut failed = 0;
                 for post in posts {
-                    if cancel.is_cancelled() {
+                    if ctx.cancel.is_cancelled() {
                         break;
                     }
-                    if !post.is_boost() && !state.seen_urls.contains(&post.url) {
-                        let added =
-                            add_post_with_context(&post, home, http, config, cancel, state, db)
-                                .await;
+                    if !post.is_boost() && !ctx.state.seen_urls.contains(&post.url) {
+                        let added = add_post_with_context(ctx, &post).await;
                         if added {
-                            state.seen_urls.add(&post.url, None);
+                            ctx.state.seen_urls.add(&post.url, None);
                             count += 1;
                         } else {
                             failed += 1;
@@ -220,8 +203,8 @@ pub async fn add_user_posts(
                     user.acct
                 );
                 if failed == 0 {
-                    target.get(state).add(&user.acct, None);
-                    state.all_known_users.add(&user.acct, None);
+                    target.get(ctx.state).add(&user.acct, None);
+                    ctx.state.all_known_users.add(&user.acct, None);
                 }
             }
         }

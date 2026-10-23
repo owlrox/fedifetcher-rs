@@ -3,13 +3,12 @@
 
 mod common;
 
-use sqlx::SqlitePool;
-
+use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::context::known_context_urls;
 use fedifetcher::db;
 use fedifetcher::http::HttpClient;
 use fedifetcher::posts::Post;
-use fedifetcher::run::CancelToken;
+use fedifetcher::run::Context;
 use fedifetcher::store::State;
 use fedifetcher::timeutil;
 
@@ -32,23 +31,8 @@ fn post(id: &str, is_public: bool) -> Post {
     }
 }
 
-async fn context_urls(
-    toot: &Post,
-    http: &HttpClient,
-    state: &mut State,
-    db: &SqlitePool,
-) -> Vec<String> {
-    known_context_urls(
-        "home.example",
-        std::slice::from_ref(toot),
-        http,
-        &CancelToken::new(),
-        state,
-        db,
-        "test",
-        false,
-    )
-    .await
+async fn context_urls(ctx: &mut Context<'_>, toot: &Post) -> Vec<String> {
+    known_context_urls(ctx, std::slice::from_ref(toot), "test", false).await
 }
 
 /// find_post records every URL it resolves in parsed_urls, even when the
@@ -58,11 +42,13 @@ async fn a_private_post_is_recorded_and_never_touched() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "home.example");
     let db = db::open(&config).await.unwrap();
-    let http = HttpClient::new(config, db.clone());
+    let http = HttpClient::new(config.clone(), db.clone());
+    let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
+    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
 
     let toot = post("10", false);
-    let urls = context_urls(&toot, &http, &mut state, &db).await;
+    let urls = context_urls(&mut ctx, &toot).await;
 
     assert!(urls.is_empty(), "a private post has no context to find");
     assert!(
@@ -86,13 +72,15 @@ async fn a_post_marked_private_is_skipped_on_later_runs() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "home.example");
     let db = db::open(&config).await.unwrap();
-    let http = HttpClient::new(config, db.clone());
+    let http = HttpClient::new(config.clone(), db.clone());
+    let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
+    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
 
     let toot = post("10", true);
     db::mark_private_post(&db, &toot.uri).await.unwrap();
 
-    let urls = context_urls(&toot, &http, &mut state, &db).await;
+    let urls = context_urls(&mut ctx, &toot).await;
 
     assert!(
         urls.is_empty(),
@@ -115,11 +103,13 @@ async fn a_public_post_is_still_resolved() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "home.example");
     let db = db::open(&config).await.unwrap();
-    let http = HttpClient::new(config, db.clone());
+    let http = HttpClient::new(config.clone(), db.clone());
+    let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
+    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
 
     let toot = post("10", true);
-    let _ = context_urls(&toot, &http, &mut state, &db).await;
+    let _ = context_urls(&mut ctx, &toot).await;
 
     assert!(
         state.parsed_urls.contains_key(&toot.url),
@@ -139,20 +129,18 @@ async fn the_summary_line_says_why_nothing_was_found() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "home.example");
     let db = db::open(&config).await.unwrap();
-    let http = HttpClient::new(config, db.clone());
+    let http = HttpClient::new(config.clone(), db.clone());
+    let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
+    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
 
     let private_toot = post("10", false);
-    assert!(context_urls(&private_toot, &http, &mut state, &db)
-        .await
-        .is_empty());
+    assert!(context_urls(&mut ctx, &private_toot).await.is_empty());
     let public_toot = post("11", true);
-    assert!(context_urls(&public_toot, &http, &mut state, &db)
-        .await
-        .is_empty());
+    assert!(context_urls(&mut ctx, &public_toot).await.is_empty());
 
     drop(guard);
     let log = logs.text();

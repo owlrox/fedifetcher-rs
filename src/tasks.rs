@@ -1,7 +1,6 @@
 //! The things a run does: pulling context for posts, and backfilling
 //! accounts, each only when its setting asks for it.
 
-use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info};
 
@@ -10,23 +9,11 @@ use crate::backfill::{add_user_posts, filter_known_users, UserSet};
 use crate::config::Config;
 use crate::context::{add_context_urls, context_urls, known_context_urls, replied_toot_server_ids};
 use crate::error::Result;
-use crate::http::HttpClient;
 use crate::posts::Post;
-use crate::run::CancelToken;
+use crate::run::{CancelToken, Context};
 use crate::store::State;
 use crate::timeutil;
 use crate::users::User;
-
-/// Everything a task needs: the settings, what we remember, who to ask, and
-/// how to stop.
-pub struct Context<'a> {
-    pub config: &'a Config,
-    pub state: &'a mut State,
-    pub http: &'a HttpClient,
-    pub home: &'a HomeServer,
-    pub cancel: CancelToken,
-    pub db: &'a SqlitePool,
-}
 
 /// Get all replies to other users by the given users in the last day.
 pub async fn reply_toots(
@@ -83,32 +70,12 @@ async fn reply_toots_for_user(
     toots
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn fetch_timeline_context(
-    timeline_posts: Vec<Post>,
-    home: &HomeServer,
-    http: &HttpClient,
-    config: &Config,
-    cancel: &CancelToken,
-    state: &mut State,
-    db: &SqlitePool,
-    source: &str,
-) {
-    let known_context_urls = known_context_urls(
-        &config.server,
-        &timeline_posts,
-        http,
-        cancel,
-        state,
-        db,
-        source,
-        false,
-    )
-    .await;
-    add_context_urls(home, known_context_urls, cancel, state).await;
+async fn fetch_timeline_context(ctx: &mut Context<'_>, timeline_posts: Vec<Post>, source: &str) {
+    let known_context_urls = known_context_urls(ctx, &timeline_posts, source, false).await;
+    add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;
 
     // Backfill any post authors, and any mentioned users
-    if config.backfill_mentioned_users {
+    if ctx.config.backfill_mentioned_users {
         let mut mentioned_users: Vec<User> = Vec::new();
         let cut_off = timeutil::now_local() - Duration::minutes(60);
         for toot in &timeline_posts {
@@ -122,25 +89,16 @@ async fn fetch_timeline_context(
                 }
             }
             for user in these_users {
-                if !mentioned_users.contains(&user) && !state.all_known_users.contains(&user.acct) {
+                if !mentioned_users.contains(&user)
+                    && !ctx.state.all_known_users.contains(&user.acct)
+                {
                     mentioned_users.push(user);
                 }
             }
         }
 
-        let new_users = filter_known_users(mentioned_users, &state.all_known_users);
-        add_user_posts(
-            home,
-            new_users,
-            UserSet::RecentlyCheckedUsers,
-            http,
-            config,
-            cancel,
-            state,
-            db,
-            false,
-        )
-        .await;
+        let new_users = filter_known_users(mentioned_users, &ctx.state.all_known_users);
+        add_user_posts(ctx, new_users, UserSet::RecentlyCheckedUsers, false).await;
     }
 }
 
@@ -170,17 +128,7 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 timeline_toots.len(),
                 user_list.title
             );
-            fetch_timeline_context(
-                timeline_toots,
-                ctx.home,
-                ctx.http,
-                ctx.config,
-                &ctx.cancel,
-                ctx.state,
-                ctx.db,
-                "lists",
-            )
-            .await;
+            fetch_timeline_context(ctx, timeline_toots, "lists").await;
         }
 
         if ctx.config.max_list_accounts > 0 {
@@ -193,18 +141,7 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 accounts.len(),
                 user_list.title
             );
-            add_user_posts(
-                ctx.home,
-                accounts,
-                UserSet::RecentlyCheckedUsers,
-                ctx.http,
-                ctx.config,
-                &ctx.cancel,
-                ctx.state,
-                ctx.db,
-                false,
-            )
-            .await;
+            add_user_posts(ctx, accounts, UserSet::RecentlyCheckedUsers, false).await;
         }
     }
     Ok(())
@@ -224,17 +161,7 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
         ctx.state,
     )
     .await;
-    let known_context_urls = known_context_urls(
-        &ctx.config.server,
-        &reply_toots,
-        ctx.http,
-        &ctx.cancel,
-        ctx.state,
-        ctx.db,
-        "replies",
-        false,
-    )
-    .await;
+    let known_context_urls = known_context_urls(ctx, &reply_toots, "replies", false).await;
     ctx.state.seen_urls.update(known_context_urls);
     let replied_toot_ids = replied_toot_server_ids(
         &ctx.config.server,
@@ -260,17 +187,7 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
 async fn fetch_home_timeline(ctx: &mut Context<'_>) -> Result<()> {
     info!("Getting context for home timeline");
     let timeline_toots = ctx.home.timeline(ctx.config.home_timeline_length).await?;
-    fetch_timeline_context(
-        timeline_toots,
-        ctx.home,
-        ctx.http,
-        ctx.config,
-        &ctx.cancel,
-        ctx.state,
-        ctx.db,
-        "home timeline",
-    )
-    .await;
+    fetch_timeline_context(ctx, timeline_toots, "home timeline").await;
     Ok(())
 }
 
@@ -289,18 +206,7 @@ async fn backfill_followings(ctx: &mut Context<'_>) -> Result<()> {
     let new_followings = filter_known_users(followings, &ctx.state.all_known_users);
     let new = new_followings.len();
     info!("Got {total} followings, {new} of which are new");
-    add_user_posts(
-        ctx.home,
-        new_followings,
-        UserSet::KnownFollowings,
-        ctx.http,
-        ctx.config,
-        &ctx.cancel,
-        ctx.state,
-        ctx.db,
-        false,
-    )
-    .await;
+    add_user_posts(ctx, new_followings, UserSet::KnownFollowings, false).await;
     Ok(())
 }
 
@@ -319,18 +225,7 @@ async fn backfill_followers(ctx: &mut Context<'_>) -> Result<()> {
     let new_followers = filter_known_users(followers, &ctx.state.all_known_users);
     let new = new_followers.len();
     info!("Got {total} followers, {new} of which are new");
-    add_user_posts(
-        ctx.home,
-        new_followers,
-        UserSet::RecentlyCheckedUsers,
-        ctx.http,
-        ctx.config,
-        &ctx.cancel,
-        ctx.state,
-        ctx.db,
-        false,
-    )
-    .await;
+    add_user_posts(ctx, new_followers, UserSet::RecentlyCheckedUsers, false).await;
     Ok(())
 }
 
@@ -348,18 +243,7 @@ async fn backfill_follow_requests(ctx: &mut Context<'_>) -> Result<()> {
     let new_requests = filter_known_users(follow_requests, &ctx.state.all_known_users);
     let new = new_requests.len();
     info!("Got {total} follow_requests, {new} of which are new");
-    add_user_posts(
-        ctx.home,
-        new_requests,
-        UserSet::RecentlyCheckedUsers,
-        ctx.http,
-        ctx.config,
-        &ctx.cancel,
-        ctx.state,
-        ctx.db,
-        false,
-    )
-    .await;
+    add_user_posts(ctx, new_requests, UserSet::RecentlyCheckedUsers, false).await;
     Ok(())
 }
 
@@ -375,18 +259,7 @@ async fn backfill_from_notifications(ctx: &mut Context<'_>) -> Result<()> {
     let new_accounts = filter_known_users(accounts, &ctx.state.all_known_users);
     let new = new_accounts.len();
     info!("Found {total} users in notifications, {new} of which are new");
-    add_user_posts(
-        ctx.home,
-        new_accounts,
-        UserSet::RecentlyCheckedUsers,
-        ctx.http,
-        ctx.config,
-        &ctx.cancel,
-        ctx.state,
-        ctx.db,
-        false,
-    )
-    .await;
+    add_user_posts(ctx, new_accounts, UserSet::RecentlyCheckedUsers, false).await;
     Ok(())
 }
 
@@ -413,17 +286,7 @@ async fn fetch_favourite_context(ctx: &mut Context<'_>) -> Result<()> {
 }
 
 async fn pull_context_for(ctx: &mut Context<'_>, posts: Vec<Post>, source: &str) {
-    let known_context_urls = known_context_urls(
-        &ctx.config.server,
-        &posts,
-        ctx.http,
-        &ctx.cancel,
-        ctx.state,
-        ctx.db,
-        source,
-        false,
-    )
-    .await;
+    let known_context_urls = known_context_urls(ctx, &posts, source, false).await;
     add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;
 }
 

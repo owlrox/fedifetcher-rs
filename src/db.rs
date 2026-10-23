@@ -1598,8 +1598,21 @@ mod tests {
         assert_eq!(record.in_reply_to_id, None);
     }
 
+    /// A trigger_posts row as the test reads it: the scan's columns, in the
+    /// order the SELECT lists them.
+    type TriggerRow = (
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        bool,
+        bool,
+        Option<String>,
+    );
+
     #[tokio::test]
-    #[allow(clippy::type_complexity)]
     async fn trigger_posts_are_recorded_once_and_refreshed() {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
@@ -1647,17 +1660,7 @@ mod tests {
             0,
             "a sighting of a known post is not new"
         );
-        let row: (
-            String,
-            String,
-            String,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            bool,
-            bool,
-            Option<String>,
-        ) = sqlx::query_as(
+        let row: TriggerRow = sqlx::query_as(
             "SELECT first_seen, last_seen, source, replies_count, in_reply_to_id, author_url, is_public, is_boost, mentions FROM trigger_posts WHERE uri = ?",
         )
         .bind("https://remote.example/@a/1")

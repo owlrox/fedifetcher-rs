@@ -26,7 +26,7 @@ use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
-use crate::run::{run_once, CancelToken};
+use crate::run::{run_once, CancelToken, Context};
 use crate::store::{lock, State, StateStore};
 use crate::timeutil;
 use crate::VERSION;
@@ -779,39 +779,25 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str) {
             return;
         }
     };
-    let cancel = CancelToken::new();
+    let mut ctx = Context {
+        config: &config,
+        state: session.state(),
+        http: &http,
+        home: &home,
+        cancel: CancelToken::new(),
+        db: &state.db,
+    };
     match kind {
-        "post" => {
-            fetch::force_post_context(
-                &config,
-                &home,
-                &http,
-                session.state(),
-                &state.db,
-                &cancel,
-                key,
-            )
-            .await
-        }
+        "post" => fetch::force_post_context(&mut ctx, key).await,
         "user" => {
             let target = match set {
                 "followings" => UserSet::KnownFollowings,
                 _ => UserSet::RecentlyCheckedUsers,
             };
-            fetch::force_user_posts(
-                &config,
-                &home,
-                &http,
-                session.state(),
-                &state.db,
-                &cancel,
-                key,
-                target,
-            )
-            .await
+            fetch::force_user_posts(&mut ctx, key, target).await;
         }
-        "host" => fetch::force_host_info(key, &http, session.state()).await,
-        "url" => fetch::force_resolve_url(&home, session.state(), key).await,
+        "host" => fetch::force_host_info(key, &http, ctx.state).await,
+        "url" => fetch::force_resolve_url(&home, ctx.state, key).await,
         _ => {}
     }
     if let Err(ex) = session.finish().await {

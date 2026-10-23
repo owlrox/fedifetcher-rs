@@ -12,8 +12,8 @@ use crate::api::mastodon::HomeServer;
 use crate::config::Config;
 use crate::error::Result;
 use crate::http::{build_callback_url, HttpClient};
-use crate::store::{lock, Session, StateStore, ROBOTS_MAX_AGE};
-use crate::tasks::{run_enabled_tasks, Context};
+use crate::store::{lock, Session, State, StateStore, ROBOTS_MAX_AGE};
+use crate::tasks::run_enabled_tasks;
 use crate::timeutil;
 use crate::VERSION;
 
@@ -109,6 +109,17 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
+}
+
+/// Everything a run or a manual fetch needs: the settings, what we
+/// remember, who to ask, and how to stop.
+pub struct Context<'a> {
+    pub config: &'a Config,
+    pub state: &'a mut State,
+    pub http: &'a HttpClient,
+    pub home: &'a HomeServer,
+    pub cancel: CancelToken,
+    pub db: &'a SqlitePool,
 }
 
 /// Do one run, and report the message it finished with.

@@ -3,17 +3,15 @@
 //! resolve. Each runs in the background, logs what it did, and updates the
 //! same database tables a run would.
 
-use sqlx::SqlitePool;
 use tracing::{error, info, warn};
 
 use crate::api::mastodon::HomeServer;
 use crate::backfill::{add_user_posts, UserSet};
-use crate::config::Config;
 use crate::context::{add_context_urls, known_context_urls};
 use crate::db;
 use crate::http::HttpClient;
 use crate::posts::Post;
-use crate::run::CancelToken;
+use crate::run::Context;
 use crate::servers::{server_info, ApiFlavour, ServerInfo};
 use crate::store::State;
 use crate::timeutil;
@@ -22,19 +20,11 @@ use crate::users::User;
 /// Fetch one post's context now: resolve the post on our server, then pull
 /// its context from the server hosting it and resolve that too. `uri` is the
 /// post's uri, as the trigger_posts or context_cache table spells it.
-pub async fn force_post_context(
-    config: &Config,
-    home: &HomeServer,
-    http: &HttpClient,
-    state: &mut State,
-    db: &SqlitePool,
-    cancel: &CancelToken,
-    uri: &str,
-) {
+pub async fn force_post_context(ctx: &mut Context<'_>, uri: &str) {
     info!("Manual fetch: context for post {uri}");
 
     // what the database knows about the post: its URL and its age
-    let known = match db::trigger_post(db, uri).await {
+    let known = match db::trigger_post(ctx.db, uri).await {
         Ok(known) => known,
         Err(ex) => {
             warn!("Manual fetch: could not read the trigger posts for {uri}: {ex}");
@@ -50,7 +40,7 @@ pub async fn force_post_context(
         .and_then(|row| row.created_at.as_deref())
         .and_then(timeutil::parse)
         .or_else(|| {
-            state
+            ctx.state
                 .recently_checked_context
                 .get(uri)
                 .map(|entry| entry.created_at)
@@ -58,7 +48,7 @@ pub async fn force_post_context(
         .unwrap_or_else(timeutil::now);
     let replies_count = known.as_ref().and_then(|row| row.replies_count);
 
-    match db::is_private_post(db, uri).await {
+    match db::is_private_post(ctx.db, uri).await {
         Ok(true) => {
             info!("Manual fetch: {uri} is recorded as private; its context cannot be fetched");
             return;
@@ -81,39 +71,19 @@ pub async fn force_post_context(
     };
 
     // pull the post itself into our server, unless it is already ours
-    let home_prefix = format!("https://{}/", config.server);
-    if !url.starts_with(&home_prefix) && home.resolve(&url).await {
-        state.seen_urls.add(&url, None);
+    let home_prefix = format!("https://{}/", ctx.config.server);
+    if !url.starts_with(&home_prefix) && ctx.home.resolve(&url).await {
+        ctx.state.seen_urls.add(&url, None);
     }
 
     // then its context, ignoring how recently it was last checked
-    let context_urls = known_context_urls(
-        &config.server,
-        std::slice::from_ref(&post),
-        http,
-        cancel,
-        state,
-        db,
-        "manual",
-        true,
-    )
-    .await;
-    add_context_urls(home, context_urls, cancel, state).await;
+    let context_urls = known_context_urls(ctx, std::slice::from_ref(&post), "manual", true).await;
+    add_context_urls(ctx.home, context_urls, &ctx.cancel, ctx.state).await;
 }
 
 /// Backfill one account's posts now, even when it is already known. `acct`
 /// is `name@host`; a local account has nothing to backfill.
-#[allow(clippy::too_many_arguments)]
-pub async fn force_user_posts(
-    config: &Config,
-    home: &HomeServer,
-    http: &HttpClient,
-    state: &mut State,
-    db: &SqlitePool,
-    cancel: &CancelToken,
-    acct: &str,
-    target: UserSet,
-) {
+pub async fn force_user_posts(ctx: &mut Context<'_>, acct: &str, target: UserSet) {
     info!("Manual fetch: backfill posts for {acct}");
 
     let Some((name, host)) = acct.split_once('@') else {
@@ -124,7 +94,7 @@ pub async fn force_user_posts(
         info!("Manual fetch: {acct} is not a remote account; there is nothing to backfill");
         return;
     }
-    match db::opted_out_account_reason(db, acct).await {
+    match db::opted_out_account_reason(ctx.db, acct).await {
         Ok(Some(reason)) => {
             info!("Manual fetch: not backfilling {acct}: the account has opted out ({reason})");
             return;
@@ -135,23 +105,12 @@ pub async fn force_user_posts(
 
     // the profile URL shape the account's server reads, so its client can
     // parse the name out of it
-    let Some(server) = server_info(host, &mut state.seen_hosts, http).await else {
+    let Some(server) = server_info(host, &mut ctx.state.seen_hosts, ctx.http).await else {
         error!("Manual fetch: server info for {host} is unavailable; cannot backfill {acct}");
         return;
     };
     let user = User::new(acct, profile_url_for(&server, host, name));
-    add_user_posts(
-        home,
-        vec![user],
-        target,
-        http,
-        config,
-        cancel,
-        state,
-        db,
-        true,
-    )
-    .await;
+    add_user_posts(ctx, vec![user], target, true).await;
 }
 
 /// The profile URL for `name` on `host`, in the shape the server's own API
