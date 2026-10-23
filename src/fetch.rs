@@ -41,7 +41,7 @@ pub async fn force_post_context(ctx: &mut Context<'_>, uri: &str) {
         .and_then(timeutil::parse)
         .or_else(|| {
             ctx.state
-                .recently_checked_context
+                .recently_checked_context()
                 .get(uri)
                 .map(|entry| entry.created_at)
         })
@@ -73,7 +73,7 @@ pub async fn force_post_context(ctx: &mut Context<'_>, uri: &str) {
     // pull the post itself into our server, unless it is already ours
     let home_prefix = format!("https://{}/", ctx.config.server);
     if !url.starts_with(&home_prefix) && ctx.home.resolve(&url).await {
-        ctx.state.seen_urls.add(&url, None);
+        ctx.state.seen_urls_mut().add(&url, None);
     }
 
     // then its context, ignoring how recently it was last checked
@@ -105,7 +105,7 @@ pub async fn force_user_posts(ctx: &mut Context<'_>, acct: &str, target: UserSet
 
     // the profile URL shape the account's server reads, so its client can
     // parse the name out of it
-    let Some(server) = server_info(host, &mut ctx.state.seen_hosts, ctx.http).await else {
+    let Some(server) = server_info(host, ctx.state.seen_hosts_mut(), ctx.http).await else {
         error!("Manual fetch: server info for {host} is unavailable; cannot backfill {acct}");
         return;
     };
@@ -139,15 +139,15 @@ fn profile_url_for(server: &ServerInfo, host: &str, name: &str) -> String {
 pub async fn force_host_info(host: &str, http: &HttpClient, state: &mut State) {
     info!("Manual fetch: re-checking server info for {host}");
     // forget the cached copy, so the lookup runs again
-    state.seen_hosts.remove(host);
-    match server_info(host, &mut state.seen_hosts, http).await {
+    state.seen_hosts_mut().remove(host);
+    match server_info(host, state.seen_hosts_mut(), http).await {
         Some(info) => info!(
             "Manual fetch: {host} runs {} {}",
             info.software, info.version
         ),
         None => {
             let reason = state
-                .seen_hosts
+                .seen_hosts()
                 .get(host)
                 .and_then(|entry| entry.get("error"))
                 .and_then(serde_json::Value::as_str)
@@ -161,7 +161,7 @@ pub async fn force_host_info(host: &str, http: &HttpClient, state: &mut State) {
 pub async fn force_resolve_url(home: &HomeServer, state: &mut State, url: &str) {
     info!("Manual fetch: re-resolving {url} on {}", home.server);
     if home.resolve(url).await {
-        state.seen_urls.add(url, None);
+        state.seen_urls_mut().add(url, None);
     } else {
         warn!("Manual fetch: {} did not resolve {url}", home.server);
     }

@@ -8,9 +8,8 @@ mod common;
 use fedifetcher::api::{client_for, find_post, Client};
 use fedifetcher::http::HttpClient;
 use fedifetcher::servers::{ApiFlavour, ServerInfo};
-use fedifetcher::state::ServerCache;
+use fedifetcher::store::State;
 use fedifetcher::urls::PostRef;
-use indexmap::IndexMap;
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -170,14 +169,13 @@ async fn usernames_are_read_in_each_flavours_own_url_shapes() {
 async fn a_url_with_no_host_is_not_looked_up() {
     let dir = common::tmp_dir();
     let http = http(&dir);
-    let mut parsed = IndexMap::new();
-    let mut seen_hosts = ServerCache::new();
+    let mut state = State::default();
 
-    let found = find_post("not a url", &mut parsed, &mut seen_hosts, &http).await;
+    let found = find_post("not a url", &mut state, &http).await;
 
     assert_eq!(found, None);
     // the URL is remembered as unreadable rather than asked about again
-    assert_eq!(parsed.get("not a url"), Some(&None));
+    assert_eq!(state.parsed_urls().get("not a url"), Some(&None));
 }
 
 #[test]

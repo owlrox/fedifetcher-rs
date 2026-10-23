@@ -29,8 +29,8 @@ pub enum UserSet {
 impl UserSet {
     fn get<'a>(&self, state: &'a mut State) -> &'a mut TimestampedSet {
         match self {
-            UserSet::KnownFollowings => &mut state.known_followings,
-            UserSet::RecentlyCheckedUsers => &mut state.recently_checked_users,
+            UserSet::KnownFollowings => state.known_followings_mut(),
+            UserSet::RecentlyCheckedUsers => state.recently_checked_users_mut(),
         }
     }
 }
@@ -106,7 +106,7 @@ pub async fn user_posts(
         return None;
     }
 
-    let Some(post_server) = server_info(&host, &mut state.seen_hosts, http).await else {
+    let Some(post_server) = server_info(&host, state.seen_hosts_mut(), http).await else {
         error!("server {host} not found for post");
         return None;
     };
@@ -127,21 +127,13 @@ pub async fn user_posts(
 
 pub async fn add_post_with_context(ctx: &mut Context<'_>, post: &Post) -> bool {
     if ctx.home.resolve(&post.url).await {
-        ctx.state.seen_urls.add(&post.url, None);
+        ctx.state.seen_urls_mut().add(&post.url, None);
         if post.may_have_context() && ctx.config.backfill_with_context {
             // a private post is skipped before its URL is even resolved
             if !context_fetchable(post, ctx.db).await {
                 return true;
             }
-            if find_post(
-                &post.url,
-                &mut ctx.state.parsed_urls,
-                &mut ctx.state.seen_hosts,
-                ctx.http,
-            )
-            .await
-            .is_none()
-            {
+            if find_post(&post.url, ctx.state, ctx.http).await.is_none() {
                 return true;
             }
             let known_context_urls =
@@ -167,7 +159,7 @@ pub async fn add_user_posts(
         if ctx.cancel.is_canceled() {
             break;
         }
-        if (!ctx.state.all_known_users.contains(&user.acct) || force)
+        if (!ctx.state.all_known_users().contains(&user.acct) || force)
             && !user.url.starts_with(&format!("https://{home_server}/"))
         {
             let posts = user_posts(
@@ -188,10 +180,10 @@ pub async fn add_user_posts(
                     if ctx.cancel.is_canceled() {
                         break;
                     }
-                    if !post.is_boost() && !ctx.state.seen_urls.contains(&post.url) {
+                    if !post.is_boost() && !ctx.state.seen_urls().contains(&post.url) {
                         let added = add_post_with_context(ctx, &post).await;
                         if added {
-                            ctx.state.seen_urls.add(&post.url, None);
+                            ctx.state.seen_urls_mut().add(&post.url, None);
                             count += 1;
                         } else {
                             failed += 1;
@@ -204,7 +196,7 @@ pub async fn add_user_posts(
                 );
                 if failed == 0 {
                     target.get(ctx.state).add(&user.acct, None);
-                    ctx.state.all_known_users.add(&user.acct, None);
+                    ctx.state.all_known_users_mut().add(&user.acct, None);
                 }
             }
         }

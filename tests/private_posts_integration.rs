@@ -52,11 +52,11 @@ async fn a_private_post_is_recorded_and_never_touched() {
 
     assert!(urls.is_empty(), "a private post has no context to find");
     assert!(
-        state.parsed_urls.is_empty(),
+        state.parsed_urls().is_empty(),
         "not even the post's URL is resolved"
     );
     assert!(
-        state.seen_hosts.is_empty(),
+        state.seen_hosts().is_empty(),
         "the post's server is not looked up"
     );
     assert!(
@@ -87,11 +87,11 @@ async fn a_post_marked_private_is_skipped_on_later_runs() {
         "a post marked private is skipped whatever the toot says"
     );
     assert!(
-        state.parsed_urls.is_empty(),
+        state.parsed_urls().is_empty(),
         "a recorded post is not resolved again, not even its URL"
     );
     assert!(
-        state.seen_hosts.is_empty(),
+        state.seen_hosts().is_empty(),
         "the post's server is not looked up"
     );
 }
@@ -112,7 +112,7 @@ async fn a_public_post_is_still_resolved() {
     let _ = context_urls(&mut ctx, &toot).await;
 
     assert!(
-        state.parsed_urls.contains_key(&toot.url),
+        state.parsed_urls().contains_key(&toot.url),
         "a public post's URL is resolved like before"
     );
     assert!(

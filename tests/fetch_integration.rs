@@ -118,7 +118,7 @@ async fn force_post_context_resolves_the_post_and_records_it() {
         "the post itself is resolved on our server"
     );
     assert!(
-        state.seen_urls.contains(&uri),
+        state.seen_urls().contains(&uri),
         "the resolved post is remembered"
     );
     let recorded = db::trigger_post(&db, &uri)
@@ -160,7 +160,7 @@ async fn force_post_context_skips_a_post_recorded_as_private() {
         "{}",
         logs.text()
     );
-    assert!(state.seen_urls.is_empty());
+    assert!(state.seen_urls().is_empty());
 }
 
 /// An account recorded as opted out is not backfilled manually.
@@ -235,7 +235,7 @@ async fn force_user_posts_refuses_a_local_account() {
 
     assert!(logs.text().contains("local user"), "{}", logs.text());
     assert!(
-        state.known_followings.is_empty(),
+        state.known_followings().is_empty(),
         "the account is not recorded as checked"
     );
 }
@@ -264,7 +264,7 @@ async fn force_resolve_url_adds_the_url_to_seen_urls() {
         .await;
     fetch::force_resolve_url(&home, &mut state, url).await;
     assert_eq!(search.calls(), 1);
-    assert!(state.seen_urls.contains(url));
+    assert!(state.seen_urls().contains(url));
 
     let refused = "https://remote.example/@alice/2";
     server
@@ -276,7 +276,7 @@ async fn force_resolve_url_adds_the_url_to_seen_urls() {
         })
         .await;
     fetch::force_resolve_url(&home, &mut state, refused).await;
-    assert!(!state.seen_urls.contains(refused));
+    assert!(!state.seen_urls().contains(refused));
 }
 
 /// A manual host re-check ignores the cached entry: the lookup runs again,
@@ -295,13 +295,13 @@ async fn force_host_info_replaces_the_cached_entry() {
         "software": {"name": "mastodon", "version": "4.3.0"},
         "protocols": ["activitypub"],
     });
-    state.seen_hosts.add(
+    state.seen_hosts_mut().add(
         host,
         ServerInfo::from_nodeinfo(host, &nodeinfo)
             .unwrap()
             .to_state(),
     );
-    assert!(state.seen_hosts.contains(host));
+    assert!(state.seen_hosts().contains(host));
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
@@ -309,7 +309,10 @@ async fn force_host_info_replaces_the_cached_entry() {
     drop(guard);
 
     // the cached copy is gone, replaced by the failed lookup's record
-    let entry = state.seen_hosts.get(host).expect("the lookup is recorded");
+    let entry = state
+        .seen_hosts()
+        .get(host)
+        .expect("the lookup is recorded");
     assert_eq!(entry.get("info"), Some(&serde_json::Value::Null));
     assert!(
         entry

@@ -104,7 +104,7 @@ async fn an_account_that_opted_out_is_fetched_when_the_rule_is_off() {
         logs.text()
     );
     assert!(
-        state.recently_checked_users.contains("bot"),
+        state.recently_checked_users().contains("bot"),
         "the account is recorded as checked"
     );
 }

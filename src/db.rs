@@ -930,13 +930,11 @@ where
 /// The whole remembered state, read back from the database. Expiry and the
 /// derived collections are applied by the caller (`StateStore::load`).
 pub async fn load_state(pool: &SqlitePool) -> Result<State> {
-    let mut state = State {
-        seen_urls: load_timestamped_set(pool, "seen_urls", "uri").await?,
-        known_followings: load_timestamped_set(pool, "known_followings", "acct").await?,
-        recently_checked_users: load_timestamped_set(pool, "recently_checked_users", "acct")
-            .await?,
-        ..Default::default()
-    };
+    let mut state = State::default();
+    *state.seen_urls_mut() = load_timestamped_set(pool, "seen_urls", "uri").await?;
+    *state.known_followings_mut() = load_timestamped_set(pool, "known_followings", "acct").await?;
+    *state.recently_checked_users_mut() =
+        load_timestamped_set(pool, "recently_checked_users", "acct").await?;
 
     let rows = sqlx::query(
         "SELECT host, webserver, software, version, mastodon_api, misskey_api, lemmy_api, peertube_api, last_checked, error, raw_nodeinfo FROM seen_hosts ORDER BY rowid",
@@ -947,7 +945,7 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
     for row in rows {
         let host_row = host_row(&row);
         state
-            .seen_hosts
+            .seen_hosts_mut()
             .add(&host_row.host, host_row.to_state_value());
     }
 
@@ -961,7 +959,7 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
         let created_at = timeutil::parse(&row.get::<String, _>("created_at"));
         if let (Some(last_seen), Some(created_at)) = (last_seen, created_at) {
             state
-                .recently_checked_context
+                .recently_checked_context_mut()
                 .record(&uri, last_seen, created_at);
         }
     }
@@ -985,7 +983,7 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
             // all-NULL columns remember a lookup that found nothing
             _ => None,
         };
-        state.replied_toot_server_ids.insert(url, replied);
+        state.replied_toot_server_ids_mut().insert(url, replied);
     }
 
     Ok(state)
@@ -996,12 +994,12 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
 pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) -> Result<()> {
     let mut tx = pool.begin().await.map_err(db_error)?;
 
-    save_timestamped_set(&mut tx, "seen_urls", "uri", &state.seen_urls, max_entries).await?;
+    save_timestamped_set(&mut tx, "seen_urls", "uri", state.seen_urls(), max_entries).await?;
     save_timestamped_set(
         &mut tx,
         "known_followings",
         "acct",
-        &state.known_followings,
+        state.known_followings(),
         max_entries,
     )
     .await?;
@@ -1009,7 +1007,7 @@ pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) ->
         &mut tx,
         "recently_checked_users",
         "acct",
-        &state.recently_checked_users,
+        state.recently_checked_users(),
         max_entries,
     )
     .await?;
@@ -1018,7 +1016,7 @@ pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) ->
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    for (host, info) in state.seen_hosts.iter() {
+    for (host, info) in state.seen_hosts().iter() {
         insert_host_row(&mut *tx, &HostRow::from_state_value(host, info)).await?;
     }
 
@@ -1026,7 +1024,7 @@ pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) ->
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    for (uri, entry) in state.recently_checked_context.entries() {
+    for (uri, entry) in state.recently_checked_context().entries() {
         sqlx::query("INSERT INTO context_cache (uri, last_seen, created_at) VALUES (?, ?, ?)")
             .bind(uri)
             .bind(timeutil::fmt_state_ts(entry.last_seen))
@@ -1040,7 +1038,7 @@ pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) ->
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    let replied: Vec<_> = state.replied_toot_server_ids.iter().collect();
+    let replied: Vec<_> = state.replied_toot_server_ids().iter().collect();
     let start = replied.len().saturating_sub(max_entries);
     for (url, toot) in &replied[start..] {
         let (remote_url, server, post_id) = match toot {
@@ -1808,7 +1806,7 @@ mod tests {
         let pool = open(&config).await.unwrap();
 
         let mut state = State::default();
-        state.seen_hosts.add(
+        state.seen_hosts_mut().add(
             "remote.example",
             serde_json::json!({
                 "webserver": "remote.example", "software": "mastodon", "version": "4.3.0",
@@ -1818,7 +1816,7 @@ mod tests {
                 "lemmyApiSupport": false, "peertubeApiSupport": false,
             }),
         );
-        state.seen_hosts.add(
+        state.seen_hosts_mut().add(
             "down.example",
             crate::servers::failed_lookup_state("prohibited by robots.txt"),
         );
@@ -1850,19 +1848,21 @@ mod tests {
         // and the state reads back as it was
         let loaded = load_state(&pool).await.unwrap();
         let info = crate::servers::ServerInfo::from_state(
-            loaded.seen_hosts.get("remote.example").unwrap(),
+            loaded.seen_hosts().get("remote.example").unwrap(),
         )
         .unwrap();
         assert_eq!(info.software, "mastodon");
         assert_eq!(info.version, "4.3.0");
         assert!(info.supports(crate::servers::ApiFlavour::Mastodon));
         assert!(
-            crate::servers::ServerInfo::from_state(loaded.seen_hosts.get("down.example").unwrap())
-                .is_none(),
+            crate::servers::ServerInfo::from_state(
+                loaded.seen_hosts().get("down.example").unwrap()
+            )
+            .is_none(),
             "a failed lookup still reads as a failure"
         );
         assert_eq!(
-            loaded.seen_hosts.get("down.example").unwrap()["error"],
+            loaded.seen_hosts().get("down.example").unwrap()["error"],
             serde_json::json!("prohibited by robots.txt")
         );
     }
@@ -1939,13 +1939,14 @@ mod tests {
 
         // and the migrated rows read back as the state they were
         let state = load_state(&pool).await.unwrap();
-        let info =
-            crate::servers::ServerInfo::from_state(state.seen_hosts.get("remote.example").unwrap())
-                .unwrap();
+        let info = crate::servers::ServerInfo::from_state(
+            state.seen_hosts().get("remote.example").unwrap(),
+        )
+        .unwrap();
         assert_eq!(info.software, "mastodon");
         assert!(info.supports(crate::servers::ApiFlavour::Mastodon));
         assert!(crate::servers::ServerInfo::from_state(
-            state.seen_hosts.get("down.example").unwrap()
+            state.seen_hosts().get("down.example").unwrap()
         )
         .is_none());
     }
@@ -2189,10 +2190,14 @@ mod tests {
         let pool = open(&config).await.unwrap();
 
         let mut state = State::default();
-        state.seen_urls.add("https://remote.example/@a/1", None);
-        state.known_followings.add("b@remote.example", None);
-        state.recently_checked_users.add("c@remote.example", None);
-        state.seen_hosts.add(
+        state
+            .seen_urls_mut()
+            .add("https://remote.example/@a/1", None);
+        state.known_followings_mut().add("b@remote.example", None);
+        state
+            .recently_checked_users_mut()
+            .add("c@remote.example", None);
+        state.seen_hosts_mut().add(
             "remote.example",
             serde_json::json!({
                 "software": "mastodon", "version": "4.3",
@@ -2201,9 +2206,9 @@ mod tests {
             }),
         );
         state
-            .recently_checked_context
+            .recently_checked_context_mut()
             .mark_fetched("uri", timeutil::now());
-        state.replied_toot_server_ids.insert(
+        state.replied_toot_server_ids_mut().insert(
             "https://home.example/@b/2".to_string(),
             Some(RepliedToot {
                 url: "https://remote.example/@a/1".to_string(),
@@ -2211,19 +2216,19 @@ mod tests {
             }),
         );
         state
-            .replied_toot_server_ids
+            .replied_toot_server_ids_mut()
             .insert("https://home.example/@b/3".to_string(), None);
         save_state(&pool, &state, 100).await.unwrap();
 
         let loaded = load_state(&pool).await.unwrap();
-        assert!(loaded.seen_urls.contains("https://remote.example/@a/1"));
-        assert!(loaded.known_followings.contains("b@remote.example"));
-        assert!(loaded.recently_checked_users.contains("c@remote.example"));
-        assert!(loaded.seen_hosts.contains("remote.example"));
-        assert!(loaded.recently_checked_context.contains("uri"));
+        assert!(loaded.seen_urls().contains("https://remote.example/@a/1"));
+        assert!(loaded.known_followings().contains("b@remote.example"));
+        assert!(loaded.recently_checked_users().contains("c@remote.example"));
+        assert!(loaded.seen_hosts().contains("remote.example"));
+        assert!(loaded.recently_checked_context().contains("uri"));
         assert_eq!(
             loaded
-                .replied_toot_server_ids
+                .replied_toot_server_ids()
                 .get("https://home.example/@b/2"),
             Some(&Some(RepliedToot {
                 url: "https://remote.example/@a/1".to_string(),
@@ -2232,15 +2237,15 @@ mod tests {
         );
         assert_eq!(
             loaded
-                .replied_toot_server_ids
+                .replied_toot_server_ids()
                 .get("https://home.example/@b/3"),
             Some(&None),
             "a failed lookup is remembered as a NULL row"
         );
         // timestamps survive the round trip
         assert_eq!(
-            loaded.seen_urls.get("https://remote.example/@a/1"),
-            state.seen_urls.get("https://remote.example/@a/1")
+            loaded.seen_urls().get("https://remote.example/@a/1"),
+            state.seen_urls().get("https://remote.example/@a/1")
         );
     }
 
@@ -2252,16 +2257,16 @@ mod tests {
         let mut state = State::default();
         for n in 0..5 {
             state
-                .seen_urls
+                .seen_urls_mut()
                 .add(&format!("https://remote.example/{n}"), None);
         }
         save_state(&pool, &state, 3).await.unwrap();
 
         let loaded = load_state(&pool).await.unwrap();
-        assert_eq!(loaded.seen_urls.len(), 3);
-        assert!(!loaded.seen_urls.contains("https://remote.example/0"));
-        assert!(!loaded.seen_urls.contains("https://remote.example/1"));
-        assert!(loaded.seen_urls.contains("https://remote.example/4"));
+        assert_eq!(loaded.seen_urls().len(), 3);
+        assert!(!loaded.seen_urls().contains("https://remote.example/0"));
+        assert!(!loaded.seen_urls().contains("https://remote.example/1"));
+        assert!(loaded.seen_urls().contains("https://remote.example/4"));
     }
 
     #[tokio::test]

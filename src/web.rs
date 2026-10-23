@@ -295,7 +295,7 @@ async fn data(
     tabs.push(TabLink {
         label: "Hosts".to_string(),
         href: "/hosts?tab=hosts".to_string(),
-        count: state_data.seen_hosts.len() as i64,
+        count: state_data.seen_hosts().len() as i64,
         active: table.is_none(),
     });
     for (name, count) in &table_counts {
@@ -1037,20 +1037,23 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl In
     };
     let tasks = config.enabled_tasks();
     let stats = vec![
-        ("seen urls".to_string(), data.seen_urls.len()),
-        ("known followings".to_string(), data.known_followings.len()),
+        ("seen urls".to_string(), data.seen_urls().len()),
+        (
+            "known followings".to_string(),
+            data.known_followings().len(),
+        ),
         (
             "recently checked users".to_string(),
-            data.recently_checked_users.len(),
+            data.recently_checked_users().len(),
         ),
-        ("seen hosts".to_string(), data.seen_hosts.len()),
+        ("seen hosts".to_string(), data.seen_hosts().len()),
         (
             "recently checked contexts".to_string(),
-            data.recently_checked_context.len(),
+            data.recently_checked_context().len(),
         ),
         (
             "replied-toot lookups".to_string(),
-            data.replied_toot_server_ids.len(),
+            data.replied_toot_server_ids().len(),
         ),
     ];
 
@@ -1217,7 +1220,7 @@ fn hosts_table(
     order: LogOrder,
 ) -> Vec<(String, String, String, String, String)> {
     let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
-    for (host, info) in data.seen_hosts.iter() {
+    for (host, info) in data.seen_hosts().iter() {
         let text = |key: &str| {
             info.get(key)
                 .and_then(Value::as_str)

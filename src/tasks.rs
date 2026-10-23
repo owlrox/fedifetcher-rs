@@ -60,7 +60,7 @@ async fn reply_toots_for_user(
         .into_iter()
         .filter(|toot| {
             toot.in_reply_to_id.is_some()
-                && !state.seen_urls.contains(&toot.url)
+                && !state.seen_urls().contains(&toot.url)
                 && toot.created_at > reply_since
         })
         .collect();
@@ -90,14 +90,14 @@ async fn fetch_timeline_context(ctx: &mut Context<'_>, timeline_posts: Vec<Post>
             }
             for user in these_users {
                 if !mentioned_users.contains(&user)
-                    && !ctx.state.all_known_users.contains(&user.acct)
+                    && !ctx.state.all_known_users().contains(&user.acct)
                 {
                     mentioned_users.push(user);
                 }
             }
         }
 
-        let new_users = filter_known_users(mentioned_users, &ctx.state.all_known_users);
+        let new_users = filter_known_users(mentioned_users, ctx.state.all_known_users());
         add_user_posts(ctx, new_users, UserSet::RecentlyCheckedUsers, false).await;
     }
 }
@@ -162,7 +162,7 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
     )
     .await;
     let known_context_urls = known_context_urls(ctx, &reply_toots, "replies", false).await;
-    ctx.state.seen_urls.update(known_context_urls);
+    ctx.state.seen_urls_mut().update(known_context_urls);
     let replied_toot_ids = replied_toot_server_ids(
         &ctx.config.server,
         &reply_toots,
@@ -203,7 +203,7 @@ async fn backfill_followings(ctx: &mut Context<'_>) -> Result<()> {
         .following(&user_id, ctx.config.max_followings)
         .await?;
     let total = followings.len();
-    let new_followings = filter_known_users(followings, &ctx.state.all_known_users);
+    let new_followings = filter_known_users(followings, ctx.state.all_known_users());
     let new = new_followings.len();
     info!("Got {total} followings, {new} of which are new");
     add_user_posts(ctx, new_followings, UserSet::KnownFollowings, false).await;
@@ -222,7 +222,7 @@ async fn backfill_followers(ctx: &mut Context<'_>) -> Result<()> {
         .followers(&user_id, ctx.config.max_followers)
         .await?;
     let total = followers.len();
-    let new_followers = filter_known_users(followers, &ctx.state.all_known_users);
+    let new_followers = filter_known_users(followers, ctx.state.all_known_users());
     let new = new_followers.len();
     info!("Got {total} followers, {new} of which are new");
     add_user_posts(ctx, new_followers, UserSet::RecentlyCheckedUsers, false).await;
@@ -240,7 +240,7 @@ async fn backfill_follow_requests(ctx: &mut Context<'_>) -> Result<()> {
         .follow_requests(ctx.config.max_follow_requests)
         .await?;
     let total = follow_requests.len();
-    let new_requests = filter_known_users(follow_requests, &ctx.state.all_known_users);
+    let new_requests = filter_known_users(follow_requests, ctx.state.all_known_users());
     let new = new_requests.len();
     info!("Got {total} follow_requests, {new} of which are new");
     add_user_posts(ctx, new_requests, UserSet::RecentlyCheckedUsers, false).await;
@@ -256,7 +256,7 @@ async fn backfill_from_notifications(ctx: &mut Context<'_>) -> Result<()> {
     let since = timeutil::now_local() - Duration::hours(ctx.config.from_notifications);
     let accounts = ctx.home.notification_accounts(since).await?;
     let total = accounts.len();
-    let new_accounts = filter_known_users(accounts, &ctx.state.all_known_users);
+    let new_accounts = filter_known_users(accounts, ctx.state.all_known_users());
     let new = new_accounts.len();
     info!("Found {total} users in notifications, {new} of which are new");
     add_user_posts(ctx, new_accounts, UserSet::RecentlyCheckedUsers, false).await;

@@ -39,19 +39,87 @@ pub struct RepliedToot {
 }
 
 /// Everything FediFetcher remembers between runs, plus this run's scratch
-/// space.
+/// space. The collections are private: reads and updates go through the
+/// accessor pairs below, so every way they change is visible in one place.
 #[derive(Default)]
 pub struct State {
-    pub seen_urls: TimestampedSet,
-    pub known_followings: TimestampedSet,
-    pub recently_checked_users: TimestampedSet,
-    pub seen_hosts: ServerCache,
-    pub recently_checked_context: ContextCache,
-    pub replied_toot_server_ids: IndexMap<String, Option<RepliedToot>>,
+    seen_urls: TimestampedSet,
+    known_followings: TimestampedSet,
+    recently_checked_users: TimestampedSet,
+    seen_hosts: ServerCache,
+    recently_checked_context: ContextCache,
+    replied_toot_server_ids: IndexMap<String, Option<RepliedToot>>,
 
     /// Rebuilt on load, and not written back out.
-    pub all_known_users: TimestampedSet,
-    pub parsed_urls: IndexMap<String, Option<PostRef>>,
+    all_known_users: TimestampedSet,
+    parsed_urls: IndexMap<String, Option<PostRef>>,
+}
+
+impl State {
+    pub fn seen_urls(&self) -> &TimestampedSet {
+        &self.seen_urls
+    }
+
+    pub fn seen_urls_mut(&mut self) -> &mut TimestampedSet {
+        &mut self.seen_urls
+    }
+
+    pub fn known_followings(&self) -> &TimestampedSet {
+        &self.known_followings
+    }
+
+    pub fn known_followings_mut(&mut self) -> &mut TimestampedSet {
+        &mut self.known_followings
+    }
+
+    pub fn recently_checked_users(&self) -> &TimestampedSet {
+        &self.recently_checked_users
+    }
+
+    pub fn recently_checked_users_mut(&mut self) -> &mut TimestampedSet {
+        &mut self.recently_checked_users
+    }
+
+    pub fn seen_hosts(&self) -> &ServerCache {
+        &self.seen_hosts
+    }
+
+    pub fn seen_hosts_mut(&mut self) -> &mut ServerCache {
+        &mut self.seen_hosts
+    }
+
+    pub fn recently_checked_context(&self) -> &ContextCache {
+        &self.recently_checked_context
+    }
+
+    pub fn recently_checked_context_mut(&mut self) -> &mut ContextCache {
+        &mut self.recently_checked_context
+    }
+
+    pub fn replied_toot_server_ids(&self) -> &IndexMap<String, Option<RepliedToot>> {
+        &self.replied_toot_server_ids
+    }
+
+    pub fn replied_toot_server_ids_mut(&mut self) -> &mut IndexMap<String, Option<RepliedToot>> {
+        &mut self.replied_toot_server_ids
+    }
+
+    /// Rebuilt on load, and not written back out.
+    pub fn all_known_users(&self) -> &TimestampedSet {
+        &self.all_known_users
+    }
+
+    pub fn all_known_users_mut(&mut self) -> &mut TimestampedSet {
+        &mut self.all_known_users
+    }
+
+    pub fn parsed_urls(&self) -> &IndexMap<String, Option<PostRef>> {
+        &self.parsed_urls
+    }
+
+    pub fn parsed_urls_mut(&mut self) -> &mut IndexMap<String, Option<PostRef>> {
+        &mut self.parsed_urls
+    }
 }
 
 /// Reads and writes what FediFetcher remembers, in the database.
@@ -74,26 +142,26 @@ impl StateStore {
         let mut state = db::load_state(pool).await?;
 
         state
-            .recently_checked_users
+            .recently_checked_users_mut()
             .expire_older_than(Duration::hours(config.remember_users_for_hours));
-        state.seen_hosts.expire(
+        state.seen_hosts_mut().expire(
             Duration::days(config.remember_hosts_for_days),
             SERVER_FAILURE_MAX_AGE,
         );
         state
-            .recently_checked_context
+            .recently_checked_context_mut()
             .expire_older_than(CONTEXT_MAX_AGE);
 
-        for user in state.known_followings.iter().cloned().collect::<Vec<_>>() {
-            state.all_known_users.add(&user, None);
+        for user in state.known_followings().iter().cloned().collect::<Vec<_>>() {
+            state.all_known_users_mut().add(&user, None);
         }
         for user in state
-            .recently_checked_users
+            .recently_checked_users()
             .iter()
             .cloned()
             .collect::<Vec<_>>()
         {
-            state.all_known_users.add(&user, None);
+            state.all_known_users_mut().add(&user, None);
         }
         Ok(state)
     }
@@ -288,10 +356,14 @@ mod tests {
 
         let mut session = store.session(&pool).await.unwrap();
         let state = session.state();
-        state.seen_urls.add("https://remote.example/@a/1", None);
-        state.known_followings.add("b@remote.example", None);
-        state.recently_checked_users.add("c@remote.example", None);
-        state.replied_toot_server_ids.insert(
+        state
+            .seen_urls_mut()
+            .add("https://remote.example/@a/1", None);
+        state.known_followings_mut().add("b@remote.example", None);
+        state
+            .recently_checked_users_mut()
+            .add("c@remote.example", None);
+        state.replied_toot_server_ids_mut().insert(
             "https://home.example/@b/2".to_string(),
             Some(RepliedToot {
                 url: "https://remote.example/@a/1".to_string(),
@@ -299,9 +371,9 @@ mod tests {
             }),
         );
         state
-            .replied_toot_server_ids
+            .replied_toot_server_ids_mut()
             .insert("https://home.example/@b/3".to_string(), None);
-        state.seen_hosts.add(
+        state.seen_hosts_mut().add(
             "remote.example",
             json!({
                 "webserver": "remote.example", "software": "mastodon", "version": "4.3",
@@ -310,19 +382,19 @@ mod tests {
             }),
         );
         state
-            .recently_checked_context
+            .recently_checked_context_mut()
             .mark_fetched("uri", timeutil::now());
         session.finish().await.unwrap();
 
         let loaded = store.load(&pool).await.unwrap();
-        assert!(loaded.seen_urls.contains("https://remote.example/@a/1"));
-        assert!(loaded.known_followings.contains("b@remote.example"));
-        assert!(loaded.recently_checked_users.contains("c@remote.example"));
-        assert!(loaded.seen_hosts.contains("remote.example"));
-        assert!(loaded.recently_checked_context.contains("uri"));
+        assert!(loaded.seen_urls().contains("https://remote.example/@a/1"));
+        assert!(loaded.known_followings().contains("b@remote.example"));
+        assert!(loaded.recently_checked_users().contains("c@remote.example"));
+        assert!(loaded.seen_hosts().contains("remote.example"));
+        assert!(loaded.recently_checked_context().contains("uri"));
         assert_eq!(
             loaded
-                .replied_toot_server_ids
+                .replied_toot_server_ids()
                 .get("https://home.example/@b/2"),
             Some(&Some(RepliedToot {
                 url: "https://remote.example/@a/1".to_string(),
@@ -331,13 +403,13 @@ mod tests {
         );
         assert_eq!(
             loaded
-                .replied_toot_server_ids
+                .replied_toot_server_ids()
                 .get("https://home.example/@b/3"),
             Some(&None)
         );
         // all_known_users is rebuilt from followings and recently checked users
-        assert!(loaded.all_known_users.contains("b@remote.example"));
-        assert!(loaded.all_known_users.contains("c@remote.example"));
+        assert!(loaded.all_known_users().contains("b@remote.example"));
+        assert!(loaded.all_known_users().contains("c@remote.example"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -350,11 +422,14 @@ mod tests {
         let store = StateStore::new(config);
         {
             let mut session = store.session(&pool).await.unwrap();
-            session.state().seen_urls.add("https://x.example/1", None);
+            session
+                .state()
+                .seen_urls_mut()
+                .add("https://x.example/1", None);
             // dropped without finish: the run's changes are lost
         }
         let loaded = store.load(&pool).await.unwrap();
-        assert!(loaded.seen_urls.is_empty());
+        assert!(loaded.seen_urls().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -381,11 +456,13 @@ mod tests {
         let store = StateStore::new(config);
         let loaded = store.load(&pool).await.unwrap();
         assert!(
-            !loaded.recently_checked_users.contains("old@remote.example"),
+            !loaded
+                .recently_checked_users()
+                .contains("old@remote.example"),
             "a user remembered longer ago than remember_users_for_hours is forgotten"
         );
         assert!(loaded
-            .recently_checked_users
+            .recently_checked_users()
             .contains("fresh@remote.example"));
         std::fs::remove_dir_all(&dir).ok();
     }

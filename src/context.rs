@@ -100,25 +100,18 @@ pub async fn known_context_urls(
         }
         // a boost is only ever a pointer: the replies are on the original
         let url = toot.original().url.clone();
-        let Some(parsed_url) = find_post(
-            &url,
-            &mut ctx.state.parsed_urls,
-            &mut ctx.state.seen_hosts,
-            ctx.http,
-        )
-        .await
-        else {
+        let Some(parsed_url) = find_post(&url, ctx.state, ctx.http).await else {
             scan.unresolved += 1;
             continue;
         };
         if force
             || ctx
                 .state
-                .recently_checked_context
+                .recently_checked_context()
                 .should_fetch(&toot.uri, toot.created_at)
         {
             ctx.state
-                .recently_checked_context
+                .recently_checked_context_mut()
                 .mark_fetched(&toot.uri, toot.created_at);
             scan.fetched += 1;
             let context = toot_context_urls(
@@ -299,24 +292,24 @@ pub async fn replied_toot_server_id(
     let reply_id = toot.in_reply_to_id.as_ref()?;
 
     let o_url = format!("https://{server}/@{}/{reply_id}", mention.acct);
-    if let Some(cached) = state.replied_toot_server_ids.get(&o_url) {
+    if let Some(cached) = state.replied_toot_server_ids().get(&o_url) {
         // a cache entry that survived a run is JSON, so the PostRef is a list
         return cached.clone();
     }
 
     let url = http.get_redirect_url(&o_url).await?;
 
-    match find_post(&url, &mut state.parsed_urls, &mut state.seen_hosts, http).await {
+    match find_post(&url, state, http).await {
         Some(post_ref) => {
             let entry = RepliedToot { url, post_ref };
             state
-                .replied_toot_server_ids
+                .replied_toot_server_ids_mut()
                 .insert(o_url, Some(entry.clone()));
             Some(entry)
         }
         None => {
             // find_post has already logged why the URL could not be parsed
-            state.replied_toot_server_ids.insert(o_url, None);
+            state.replied_toot_server_ids_mut().insert(o_url, None);
             None
         }
     }
@@ -358,7 +351,7 @@ pub async fn toot_context_urls(
     http: &HttpClient,
     state: &mut State,
 ) -> Vec<String> {
-    let Some(post_server) = server_info(server, &mut state.seen_hosts, http).await else {
+    let Some(post_server) = server_info(server, state.seen_hosts_mut(), http).await else {
         error!("server {server} not found for post");
         return Vec::new();
     };
@@ -385,9 +378,9 @@ pub async fn add_context_urls(
         if cancel.is_canceled() {
             break;
         }
-        if !state.seen_urls.contains(&url) {
+        if !state.seen_urls().contains(&url) {
             if home.resolve(&url).await {
-                state.seen_urls.add(&url, None);
+                state.seen_urls_mut().add(&url, None);
                 count += 1;
             } else {
                 failed += 1;

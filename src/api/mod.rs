@@ -7,7 +7,6 @@ pub mod misskey;
 pub mod paging;
 pub mod peertube;
 
-use indexmap::IndexMap;
 use serde_json::Value;
 use tracing::error;
 
@@ -15,6 +14,7 @@ use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::servers::{server_info, ApiFlavour, ServerInfo};
 use crate::state::ServerCache;
+use crate::store::State;
 use crate::urls::{host_of, PostRef};
 
 pub use lemmy::LemmyApi;
@@ -136,24 +136,21 @@ pub fn client_for(server: &ServerInfo, http: &HttpClient) -> Option<Client> {
 /// asked what software it runs and its client reads the remainder. Answers
 /// are kept because the same URL comes round again, and because a Pleroma
 /// object URL costs a redirect to resolve.
-pub async fn find_post(
-    url: &str,
-    parsed_urls: &mut IndexMap<String, Option<PostRef>>,
-    seen_hosts: &mut ServerCache,
-    http: &HttpClient,
-) -> Option<PostRef> {
-    if let Some(cached) = parsed_urls.get(url) {
+pub async fn find_post(url: &str, state: &mut State, http: &HttpClient) -> Option<PostRef> {
+    if let Some(cached) = state.parsed_urls().get(url) {
         return cached.clone();
     }
 
-    let found = match look_up_post(url, seen_hosts, http).await {
+    let found = match look_up_post(url, state.seen_hosts_mut(), http).await {
         Ok(found) => Some(found),
         Err(reason) => {
             error!("Error parsing toot URL {url}: {reason}");
             None
         }
     };
-    parsed_urls.insert(url.to_string(), found.clone());
+    state
+        .parsed_urls_mut()
+        .insert(url.to_string(), found.clone());
     found
 }
 

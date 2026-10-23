@@ -445,7 +445,7 @@ async fn seed_hosts(dir: &std::path::Path, hosts: serde_json::Value) {
     let pool = fedifetcher::db::open(&config).await.unwrap();
     let mut state = fedifetcher::store::State::default();
     for (host, info) in hosts.as_object().unwrap() {
-        state.seen_hosts.add(host, info.clone());
+        state.seen_hosts_mut().add(host, info.clone());
     }
     fedifetcher::db::save_state(&pool, &state, fedifetcher::store::MAX_ENTRIES)
         .await
@@ -986,13 +986,19 @@ async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
     .await
     .unwrap();
     let mut state = fedifetcher::store::State::default();
-    state.known_followings.add("alice@remote.example", None);
-    state.recently_checked_users.add("bob@remote.example", None);
-    state.seen_urls.add("https://remote.example/@a/9", None);
     state
-        .recently_checked_context
+        .known_followings_mut()
+        .add("alice@remote.example", None);
+    state
+        .recently_checked_users_mut()
+        .add("bob@remote.example", None);
+    state
+        .seen_urls_mut()
+        .add("https://remote.example/@a/9", None);
+    state
+        .recently_checked_context_mut()
         .mark_fetched("https://remote.example/@a/5", fedifetcher::timeutil::now());
-    state.seen_hosts.add(
+    state.seen_hosts_mut().add(
         "alpha.example",
         host_entry("Mastodon", "4.2.0", &["mastodon"], 3),
     );
