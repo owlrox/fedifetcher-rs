@@ -9,6 +9,7 @@
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{AssertSqlSafe, Row};
+use time::OffsetDateTime;
 use tracing::debug;
 
 use crate::config::{Config, RawValues};
@@ -522,18 +523,29 @@ pub async fn finish_run(
 
 /// Mark runs still recorded as running as interrupted. The web UI calls this
 /// when it starts, under the lock: a `running` row it finds then belongs to
-/// a process that is gone, and would otherwise read as running forever.
-pub async fn interrupt_stale_runs(pool: &SqlitePool) -> Result<u64> {
-    let result = sqlx::query(
-        "UPDATE runs SET
-            outcome = 'error',
-            message = 'Interrupted: FediFetcher stopped while this run was in progress',
-            finished = started
-        WHERE outcome = 'running'",
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+/// a process that is gone, and would otherwise read as running forever. The
+/// message says how long the run had been going, from its start to `now`.
+pub async fn interrupt_stale_runs(pool: &SqlitePool, now: OffsetDateTime) -> Result<u64> {
+    let rows = sqlx::query("SELECT id, started FROM runs WHERE outcome = 'running'")
+        .fetch_all(pool)
+        .await?;
+    for row in &rows {
+        let message = match timeutil::parse(&row.get::<String, _>("started")) {
+            Some(started) => format!(
+                "Interrupted: FediFetcher stopped while this run was in progress (running for {})",
+                timeutil::fmt_timedelta(now - started)
+            ),
+            None => "Interrupted: FediFetcher stopped while this run was in progress".to_string(),
+        };
+        sqlx::query(
+            "UPDATE runs SET outcome = 'error', message = ?, finished = started WHERE id = ?",
+        )
+        .bind(message)
+        .bind(row.get::<i64, _>("id"))
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.len() as u64)
 }
 
 /// The most recent runs, newest first.
@@ -1440,23 +1452,24 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
 
-        let _stale = start_run(&pool, "2026-10-22 16:05:07 -05:00")
-            .await
-            .unwrap();
-        let done = start_run(&pool, "2026-10-22 17:05:07 -05:00")
-            .await
-            .unwrap();
-        finish_run(&pool, done, "2026-10-22 17:05:08 -05:00", "ok", "done")
+        let _stale = start_run(&pool, "2026-10-22 16:05:07-05:00").await.unwrap();
+        let done = start_run(&pool, "2026-10-22 17:05:07-05:00").await.unwrap();
+        finish_run(&pool, done, "2026-10-22 17:05:08-05:00", "ok", "done")
             .await
             .unwrap();
 
-        assert_eq!(interrupt_stale_runs(&pool).await.unwrap(), 1);
+        let now = timeutil::parse("2026-10-22 16:10:30-05:00").unwrap();
+        assert_eq!(interrupt_stale_runs(&pool, now).await.unwrap(), 1);
         let runs = recent_runs(&pool, 10).await.unwrap();
         assert_eq!(runs[0].outcome, "ok", "a finished run is left alone");
         assert_eq!(runs[1].outcome, "error");
-        assert!(runs[1].message.contains("Interrupted"));
         assert_eq!(
-            interrupt_stale_runs(&pool).await.unwrap(),
+            runs[1].message,
+            "Interrupted: FediFetcher stopped while this run was in progress (running for 0:05:23)",
+            "the message says how long the run had been going"
+        );
+        assert_eq!(
+            interrupt_stale_runs(&pool, now).await.unwrap(),
             0,
             "nothing left to mark"
         );

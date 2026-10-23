@@ -85,7 +85,7 @@ pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std
     // unless another process holds the lock and is running right now, in
     // which case the sweep is skipped and the row is left alone.
     if let Ok(guard) = lock(&config) {
-        if let Err(ex) = db::interrupt_stale_runs(&db).await {
+        if let Err(ex) = db::interrupt_stale_runs(&db, timeutil::now()).await {
             tracing::warn!("Could not mark interrupted runs: {ex}");
         }
         drop(guard);
