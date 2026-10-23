@@ -5,10 +5,11 @@
 #   sudo ./deploy.sh [REPO_URL] [BRANCH]
 #
 # What it does:
-#   1. Detects the package manager (Alpine/apk, Debian/apt, Fedora/dnf or yum)
-#      and installs git, a C/C++ toolchain, and cmake. The C++ compiler and
-#      cmake are needed by aws-lc-sys (rustls's crypto backend), not just the
-#      C compiler the README mentions for the bundled SQLite.
+#   1. Detects the package manager (Alpine/apk, Arch/pacman, Debian/apt,
+#      Fedora/dnf or yum) and installs git, a C/C++ toolchain, and cmake.
+#      The C++ compiler and cmake are needed by aws-lc-sys (rustls's crypto
+#      backend), not just the C compiler the README mentions for the
+#      bundled SQLite.
 #   2. Clones the repo into $INSTALL_DIR, or git fetch + reset if it is
 #      already a checkout, so re-running the script upgrades in place.
 #      Re-running is idempotent: packages, user, state, and service files
@@ -67,6 +68,8 @@ die()  { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
 PKG=
 if command -v apk >/dev/null 2>&1; then
     PKG=apk
+elif command -v pacman >/dev/null 2>&1; then
+    PKG=pacman
 elif command -v apt-get >/dev/null 2>&1; then
     PKG=apt
 elif command -v dnf >/dev/null 2>&1; then
@@ -74,7 +77,7 @@ elif command -v dnf >/dev/null 2>&1; then
 elif command -v yum >/dev/null 2>&1; then
     PKG=yum
 else
-    die "no supported package manager found (need apk, apt-get, dnf, or yum)"
+    die "no supported package manager found (need apk, pacman, apt-get, dnf, or yum)"
 fi
 OS_NAME=$(sed -n 's/^NAME="\?\([^"]*\)"\?/\1/p' /etc/os-release 2>/dev/null || true)
 log "detected package manager: $PKG${OS_NAME:+ ($OS_NAME)}"
@@ -83,6 +86,9 @@ step "installing build dependencies ($PKG)"
 case $PKG in
     apk)
         apk add --no-cache git gcc g++ musl-dev make cmake perl curl
+        ;;
+    pacman)
+        pacman -Sy --needed --noconfirm git base-devel cmake perl curl
         ;;
     apt)
         apt-get update

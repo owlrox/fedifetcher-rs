@@ -45,11 +45,24 @@ cargo test
 
 ## Deployment
 
-For a fresh server or LXC container — Alpine, Debian, or Fedora — `deploy.sh` does the whole setup: it detects the package manager, installs the build dependencies, fetches the source into `/opt/fedifetcher`, installs a Rust toolchain via rustup if the system one is older than the `rust-version` in `Cargo.toml`, builds with `cargo build --release --locked`, installs the binary to `/usr/local/bin/fedifetcher`, creates a `fedifetcher` system user, and sets up a service that runs the web UI (systemd where available, OpenRC on Alpine without systemd).
+For a fresh server or LXC container — Alpine, Arch, Debian, or Fedora — `deploy.sh` does the whole setup: it detects the package manager (apk, pacman, apt, or dnf/yum), installs the build dependencies, fetches the source into `/opt/fedifetcher`, installs a Rust toolchain via rustup if the system one is older than the `rust-version` in `Cargo.toml`, builds with `cargo build --release --locked`, installs the binary to `/usr/local/bin/fedifetcher`, creates a `fedifetcher` system user, and sets up a service that runs the web UI (systemd where available, OpenRC on Alpine without systemd).
 
 ```sh
 sudo ./deploy.sh <repo-url> [branch]   # branch defaults to main
 ```
+
+The script uses the distribution's own Rust toolchain when it is new enough and falls back to rustup when it is not. Distro Rust versions as of this writing:
+
+| Distribution | Rust shipped | Toolchain used |
+| --- | --- | --- |
+| Alpine Edge | 1.99.1+ | system |
+| Arch | 1.99.1+ | system |
+| Fedora Rawhide | 1.99.1+ | system |
+| openSUSE Tumbleweed | 1.99.0 | rustup |
+| Debian 13 | 1.85.1 | rustup |
+| Debian 14 | 1.97.1 | rustup |
+
+Stable Alpine and Fedora releases ship older Rust and get the rustup toolchain. Homebrew on macOS also ships a new-enough Rust for building from source.
 
 The database lands in `/var/lib/fedifetcher/artifacts` — back it up. The web UI listens on `127.0.0.1:8080` by default; override the listen address with `FEDIFETCHER_BIND`/`FEDIFETCHER_PORT`, the branch with `FEDIFETCHER_BRANCH`, and the init system with `FEDIFETCHER_INIT=systemd|openrc|none`. `./deploy.sh --help` lists every override. Re-running the script upgrades in place: it fetches, rebuilds, and reinstalls, and restarts the service only when the binary or its unit changed — a no-change run restarts nothing. After the first run, open `/config` in the web UI to set your server and access tokens, then press **Run**.
 
