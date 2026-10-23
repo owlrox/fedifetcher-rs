@@ -23,7 +23,7 @@ static POST_PATHS: LazyLock<Vec<Regex>> =
     LazyLock::new(|| vec![anchored(r"^https?://[^/]+/notes/(?P<name>[^/]+)")]);
 
 /// A Misskey note, which only has a URL of its own when it is a copy.
-pub fn to_post(raw: &Value, base: &str) -> Option<Post> {
+pub fn parse_post(raw: &Value, base: &str) -> Option<Post> {
     let note_id = raw.get("id").and_then(Value::as_str);
     let created_at = raw.get("createdAt").and_then(parse_date);
     let (Some(note_id), Some(created_at)) = (note_id, created_at) else {
@@ -31,12 +31,11 @@ pub fn to_post(raw: &Value, base: &str) -> Option<Post> {
         return None;
     };
 
-    let url =
-        non_empty_str(raw.get("url")).unwrap_or_else(|| format!("{base}/notes/{note_id}"));
+    let url = non_empty_str(raw.get("url")).unwrap_or_else(|| format!("{base}/notes/{note_id}"));
     let renote = raw
         .get("renote")
         .filter(|renote| !renote.is_null())
-        .and_then(|renote| to_post(renote, base));
+        .and_then(|renote| parse_post(renote, base));
 
     Some(Post {
         url: url.clone(),
@@ -48,7 +47,10 @@ pub fn to_post(raw: &Value, base: &str) -> Option<Post> {
             .map(|visibility| PUBLIC.contains(&visibility))
             .unwrap_or(false),
         reblog: renote.map(Box::new),
-        in_reply_to_id: raw.get("replyId").and_then(Value::as_str).map(str::to_string),
+        in_reply_to_id: raw
+            .get("replyId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         in_reply_to_account_id: None,
         reply_count: raw.get("repliesCount").and_then(Value::as_i64),
         account: None,
@@ -114,8 +116,16 @@ impl MisskeyApi {
                 async move {
                     match until_id {
                         Some(Some(id)) => {
-                            notes(&http, &base, &webserver, &user_id, &username, wanted, Some(&id))
-                                .await
+                            notes(
+                                &http,
+                                &base,
+                                &webserver,
+                                &user_id,
+                                &username,
+                                wanted,
+                                Some(&id),
+                            )
+                            .await
                         }
                         Some(None) => {
                             error!("Error getting posts for user {username}: note has no id");
@@ -132,7 +142,7 @@ impl MisskeyApi {
         )
         .await;
         let base = self.base.clone();
-        raw.map(|raw| usable(raw.iter().map(|note| to_post(note, &base))))
+        raw.map(|raw| usable(raw.iter().map(|note| parse_post(note, &base))))
     }
 
     async fn find_user_id(&self, username: &str) -> Option<String> {
@@ -140,10 +150,7 @@ impl MisskeyApi {
         // we could filter by host but there's no way to limit that to just the
         // main host on firefish currently; on misskey it works if you supply
         // '.' as the host but firefish does not
-        let url = format!(
-            "{}/api/users/search-by-username-and-host",
-            self.base
-        );
+        let url = format!("{}/api/users/search-by-username-and-host", self.base);
         let resp = match self
             .http
             .post(&url, &serde_json::json!({ "username": username }), None)
@@ -151,7 +158,10 @@ impl MisskeyApi {
         {
             Ok(resp) => resp,
             Err(ex) => {
-                error!("Error finding user {username} from {}. Exception: {ex}", self.webserver);
+                error!(
+                    "Error finding user {username} from {}. Exception: {ex}",
+                    self.webserver
+                );
                 return None;
             }
         };
@@ -167,7 +177,10 @@ impl MisskeyApi {
         let body = match resp.json() {
             Ok(body) => body,
             Err(ex) => {
-                error!("Error finding user {username} from {}. Exception: {ex}", self.webserver);
+                error!(
+                    "Error finding user {username} from {}. Exception: {ex}",
+                    self.webserver
+                );
                 return None;
             }
         };
@@ -298,7 +311,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn to_post_reads_a_note() {
+    fn parse_post_reads_a_note() {
         let raw = json!({
             "id": "9abc",
             "createdAt": "2026-10-22T01:23:45.123Z",
@@ -306,7 +319,7 @@ mod tests {
             "replyId": "8def",
             "repliesCount": 2,
         });
-        let post = to_post(&raw, "https://misskey.example").unwrap();
+        let post = parse_post(&raw, "https://misskey.example").unwrap();
         assert_eq!(post.url, "https://misskey.example/notes/9abc");
         assert_eq!(post.uri, "https://misskey.example/notes/9abc");
         assert!(post.is_public);
@@ -315,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn to_post_prefers_the_notes_own_url_and_reads_renotes() {
+    fn parse_post_prefers_the_notes_own_url_and_reads_renotes() {
         let raw = json!({
             "id": "1",
             "createdAt": "2026-10-22T01:23:45Z",
@@ -328,7 +341,7 @@ mod tests {
                 "visibility": "public",
             },
         });
-        let post = to_post(&raw, "https://misskey.example").unwrap();
+        let post = parse_post(&raw, "https://misskey.example").unwrap();
         assert_eq!(post.url, "https://elsewhere.example/notes/1");
         assert!(!post.is_public);
         assert!(post.is_boost());
@@ -337,9 +350,13 @@ mod tests {
     }
 
     #[test]
-    fn to_post_rejects_a_note_without_id_or_date() {
-        assert!(to_post(&json!({"createdAt": "2026-10-22T01:23:45Z"}), "https://misskey.example").is_none());
-        assert!(to_post(&json!({"id": "1"}), "https://misskey.example").is_none());
+    fn parse_post_rejects_a_note_without_id_or_date() {
+        assert!(parse_post(
+            &json!({"createdAt": "2026-10-22T01:23:45Z"}),
+            "https://misskey.example"
+        )
+        .is_none());
+        assert!(parse_post(&json!({"id": "1"}), "https://misskey.example").is_none());
     }
 
     #[tokio::test]

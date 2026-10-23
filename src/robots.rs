@@ -98,12 +98,10 @@ impl RobotFileParser {
                         }
                     }
                 }
-                "allow" => {
-                    if state != 0 {
-                        state = 2;
-                        if let Ok(rule) = RuleLine::new(value, true) {
-                            entry.rulelines.push(rule);
-                        }
+                "allow" if state != 0 => {
+                    state = 2;
+                    if let Ok(rule) = RuleLine::new(value, true) {
+                        entry.rulelines.push(rule);
                     }
                 }
                 // crawl-delay, request-rate and sitemap are parsed by the
@@ -158,6 +156,12 @@ impl RobotFileParser {
             None => true,
             Some(entry) => entry.allowance(&normalised),
         }
+    }
+}
+
+impl Default for RobotFileParser {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -262,10 +266,14 @@ impl Entry {
     /// Check if this entry applies to the specified agent.
     fn applies_to(&self, useragent: &str) -> bool {
         // split the name token and make it lower case
-        let useragent = useragent.split('/').next().unwrap_or_default().to_lowercase();
-        self.useragents.iter().any(|agent| {
-            agent != "*" && useragent.contains(&agent.to_lowercase())
-        })
+        let useragent = useragent
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .to_lowercase();
+        self.useragents
+            .iter()
+            .any(|agent| agent != "*" && useragent.contains(&agent.to_lowercase()))
     }
 
     fn allowance(&self, filename: &str) -> bool {
@@ -421,9 +429,7 @@ fn normalize(path: &str) -> String {
     let decoded = percent_decode(path);
     let mut out = String::new();
     for byte in decoded.bytes() {
-        if byte.is_ascii_alphanumeric()
-            || matches!(byte, b'_' | b'.' | b'-' | b'~' | b'/')
-        {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-' | b'~' | b'/') {
             out.push(byte as char);
         } else {
             out.push_str(&format!("%{byte:02X}"));

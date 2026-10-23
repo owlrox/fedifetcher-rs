@@ -5,7 +5,7 @@
 
 mod common;
 
-use fedifetcher::api::{Client, client_for, find_post};
+use fedifetcher::api::{client_for, find_post, Client};
 use fedifetcher::http::HttpClient;
 use fedifetcher::servers::{ApiFlavour, ServerInfo};
 use fedifetcher::state::ServerCache;
@@ -183,8 +183,8 @@ async fn a_url_with_no_host_is_not_looked_up() {
 #[test]
 fn a_post_ref_reads_back_as_server_and_id() {
     let post_ref = PostRef::new("example.social", "12345");
-    assert_eq!(post_ref.0, "example.social");
-    assert_eq!(post_ref.1, "12345");
+    assert_eq!(post_ref.server, "example.social");
+    assert_eq!(post_ref.post_id, "12345");
     assert_eq!(
         serde_json::to_string(&post_ref).unwrap(),
         r#"["example.social","12345"]"#

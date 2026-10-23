@@ -3,12 +3,12 @@
 
 mod common;
 
-use fedifetcher::backfill::{UserSet, get_user_posts};
+use fedifetcher::backfill::{user_posts, UserSet};
 use fedifetcher::http::HttpClient;
 use fedifetcher::store::State;
 use fedifetcher::users::User;
-use httpmock::Method;
 use httpmock::prelude::*;
+use httpmock::Method;
 
 #[tokio::test]
 async fn an_account_that_opted_out_is_logged_and_not_fetched() {
@@ -38,7 +38,7 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
-    let posts = get_user_posts(
+    let posts = user_posts(
         &user,
         UserSet::RecentlyCheckedUsers,
         "example.social",
@@ -58,7 +58,10 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
         .lines()
         .find(|line| line.contains("opted out"))
         .unwrap_or_else(|| panic!("the skip should be logged, got:\n{logged}"));
-    assert!(line.contains("bot"), "the log line names the account: {line}");
+    assert!(
+        line.contains("bot"),
+        "the log line names the account: {line}"
+    );
     assert!(
         line.contains("its profile asks not to be crawled (nobot)"),
         "the log line gives the reason: {line}"
@@ -82,7 +85,7 @@ async fn an_account_that_opted_out_is_fetched_when_the_rule_is_off() {
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
-    let posts = get_user_posts(
+    let posts = user_posts(
         &user,
         UserSet::RecentlyCheckedUsers,
         "example.social",
@@ -139,7 +142,7 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
     let logs = common::LogCapture::new();
     let guard = logs.install();
     // two runs over the same database
-    let first = get_user_posts(
+    let first = user_posts(
         &user,
         UserSet::RecentlyCheckedUsers,
         "example.social",
@@ -149,7 +152,7 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
         &db,
     )
     .await;
-    let second = get_user_posts(
+    let second = user_posts(
         &user,
         UserSet::RecentlyCheckedUsers,
         "example.social",
@@ -161,8 +164,15 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
     .await;
     drop(guard);
 
-    assert!(first.is_none() && second.is_none(), "both runs skip the account");
-    assert_eq!(nodeinfo.hits(), 0, "no run fetches the account's server info");
+    assert!(
+        first.is_none() && second.is_none(),
+        "both runs skip the account"
+    );
+    assert_eq!(
+        nodeinfo.hits(),
+        0,
+        "no run fetches the account's server info"
+    );
     assert_eq!(robots.hits(), 0, "no run fetches the account's robots.txt");
 
     let logged = logs.text();
@@ -178,7 +188,9 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
     assert!(skip_lines[0].contains("bot"), "the line names the account");
 
     assert_eq!(
-        fedifetcher::db::opted_out_account_reason(&db, "bot").await.unwrap(),
+        fedifetcher::db::opted_out_account_reason(&db, "bot")
+            .await
+            .unwrap(),
         Some("it is not indexable".to_string()),
         "the account is recorded with its reason"
     );

@@ -2,7 +2,7 @@
 
 mod common;
 
-use fedifetcher::run::{CancelToken, run_once};
+use fedifetcher::run::{run_once, CancelToken};
 use fedifetcher::timeutil;
 use httpmock::prelude::*;
 use httpmock::Method;
@@ -15,13 +15,9 @@ async fn a_run_with_nothing_enabled_still_succeeds() {
 
     let message = run_once(config, CancelToken::new(), &db)
         .await
-        .ok()
         .expect("a run with nothing enabled should succeed");
 
-    assert!(
-        message.starts_with("Processing finished in "),
-        "{message}"
-    );
+    assert!(message.starts_with("Processing finished in "), "{message}");
     let tables = fedifetcher::db::list_tables(&db).await.unwrap();
     assert!(
         tables.contains(&"seen_urls".to_string()),
@@ -40,7 +36,9 @@ async fn a_held_lock_stops_the_run() {
     let dir = common::tmp_dir();
     let fail = server
         .mock_async(|when, then| {
-            when.method(Method::GET).path("/fail").query_param_exists("rid");
+            when.method(Method::GET)
+                .path("/fail")
+                .query_param_exists("rid");
             then.status(200);
         })
         .await;
@@ -60,14 +58,10 @@ async fn a_held_lock_stops_the_run() {
 
     let err = run_once(config, CancelToken::new(), &db)
         .await
-        .err()
-        .expect("a held lock must stop the run");
+        .expect_err("a held lock must stop the run");
 
     assert!(err.to_string().contains("Lock file age"), "{err}");
-    assert!(
-        err.to_string().contains("held by process"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("held by process"), "{err}");
     assert!(
         dir.join("lock.lock").exists(),
         "the foreign lock is not ours to remove"
@@ -90,13 +84,9 @@ async fn a_legacy_lock_without_a_recorded_process_is_reclaimed() {
 
     let message = run_once(config, CancelToken::new(), &db)
         .await
-        .ok()
         .expect("a lock that names no live process must not block the run");
 
-    assert!(
-        message.starts_with("Processing finished in "),
-        "{message}"
-    );
+    assert!(message.starts_with("Processing finished in "), "{message}");
     assert!(
         !dir.join("lock.lock").exists(),
         "the lock should be released"
@@ -109,7 +99,9 @@ async fn a_run_fires_the_lifecycle_callbacks() {
     let dir = common::tmp_dir();
     let start = server
         .mock_async(|when, then| {
-            when.method(Method::GET).path("/start").query_param_exists("rid");
+            when.method(Method::GET)
+                .path("/start")
+                .query_param_exists("rid");
             then.status(200);
         })
         .await;
@@ -130,7 +122,6 @@ async fn a_run_fires_the_lifecycle_callbacks() {
 
     let message = run_once(config, CancelToken::new(), &db)
         .await
-        .ok()
         .expect("the run should succeed");
 
     assert!(message.starts_with("Processing finished in "), "{message}");
@@ -163,13 +154,9 @@ async fn a_lock_held_by_a_dead_process_is_reclaimed() {
 
     let message = run_once(config, CancelToken::new(), &db)
         .await
-        .ok()
         .expect("a dead holder's lock must not block the run");
 
-    assert!(
-        message.starts_with("Processing finished in "),
-        "{message}"
-    );
+    assert!(message.starts_with("Processing finished in "), "{message}");
     assert!(
         !dir.join("lock.lock").exists(),
         "the lock should be released"
@@ -190,7 +177,6 @@ async fn a_cancelled_run_stops_before_doing_anything() {
 
     let message = run_once(config, cancel, &db)
         .await
-        .ok()
         .expect("a stopped run is not a failure");
 
     assert_eq!(message, "Stopped.");

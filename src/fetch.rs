@@ -7,14 +7,14 @@ use sqlx::SqlitePool;
 use tracing::{error, info, warn};
 
 use crate::api::mastodon::HomeServer;
-use crate::backfill::{UserSet, add_user_posts};
+use crate::backfill::{add_user_posts, UserSet};
 use crate::config::Config;
-use crate::context::{add_context_urls, get_all_known_context_urls};
+use crate::context::{add_context_urls, known_context_urls};
 use crate::db;
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::CancelToken;
-use crate::servers::{ApiFlavour, ServerInfo, get_server_info};
+use crate::servers::{server_info, ApiFlavour, ServerInfo};
 use crate::store::State;
 use crate::timeutil;
 use crate::users::User;
@@ -49,7 +49,12 @@ pub async fn force_post_context(
         .as_ref()
         .and_then(|row| row.created_at.as_deref())
         .and_then(timeutil::parse)
-        .or_else(|| state.recently_checked_context.get(uri).map(|entry| entry.created_at))
+        .or_else(|| {
+            state
+                .recently_checked_context
+                .get(uri)
+                .map(|entry| entry.created_at)
+        })
         .unwrap_or_else(timeutil::now);
     let replies_count = known.as_ref().and_then(|row| row.replies_count);
 
@@ -82,7 +87,7 @@ pub async fn force_post_context(
     }
 
     // then its context, ignoring how recently it was last checked
-    let context_urls = get_all_known_context_urls(
+    let context_urls = known_context_urls(
         &config.server,
         std::slice::from_ref(&post),
         http,
@@ -98,6 +103,7 @@ pub async fn force_post_context(
 
 /// Backfill one account's posts now, even when it is already known. `acct`
 /// is `name@host`; a local account has nothing to backfill.
+#[allow(clippy::too_many_arguments)]
 pub async fn force_user_posts(
     config: &Config,
     home: &HomeServer,
@@ -129,12 +135,23 @@ pub async fn force_user_posts(
 
     // the profile URL shape the account's server reads, so its client can
     // parse the name out of it
-    let Some(server) = get_server_info(host, &mut state.seen_hosts, http).await else {
+    let Some(server) = server_info(host, &mut state.seen_hosts, http).await else {
         error!("Manual fetch: server info for {host} is unavailable; cannot backfill {acct}");
         return;
     };
     let user = User::new(acct, profile_url_for(&server, host, name));
-    add_user_posts(home, vec![user], target, http, config, cancel, state, db, true).await;
+    add_user_posts(
+        home,
+        vec![user],
+        target,
+        http,
+        config,
+        cancel,
+        state,
+        db,
+        true,
+    )
+    .await;
 }
 
 /// The profile URL for `name` on `host`, in the shape the server's own API
@@ -164,8 +181,11 @@ pub async fn force_host_info(host: &str, http: &HttpClient, state: &mut State) {
     info!("Manual fetch: re-checking server info for {host}");
     // forget the cached copy, so the lookup runs again
     state.seen_hosts.remove(host);
-    match get_server_info(host, &mut state.seen_hosts, http).await {
-        Some(info) => info!("Manual fetch: {host} runs {} {}", info.software, info.version),
+    match server_info(host, &mut state.seen_hosts, http).await {
+        Some(info) => info!(
+            "Manual fetch: {host} runs {} {}",
+            info.software, info.version
+        ),
         None => {
             let reason = state
                 .seen_hosts

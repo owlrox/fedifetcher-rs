@@ -6,12 +6,12 @@ use tracing::{debug, error, info, warn};
 use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
 use crate::config::Config;
-use crate::context::{add_context_urls, get_all_known_context_urls, toot_context_can_be_fetched};
+use crate::context::{add_context_urls, context_fetchable, known_context_urls};
 use crate::db::mark_opted_out_account;
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::CancelToken;
-use crate::servers::get_server_info;
+use crate::servers::server_info;
 use crate::state::TimestampedSet;
 use crate::store::State;
 use crate::urls::host_of;
@@ -58,7 +58,7 @@ pub fn opt_out_reason(user: &User) -> Option<&'static str> {
     None
 }
 
-pub async fn get_user_posts(
+pub async fn user_posts(
     user: &User,
     target: UserSet,
     server: &str,
@@ -81,9 +81,15 @@ pub async fn get_user_posts(
                 }
             };
             if first_seen {
-                info!("Skipping {}: the account has opted out ({reason})", user.acct);
+                info!(
+                    "Skipping {}: the account has opted out ({reason})",
+                    user.acct
+                );
             } else {
-                debug!("Skipping {}: the account has opted out ({reason})", user.acct);
+                debug!(
+                    "Skipping {}: the account has opted out ({reason})",
+                    user.acct
+                );
             }
             return None;
         }
@@ -101,14 +107,12 @@ pub async fn get_user_posts(
         return None;
     }
 
-    let Some(post_server) = get_server_info(&host, &mut state.seen_hosts, http).await else {
+    let Some(post_server) = server_info(&host, &mut state.seen_hosts, http).await else {
         error!("server {host} not found for post");
         return None;
     };
 
-    let Some(client) = client_for(&post_server, http) else {
-        return None;
-    };
+    let client = client_for(&post_server, http)?;
 
     // the server has told us what it runs, so only its own URL shapes are tried
     let Some(username) = client.username_from(&user.url) else {
@@ -135,16 +139,21 @@ pub async fn add_post_with_context(
         state.seen_urls.add(&post.url, None);
         if post.may_have_context() && config.backfill_with_context {
             // a private post is skipped before its URL is even resolved
-            if !toot_context_can_be_fetched(post, db).await {
+            if !context_fetchable(post, db).await {
                 return true;
             }
-            if find_post(&post.url, &mut state.parsed_urls, &mut state.seen_hosts, http)
-                .await
-                .is_none()
+            if find_post(
+                &post.url,
+                &mut state.parsed_urls,
+                &mut state.seen_hosts,
+                http,
+            )
+            .await
+            .is_none()
             {
                 return true;
             }
-            let known_context_urls = get_all_known_context_urls(
+            let known_context_urls = known_context_urls(
                 &home.server,
                 std::slice::from_ref(post),
                 http,
@@ -165,6 +174,7 @@ pub async fn add_post_with_context(
 
 /// Add the posts of the given accounts. `force` fetches an account even
 /// when it is already known — a run passes false, a manual fetch true.
+#[allow(clippy::too_many_arguments)]
 pub async fn add_user_posts(
     home: &HomeServer,
     followings: Vec<User>,
@@ -184,7 +194,7 @@ pub async fn add_user_posts(
         if (!state.all_known_users.contains(&user.acct) || force)
             && !user.url.starts_with(&format!("https://{home_server}/"))
         {
-            let posts = get_user_posts(&user, target, &home_server, http, config, state, db).await;
+            let posts = user_posts(&user, target, &home_server, http, config, state, db).await;
 
             if let Some(posts) = posts {
                 let mut count = 0;
@@ -257,7 +267,10 @@ mod tests {
 
         let mut not_indexable = user("a", "");
         not_indexable.indexable = false;
-        assert_eq!(opt_out_reason(&not_indexable).unwrap(), "it is not indexable");
+        assert_eq!(
+            opt_out_reason(&not_indexable).unwrap(),
+            "it is not indexable"
+        );
 
         let mut not_discoverable = user("a", "");
         not_discoverable.discoverable = false;

@@ -1,7 +1,7 @@
 //! One run of FediFetcher: the lock, the state, and the tasks.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -11,9 +11,9 @@ use uuid::Uuid;
 use crate::api::mastodon::HomeServer;
 use crate::config::Config;
 use crate::error::Result;
-use crate::http::{HttpClient, build_callback_url};
-use crate::store::{ROBOTS_MAX_AGE, Session, StateStore, lock};
-use crate::tasks::{Context, run_enabled_tasks};
+use crate::http::{build_callback_url, HttpClient};
+use crate::store::{lock, Session, StateStore, ROBOTS_MAX_AGE};
+use crate::tasks::{run_enabled_tasks, Context};
 use crate::timeutil;
 use crate::VERSION;
 

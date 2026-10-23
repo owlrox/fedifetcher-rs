@@ -7,11 +7,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
-use crate::db::{self, TriggerPost, is_private_post, mark_private_post};
+use crate::db::{self, is_private_post, mark_private_post, TriggerPost};
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::CancelToken;
-use crate::servers::get_server_info;
+use crate::servers::server_info;
 use crate::store::{RepliedToot, State};
 use crate::timeutil;
 
@@ -30,12 +30,15 @@ const KNOWN_CONTEXT_RECHECK: Duration = Duration::days(1);
 /// A post recorded by an earlier run is skipped outright, whatever this
 /// run's copy of it says. Both skips are silent at the default log level;
 /// at DEBUG each one leaves a line.
-pub async fn toot_context_can_be_fetched(toot: &Post, db: &SqlitePool) -> bool {
+pub async fn context_fetchable(toot: &Post, db: &SqlitePool) -> bool {
     if !toot.is_public {
         match mark_private_post(db, &toot.uri).await {
             Ok(true) => debug!("Cannot fetch context of private toot {}", toot.uri),
             Ok(false) => {
-                debug!("Skipping private toot {}: already recorded as private", toot.uri)
+                debug!(
+                    "Skipping private toot {}: already recorded as private",
+                    toot.uri
+                )
             }
             Err(ex) => warn!("Could not record private toot {}: {ex}", toot.uri),
         }
@@ -66,7 +69,8 @@ pub async fn toot_context_can_be_fetched(toot: &Post, db: &SqlitePool) -> bool {
 /// The toots given are recorded as trigger posts under `source`, so the data
 /// page can show what a run scanned — and fetch one post's context again on
 /// demand. `force` skips the recency check, for a manual fetch.
-pub async fn get_all_known_context_urls(
+#[allow(clippy::too_many_arguments)]
+pub async fn known_context_urls(
     server: &str,
     reply_toots: &[Post],
     http: &HttpClient,
@@ -95,26 +99,29 @@ pub async fn get_all_known_context_urls(
         // a private toot is skipped before its URL is even resolved: its
         // context can never be fetched, and remembering it saves later runs
         // the ask
-        if !toot_context_can_be_fetched(toot, db).await {
+        if !context_fetchable(toot, db).await {
             scan.private += 1;
             continue;
         }
         // a boost is only ever a pointer: the replies are on the original
         let url = toot.original().url.clone();
-        let Some(parsed_url) = find_post(&url, &mut state.parsed_urls, &mut state.seen_hosts, http).await
+        let Some(parsed_url) =
+            find_post(&url, &mut state.parsed_urls, &mut state.seen_hosts, http).await
         else {
             scan.unresolved += 1;
             continue;
         };
-        if force || state
-            .recently_checked_context
-            .should_fetch(&toot.uri, toot.created_at)
+        if force
+            || state
+                .recently_checked_context
+                .should_fetch(&toot.uri, toot.created_at)
         {
             state
                 .recently_checked_context
                 .mark_fetched(&toot.uri, toot.created_at);
             scan.fetched += 1;
-            let context = get_toot_context(&parsed_url.0, &parsed_url.1, &url, http, state).await;
+            let context =
+                toot_context_urls(&parsed_url.server, &parsed_url.post_id, &url, http, state).await;
             for item in context {
                 known_context_urls.insert(item);
             }
@@ -224,7 +231,11 @@ fn known_context_found_line(
     let found = if urls.is_empty() {
         "Found 0 known context toots".to_string()
     } else {
-        format!("Found {} known context toots: {}", urls.len(), urls.join(", "))
+        format!(
+            "Found {} known context toots: {}",
+            urls.len(),
+            urls.join(", ")
+        )
     };
     let mut parts = vec![format!(
         "from {} toots: {} private, {} unresolved, {} already checked recently, {} fetched",
@@ -242,7 +253,7 @@ fn known_context_found_line(
 }
 
 /// Get the server and ID of the toots the given toots replied to.
-pub async fn get_all_replied_toot_server_ids(
+pub async fn replied_toot_server_ids(
     server: &str,
     reply_toots: &[Post],
     http: &HttpClient,
@@ -254,7 +265,7 @@ pub async fn get_all_replied_toot_server_ids(
         if cancel.is_cancelled() {
             break;
         }
-        if let Some(entry) = get_replied_toot_server_id(server, toot, http, state).await {
+        if let Some(entry) = replied_toot_server_id(server, toot, http, state).await {
             replied.push(entry);
         }
     }
@@ -262,7 +273,7 @@ pub async fn get_all_replied_toot_server_ids(
 }
 
 /// Get the server and ID of the toot the given toot replied to.
-pub async fn get_replied_toot_server_id(
+pub async fn replied_toot_server_id(
     server: &str,
     toot: &Post,
     http: &HttpClient,
@@ -290,8 +301,10 @@ pub async fn get_replied_toot_server_id(
 
     match find_post(&url, &mut state.parsed_urls, &mut state.seen_hosts, http).await {
         Some(post_ref) => {
-            let entry = RepliedToot(url, post_ref);
-            state.replied_toot_server_ids.insert(o_url, Some(entry.clone()));
+            let entry = RepliedToot { url, post_ref };
+            state
+                .replied_toot_server_ids
+                .insert(o_url, Some(entry.clone()));
             Some(entry)
         }
         None => {
@@ -303,7 +316,7 @@ pub async fn get_replied_toot_server_id(
 }
 
 /// Get the URLs of the context toots of the given toots.
-pub async fn get_all_context_urls(
+pub async fn context_urls(
     server: &str,
     replied_toot_ids: Vec<RepliedToot>,
     http: &HttpClient,
@@ -318,8 +331,9 @@ pub async fn get_all_context_urls(
         if cancel.is_cancelled() {
             break;
         }
-        let RepliedToot(url, post_ref) = entry;
-        let context = get_toot_context(&post_ref.0, &post_ref.1, &url, http, state).await;
+        let RepliedToot { url, post_ref } = entry;
+        let context =
+            toot_context_urls(&post_ref.server, &post_ref.post_id, &url, http, state).await;
         for context_url in context {
             if !context_url.starts_with(&prefix) {
                 urls.push(context_url);
@@ -330,14 +344,14 @@ pub async fn get_all_context_urls(
 }
 
 /// Get the URLs of the context toots of the given toot.
-pub async fn get_toot_context(
+pub async fn toot_context_urls(
     server: &str,
     toot_id: &str,
     toot_url: &str,
     http: &HttpClient,
     state: &mut State,
 ) -> Vec<String> {
-    let Some(post_server) = get_server_info(server, &mut state.seen_hosts, http).await else {
+    let Some(post_server) = server_info(server, &mut state.seen_hosts, http).await else {
         error!("server {server} not found for post");
         return Vec::new();
     };
@@ -475,10 +489,7 @@ mod tests {
         let stale = timeutil::fmt_state_ts(timeutil::now() - Duration::days(2));
         let (to_handle, new, known) =
             partition_known_context(&found, vec![Some(stale)], timeutil::now());
-        assert_eq!(
-            to_handle, found,
-            "last seen beyond the re-check interval"
-        );
+        assert_eq!(to_handle, found, "last seen beyond the re-check interval");
         assert_eq!((new, known), (0, 1));
 
         // an unreadable timestamp is handled again rather than trusted

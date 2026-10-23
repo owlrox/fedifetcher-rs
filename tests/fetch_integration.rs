@@ -6,7 +6,7 @@ mod common;
 
 use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::backfill::UserSet;
-use fedifetcher::context::get_all_known_context_urls;
+use fedifetcher::context::known_context_urls;
 use fedifetcher::db::{self, TriggerPost};
 use fedifetcher::fetch;
 use fedifetcher::http::HttpClient;
@@ -16,8 +16,8 @@ use fedifetcher::servers::ServerInfo;
 use fedifetcher::store::State;
 use fedifetcher::timeutil;
 use fedifetcher::users::User;
-use httpmock::Method;
 use httpmock::prelude::*;
+use httpmock::Method;
 
 /// The mock server's host, without the scheme.
 fn host(server: &MockServer) -> String {
@@ -58,7 +58,7 @@ async fn a_scan_records_its_trigger_posts() {
 
     let private = post(&format!("{UNREACHABLE}/@alice/10"), false);
     let public = post(&format!("{UNREACHABLE}/@alice/11"), true);
-    let urls = get_all_known_context_urls(
+    let urls = known_context_urls(
         "home.example",
         &[private.clone(), public.clone()],
         &http,
@@ -70,7 +70,10 @@ async fn a_scan_records_its_trigger_posts() {
     )
     .await;
 
-    assert!(urls.is_empty(), "no context: neither post's server is reachable");
+    assert!(
+        urls.is_empty(),
+        "no context: neither post's server is reachable"
+    );
     for toot in [&private, &public] {
         let recorded = db::trigger_post(&db, &toot.uri)
             .await
@@ -125,7 +128,10 @@ async fn force_post_context_resolves_the_post_and_records_it() {
         1,
         "the post itself is resolved on our server"
     );
-    assert!(state.seen_urls.contains(&uri), "the resolved post is remembered");
+    assert!(
+        state.seen_urls.contains(&uri),
+        "the resolved post is remembered"
+    );
     let recorded = db::trigger_post(&db, &uri)
         .await
         .unwrap()
@@ -168,7 +174,11 @@ async fn force_post_context_skips_a_post_recorded_as_private() {
     drop(guard);
 
     assert_eq!(search.hits(), 0, "a private post is not even resolved");
-    assert!(logs.text().contains("recorded as private"), "{}", logs.text());
+    assert!(
+        logs.text().contains("recorded as private"),
+        "{}",
+        logs.text()
+    );
     assert!(state.seen_urls.is_empty());
 }
 
@@ -221,7 +231,11 @@ async fn force_user_posts_refuses_an_opted_out_account() {
         0,
         "nothing is fetched for an opted-out account"
     );
-    assert_eq!(robots.hits(), 0, "nothing is fetched for an opted-out account");
+    assert_eq!(
+        robots.hits(),
+        0,
+        "nothing is fetched for an opted-out account"
+    );
     assert!(logs.text().contains("opted out"), "{}", logs.text());
     assert!(logs.text().contains("bot@remote.example"));
 }
@@ -313,9 +327,12 @@ async fn force_host_info_replaces_the_cached_entry() {
         "software": {"name": "mastodon", "version": "4.3.0"},
         "protocols": ["activitypub"],
     });
-    state
-        .seen_hosts
-        .add(host, ServerInfo::from_nodeinfo(host, &nodeinfo).unwrap().to_state());
+    state.seen_hosts.add(
+        host,
+        ServerInfo::from_nodeinfo(host, &nodeinfo)
+            .unwrap()
+            .to_state(),
+    );
     assert!(state.seen_hosts.contains(host));
 
     let logs = common::LogCapture::new();
@@ -327,10 +344,17 @@ async fn force_host_info_replaces_the_cached_entry() {
     let entry = state.seen_hosts.get(host).expect("the lookup is recorded");
     assert_eq!(entry.get("info"), Some(&serde_json::Value::Null));
     assert!(
-        entry.get("error").and_then(serde_json::Value::as_str).is_some(),
+        entry
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
         "the failure's reason is kept: {entry}"
     );
-    assert!(logs.text().contains("could not re-check"), "{}", logs.text());
+    assert!(
+        logs.text().contains("could not re-check"),
+        "{}",
+        logs.text()
+    );
 }
 
 /// The trigger-post record a scan writes round-trips through the database.
@@ -343,7 +367,7 @@ async fn trigger_posts_round_trip_through_the_scan() {
     let mut state = State::default();
 
     let toot = post(&format!("{UNREACHABLE}/@alice/10"), true);
-    get_all_known_context_urls(
+    known_context_urls(
         "home.example",
         std::slice::from_ref(&toot),
         &http,

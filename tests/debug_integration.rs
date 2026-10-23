@@ -69,10 +69,7 @@ async fn a_rejected_token_is_reported_with_a_masked_hint() {
 
     let message = err.to_string();
     assert!(message.contains("Status code: 401"), "{message}");
-    assert!(
-        message.contains("access token is incorrect"),
-        "{message}"
-    );
+    assert!(message.contains("access token is incorrect"), "{message}");
     assert!(message.contains("sekre"), "the masked hint: {message}");
     assert!(
         !message.contains("sekret-token"),
@@ -97,10 +94,14 @@ async fn a_user_lookup_returns_the_account() {
     let dir = common::tmp_dir();
     let http = client(&dir).await;
 
-    let account =
-        lookup_account(&server.base_url(), "@someone@example.social", "sekret-token", &http)
-            .await
-            .unwrap();
+    let account = lookup_account(
+        &server.base_url(),
+        "@someone@example.social",
+        "sekret-token",
+        &http,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(account["id"], "42");
     assert_eq!(account["display_name"], "Someone");

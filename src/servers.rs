@@ -143,7 +143,10 @@ impl ServerInfo {
 
     pub fn to_state(&self) -> Value {
         let mut state = Map::new();
-        state.insert("webserver".to_string(), Value::String(self.webserver.clone()));
+        state.insert(
+            "webserver".to_string(),
+            Value::String(self.webserver.clone()),
+        );
         state.insert("software".to_string(), Value::String(self.software.clone()));
         state.insert("version".to_string(), Value::String(self.version.clone()));
         state.insert("rawnodeinfo".to_string(), self.raw.clone());
@@ -200,7 +203,10 @@ impl ServerInfo {
                 .to_string(),
             apis,
             last_checked,
-            raw: object.get("rawnodeinfo").cloned().unwrap_or(Value::Object(Map::new())),
+            raw: object
+                .get("rawnodeinfo")
+                .cloned()
+                .unwrap_or(Value::Object(Map::new())),
         })
     }
 }
@@ -322,7 +328,7 @@ fn cached_failure_reason(cache: &ServerCache, server: &str) -> Option<String> {
 
 /// Look a server up, remembering both successes and failures. A failure is
 /// remembered with the reason it failed.
-pub async fn get_server_info(
+pub async fn server_info(
     server: &str,
     cache: &mut ServerCache,
     http: &HttpClient,
@@ -331,7 +337,7 @@ pub async fn get_server_info(
         return ServerInfo::from_state(cache.get(server).expect("checked contains"));
     }
 
-    match get_nodeinfo(server, cache, false, http).await {
+    match nodeinfo(server, cache, false, http).await {
         Ok(info) => {
             cache.add(server, info.to_state());
             if server != info.webserver {
@@ -348,7 +354,7 @@ pub async fn get_server_info(
 
 /// Fetch a server's nodeinfo. The error is the same message the log prints,
 /// so a failure is reported with its reason wherever it is next needed.
-pub async fn get_nodeinfo(
+pub async fn nodeinfo(
     server: &str,
     cache: &mut ServerCache,
     host_meta_fallback: bool,
@@ -359,7 +365,9 @@ pub async fn get_nodeinfo(
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting host node info for {server}. Exception: {ex}");
-            return Err(format!("Error getting host node info for {server}. Exception: {ex}"));
+            return Err(format!(
+                "Error getting host node info for {server}. Exception: {ex}"
+            ));
         }
     };
 
@@ -368,7 +376,7 @@ pub async fn get_nodeinfo(
     // than the web domain
     if resp.status != 200 && !host_meta_fallback {
         debug!("nodeinfo for {server} not found, checking host-meta");
-        let Some(new_server) = get_server_from_host_meta(server, http).await else {
+        let Some(new_server) = server_from_host_meta(server, http).await else {
             return Err(format!(
                 "no nodeinfo found for {server} (well-known returned {})",
                 resp.status
@@ -380,7 +388,7 @@ pub async fn get_nodeinfo(
                 "host-meta for {server} did not identify a different web server"
             ));
         }
-        return Box::pin(get_nodeinfo(&new_server, cache, true, http)).await;
+        return Box::pin(nodeinfo(&new_server, cache, true, http)).await;
     }
 
     if resp.status != 200 {
@@ -441,7 +449,9 @@ pub async fn get_nodeinfo(
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting host node info for {server}. Exception: {ex}");
-            return Err(format!("Error getting host node info for {server}. Exception: {ex}"));
+            return Err(format!(
+                "Error getting host node info for {server}. Exception: {ex}"
+            ));
         }
     };
 
@@ -472,7 +482,9 @@ pub async fn get_nodeinfo(
         .unwrap_or(false)
     {
         warn!("server {server} does not support activitypub, skipping");
-        return Err(format!("server {server} does not support activitypub, skipping"));
+        return Err(format!(
+            "server {server} does not support activitypub, skipping"
+        ));
     }
 
     match ServerInfo::from_nodeinfo(&server, &nodeinfo) {
@@ -486,12 +498,19 @@ pub async fn get_nodeinfo(
     }
 }
 
-fn extract_node_location(resp: &crate::http::Response) -> Result<Option<String>, crate::error::Error> {
+fn extract_node_location(
+    resp: &crate::http::Response,
+) -> Result<Option<String>, crate::error::Error> {
     let body = resp.json()?;
     let mut node_location = None;
     if let Some(links) = body.get("links").and_then(Value::as_array) {
         for link in links {
-            if link.get("rel").and_then(Value::as_str).map(|rel| NODEINFO_SCHEMAS.contains(&rel)) == Some(true) {
+            if link
+                .get("rel")
+                .and_then(Value::as_str)
+                .map(|rel| NODEINFO_SCHEMAS.contains(&rel))
+                == Some(true)
+            {
                 node_location = link.get("href").and_then(Value::as_str).map(str::to_string);
                 break;
             }
@@ -500,7 +519,7 @@ fn extract_node_location(resp: &crate::http::Response) -> Result<Option<String>,
     Ok(node_location)
 }
 
-pub async fn get_server_from_host_meta(server: &str, http: &HttpClient) -> Option<String> {
+pub async fn server_from_host_meta(server: &str, http: &HttpClient) -> Option<String> {
     let url = format!("https://{server}/.well-known/host-meta");
     let resp = match http.get(&url, Some(Duration::from_secs(30))).await {
         Ok(resp) => resp,
@@ -528,8 +547,8 @@ pub async fn get_server_from_host_meta(server: &str, http: &HttpClient) -> Optio
 }
 
 fn parse_host_meta(text: &str, server: &str) -> Result<String, crate::error::Error> {
-    let document = roxmltree::Document::parse(text)
-        .map_err(|ex| crate::error::Error(format!("{ex}")))?;
+    let document =
+        roxmltree::Document::parse(text).map_err(|ex| crate::error::Error(format!("{ex}")))?;
     let lrdd = document
         .descendants()
         .filter(|node| node.is_element())
@@ -637,7 +656,10 @@ mod tests {
     fn failed_lookup_state_reads_as_none_and_keeps_the_reason() {
         let state = failed_lookup_state("prohibited by robots.txt");
         assert!(ServerInfo::from_state(&state).is_none());
-        assert_eq!(state["error"], serde_json::json!("prohibited by robots.txt"));
+        assert_eq!(
+            state["error"],
+            serde_json::json!("prohibited by robots.txt")
+        );
         assert!(ServerInfo::from_state(&serde_json::json!({"foo": 1})).is_none());
     }
 
@@ -681,7 +703,10 @@ mod tests {
         assert!(row.last_checked.is_some());
 
         let back = row.to_state_value();
-        assert!(ServerInfo::from_state(&back).is_none(), "still a failed lookup");
+        assert!(
+            ServerInfo::from_state(&back).is_none(),
+            "still a failed lookup"
+        );
         assert_eq!(back["error"], serde_json::json!("prohibited by robots.txt"));
         // the failure keeps no api support keys, so expiry drops it as before
         assert!(back.get("peertubeApiSupport").is_none());

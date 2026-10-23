@@ -45,8 +45,7 @@ static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 
 // Pleroma and Mitra also address a post by an opaque object id, and only the
 // redirect it serves says which notice that object is.
-static OBJECT_PATH: LazyLock<Regex> =
-    LazyLock::new(|| anchored(r"^https?://[^/]+/objects/[^/]+"));
+static OBJECT_PATH: LazyLock<Regex> = LazyLock::new(|| anchored(r"^https?://[^/]+/objects/[^/]+"));
 
 static REDIRECTED_OBJECT_PATH: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
@@ -72,17 +71,16 @@ static PROFILE_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 
 /// A status from the Mastodon API, which our own server also speaks.
-pub fn to_post(raw: &Value) -> Option<Post> {
+pub fn parse_post(raw: &Value) -> Option<Post> {
     // every non-boost status carries "reblog": null, which is not a post
     let boosted = raw
         .get("reblog")
         .filter(|reblog| !reblog.is_null())
-        .and_then(to_post);
+        .and_then(parse_post);
 
     // a boost is an empty wrapper: the server gives it no URL of its own, and
     // the post worth reading is the one it carries
-    let url = non_empty_str(raw.get("url"))
-        .or_else(|| boosted.as_ref().map(|b| b.url.clone()));
+    let url = non_empty_str(raw.get("url")).or_else(|| boosted.as_ref().map(|b| b.url.clone()));
     let created_at = raw
         .get("created_at")
         .and_then(parse_date)
@@ -102,24 +100,27 @@ pub fn to_post(raw: &Value) -> Option<Post> {
             .map(|v| PUBLIC.contains(&v))
             .unwrap_or(false),
         reblog: boosted.map(Box::new),
-        in_reply_to_id: raw.get("in_reply_to_id").and_then(Value::as_str).map(str::to_string),
+        in_reply_to_id: raw
+            .get("in_reply_to_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         in_reply_to_account_id: raw
             .get("in_reply_to_account_id")
             .and_then(Value::as_str)
             .map(str::to_string),
         reply_count: raw.get("replies_count").and_then(Value::as_i64),
-        account: raw.get("account").and_then(to_user),
+        account: raw.get("account").and_then(parse_user),
         mentions: usable(
             raw.get("mentions")
                 .and_then(Value::as_array)
-                .map(|mentions| mentions.iter().map(to_user).collect::<Vec<_>>())
+                .map(|mentions| mentions.iter().map(parse_user).collect::<Vec<_>>())
                 .unwrap_or_default(),
         ),
     })
 }
 
 /// An account, either listed by our server or named by one of its posts.
-pub fn to_user(raw: &Value) -> Option<User> {
+pub fn parse_user(raw: &Value) -> Option<User> {
     let acct = raw.get("acct").and_then(Value::as_str)?;
     let url = raw.get("url").and_then(Value::as_str)?;
     let note = raw.get("note").and_then(Value::as_str).unwrap_or("");
@@ -129,17 +130,27 @@ pub fn to_user(raw: &Value) -> Option<User> {
         id: raw.get("id").and_then(Value::as_str).map(str::to_string),
         note: note.to_string(),
         // absent means the account never said, which is not the same as no
-        indexable: raw.get("indexable").and_then(Value::as_bool).unwrap_or(true),
-        discoverable: raw.get("discoverable").and_then(Value::as_bool).unwrap_or(true),
+        indexable: raw
+            .get("indexable")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        discoverable: raw
+            .get("discoverable")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     })
 }
 
 /// One of the lists our own server keeps for the API key owner.
-pub fn to_list(raw: &Value) -> Option<UserList> {
+pub fn parse_list(raw: &Value) -> Option<UserList> {
     let list_id = raw.get("id").and_then(Value::as_str)?;
     Some(UserList {
         id: list_id.to_string(),
-        title: raw.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+        title: raw
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
@@ -248,7 +259,7 @@ impl MastodonApi {
             PAGE_SIZE,
         )
         .await;
-        raw.map(|raw| usable(raw.iter().map(to_post)))
+        raw.map(|raw| usable(raw.iter().map(parse_post)))
     }
 
     pub async fn fetch_context_urls(&self, post_id: &str, post_url: &str) -> Vec<String> {
@@ -290,9 +301,8 @@ async fn statuses(
     wanted: i64,
     max_id: Option<&str>,
 ) -> Option<Vec<Value>> {
-    let mut url = format!(
-        "{base}/api/v1/accounts/{user_id}/statuses?exclude_replies=false&limit={wanted}"
-    );
+    let mut url =
+        format!("{base}/api/v1/accounts/{user_id}/statuses?exclude_replies=false&limit={wanted}");
     if let Some(max_id) = max_id {
         url.push_str(&format!("&max_id={max_id}"));
     }
@@ -341,7 +351,12 @@ pub fn masked(token: &str) -> String {
     if token.len() <= 10 {
         return "*".repeat(token.len());
     }
-    format!("{}{}{}", &token[..5], "*".repeat(token.len() - 10), &token[token.len() - 5..])
+    format!(
+        "{}{}{}",
+        &token[..5],
+        "*".repeat(token.len() - 10),
+        &token[token.len() - 5..]
+    )
 }
 
 pub fn report_mastodon_error(
@@ -441,7 +456,7 @@ fn wants_more(result: &[Value], stop_at: &StopAt) -> Result<bool> {
             let created_at = last
                 .get("created_at")
                 .and_then(Value::as_str)
-                .and_then(|text| timeutil::parse(text))
+                .and_then(timeutil::parse)
                 .ok_or_else(|| Error("entry has no created_at".to_string()))?;
             Ok(created_at >= *since)
         }
@@ -532,24 +547,27 @@ impl HomeServer {
 
     async fn posts(&self, path: &str, stop_at: StopAt, required_scope: &str) -> Result<Vec<Post>> {
         let raw = self.paginated(path, &stop_at, required_scope).await?;
-        Ok(usable(raw.iter().map(to_post)))
+        Ok(usable(raw.iter().map(parse_post)))
     }
 
     pub async fn bookmarks(&self, limit: i64) -> Result<Vec<Post>> {
-        self.posts("/api/v1/bookmarks", StopAt::Count(limit), "").await
+        self.posts("/api/v1/bookmarks", StopAt::Count(limit), "")
+            .await
     }
 
     pub async fn favourites(&self, limit: i64) -> Result<Vec<Post>> {
-        self.posts("/api/v1/favourites", StopAt::Count(limit), "").await
+        self.posts("/api/v1/favourites", StopAt::Count(limit), "")
+            .await
     }
 
     async fn accounts(&self, path: &str, stop_at: StopAt) -> Result<Vec<User>> {
         let raw = self.paginated(path, &stop_at, "").await?;
-        Ok(usable(raw.iter().map(to_user)))
+        Ok(usable(raw.iter().map(parse_user)))
     }
 
     pub async fn follow_requests(&self, limit: i64) -> Result<Vec<User>> {
-        self.accounts("/api/v1/follow_requests", StopAt::Count(limit)).await
+        self.accounts("/api/v1/follow_requests", StopAt::Count(limit))
+            .await
     }
 
     pub async fn followers(&self, user_id: &str, limit: i64) -> Result<Vec<User>> {
@@ -570,17 +588,24 @@ impl HomeServer {
 
     pub async fn lists(&self) -> Result<Vec<UserList>> {
         let raw = self.paginated("/api/v1/lists", &StopAt::All, "").await?;
-        Ok(usable(raw.iter().map(to_list)))
+        Ok(usable(raw.iter().map(parse_list)))
     }
 
     pub async fn list_timeline(&self, list_id: &str, limit: i64) -> Result<Vec<Post>> {
-        self.posts(&format!("/api/v1/timelines/list/{list_id}"), StopAt::Count(limit), "")
-            .await
+        self.posts(
+            &format!("/api/v1/timelines/list/{list_id}"),
+            StopAt::Count(limit),
+            "",
+        )
+        .await
     }
 
     pub async fn list_accounts(&self, list_id: &str, limit: i64) -> Result<Vec<User>> {
-        self.accounts(&format!("/api/v1/lists/{list_id}/accounts"), StopAt::Count(limit))
-            .await
+        self.accounts(
+            &format!("/api/v1/lists/{list_id}/accounts"),
+            StopAt::Count(limit),
+        )
+        .await
     }
 
     /// Accounts appearing in notifications since the given time.
@@ -593,8 +618,8 @@ impl HomeServer {
             let when = notification
                 .get("created_at")
                 .and_then(Value::as_str)
-                .and_then(|text| timeutil::parse(text));
-            let account = notification.get("account").and_then(to_user);
+                .and_then(timeutil::parse);
+            let account = notification.get("account").and_then(parse_user);
             if let (Some(when), Some(account)) = (when, account) {
                 if when >= since && !accounts.contains(&account) {
                     accounts.push(account);
@@ -607,7 +632,11 @@ impl HomeServer {
     /// Get all posts in the user's home timeline.
     pub async fn timeline(&self, limit: i64) -> Result<Vec<Post>> {
         let posts = self
-            .posts("/api/v1/timelines/home", StopAt::Count(limit), "read:statuses")
+            .posts(
+                "/api/v1/timelines/home",
+                StopAt::Count(limit),
+                "read:statuses",
+            )
             .await?;
         info!("{}", timeline_found_line(&posts));
         Ok(posts)
@@ -664,7 +693,10 @@ impl HomeServer {
 
         if resp.status != 200 {
             return Err(report_mastodon_error(
-                &format!("Error getting replies for user {user_id} on server {}", self.server),
+                &format!(
+                    "Error getting replies for user {user_id} on server {}",
+                    self.server
+                ),
                 resp.status,
                 "read:statuses",
                 Some(&self.token_hint),
@@ -672,22 +704,22 @@ impl HomeServer {
         }
         let raw = resp.json()?;
         Ok(match raw.as_array() {
-            Some(statuses) => usable(statuses.iter().map(to_post)),
+            Some(statuses) => usable(statuses.iter().map(parse_post)),
             None => Vec::new(),
         })
     }
 
     /// Ask our server to fetch a remote post, so it appears locally.
     pub async fn resolve(&self, url: &str) -> bool {
-        let search_url = format!(
-            "{}/api/v2/search?q={url}&resolve=true&limit=1",
-            self.base
-        );
+        let search_url = format!("{}/api/v2/search?q={url}&resolve=true&limit=1", self.base);
 
         let resp = match self.http.get(&search_url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
-                error!("Error adding url {search_url} to server {}. Exception: {ex}", self.server);
+                error!(
+                    "Error adding url {search_url} to server {}. Exception: {ex}",
+                    self.server
+                );
                 return false;
             }
         };
@@ -725,7 +757,7 @@ mod tests {
     }
 
     fn post_with_uri(uri: &str) -> Post {
-        to_post(&json!({
+        parse_post(&json!({
             "id": "1",
             "url": uri,
             "uri": uri,
@@ -754,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn to_post_reads_a_status() {
+    fn parse_post_reads_a_status() {
         let raw = json!({
             "id": "1",
             "url": "https://remote.example/@alice/1",
@@ -768,7 +800,7 @@ mod tests {
             "account": {"acct": "alice", "url": "https://remote.example/@alice", "id": "8"},
             "mentions": [{"acct": "bob@remote.example", "url": "https://remote.example/@bob", "id": "7"}],
         });
-        let post = to_post(&raw).unwrap();
+        let post = parse_post(&raw).unwrap();
         assert_eq!(post.url, "https://remote.example/@alice/1");
         assert_eq!(post.created_at, datetime!(2026-10-22 01:23:45.123 UTC));
         assert!(post.is_public);
@@ -781,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn to_post_reads_a_boost_through_its_wrapper() {
+    fn parse_post_reads_a_boost_through_its_wrapper() {
         let raw = json!({
             "id": "2",
             "visibility": "public",
@@ -793,7 +825,7 @@ mod tests {
                 "visibility": "unlisted",
             },
         });
-        let post = to_post(&raw).unwrap();
+        let post = parse_post(&raw).unwrap();
         assert!(post.is_boost());
         assert_eq!(post.original().url, "https://remote.example/@alice/1");
         assert_eq!(post.url, "https://remote.example/@alice/1");
@@ -802,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn to_post_treats_a_null_reblog_as_no_boost() {
+    fn parse_post_treats_a_null_reblog_as_no_boost() {
         // servers send "reblog": null on every non-boost status; reading it
         // as a post would skip every status as unusable
         let raw = json!({
@@ -811,23 +843,23 @@ mod tests {
             "created_at": "2026-10-22T01:23:45Z",
             "reblog": null,
         });
-        let post = to_post(&raw).unwrap();
+        let post = parse_post(&raw).unwrap();
         assert!(!post.is_boost());
     }
 
     #[test]
-    fn to_post_rejects_a_status_without_url_or_date() {
-        assert!(to_post(&json!({"id": "1"})).is_none());
-        assert!(to_post(&json!({"url": "https://x.example/@a/1"})).is_none());
+    fn parse_post_rejects_a_status_without_url_or_date() {
+        assert!(parse_post(&json!({"id": "1"})).is_none());
+        assert!(parse_post(&json!({"url": "https://x.example/@a/1"})).is_none());
     }
 
     #[test]
-    fn to_user_defaults_the_opt_out_fields() {
-        let user = to_user(&json!({"acct": "a", "url": "https://x.example/@a"})).unwrap();
+    fn parse_user_defaults_the_opt_out_fields() {
+        let user = parse_user(&json!({"acct": "a", "url": "https://x.example/@a"})).unwrap();
         assert!(user.indexable);
         assert!(user.discoverable);
         assert_eq!(user.note, "");
-        assert!(to_user(&json!({"acct": "a"})).is_none());
+        assert!(parse_user(&json!({"acct": "a"})).is_none());
     }
 
     #[tokio::test]
@@ -856,7 +888,8 @@ mod tests {
             Some("123".to_string())
         );
         assert_eq!(
-            api.post_id_from("https://example.com/users/alice/statuses/456").await,
+            api.post_id_from("https://example.com/users/alice/statuses/456")
+                .await,
             Some("456".to_string())
         );
         assert_eq!(

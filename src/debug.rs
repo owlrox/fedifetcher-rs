@@ -66,7 +66,12 @@ pub async fn verify_credentials(base: &str, token: &str, http: &HttpClient) -> R
 }
 
 /// GET /api/v1/accounts/lookup: one account, as our server reports it.
-pub async fn lookup_account(base: &str, acct: &str, token: &str, http: &HttpClient) -> Result<Value> {
+pub async fn lookup_account(
+    base: &str,
+    acct: &str,
+    token: &str,
+    http: &HttpClient,
+) -> Result<Value> {
     let acct = acct.trim().trim_start_matches('@');
     let url = format!("{base}/api/v1/accounts/lookup?acct={}", encode(acct));
     let resp = http.authenticated(token).get(&url, None).await?;
@@ -74,7 +79,9 @@ pub async fn lookup_account(base: &str, acct: &str, token: &str, http: &HttpClie
         return resp.json();
     }
     if resp.status == 404 {
-        return Err(Error(format!("User {acct} was not found on server {base}.")));
+        return Err(Error(format!(
+            "User {acct} was not found on server {base}."
+        )));
     }
     Err(report_mastodon_error(
         &format!("Error looking up user {acct} on server {base}"),

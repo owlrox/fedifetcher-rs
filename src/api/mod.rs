@@ -13,9 +13,9 @@ use tracing::error;
 
 use crate::http::HttpClient;
 use crate::posts::Post;
-use crate::servers::{ApiFlavour, ServerInfo, get_server_info};
+use crate::servers::{server_info, ApiFlavour, ServerInfo};
 use crate::state::ServerCache;
-use crate::urls::{PostRef, host_of};
+use crate::urls::{host_of, PostRef};
 
 pub use lemmy::LemmyApi;
 pub use mastodon::{HomeServer, MastodonApi};
@@ -102,16 +102,28 @@ pub fn client_for(server: &ServerInfo, http: &HttpClient) -> Option<Client> {
     // tried in order, so a server claiming several APIs gets the best
     // supported one
     if server.supports(ApiFlavour::Mastodon) {
-        return Some(Client::Mastodon(MastodonApi::new(&server.webserver, http.clone())));
+        return Some(Client::Mastodon(MastodonApi::new(
+            &server.webserver,
+            http.clone(),
+        )));
     }
     if server.supports(ApiFlavour::Lemmy) {
-        return Some(Client::Lemmy(LemmyApi::new(&server.webserver, http.clone())));
+        return Some(Client::Lemmy(LemmyApi::new(
+            &server.webserver,
+            http.clone(),
+        )));
     }
     if server.supports(ApiFlavour::Misskey) {
-        return Some(Client::Misskey(MisskeyApi::new(&server.webserver, http.clone())));
+        return Some(Client::Misskey(MisskeyApi::new(
+            &server.webserver,
+            http.clone(),
+        )));
     }
     if server.supports(ApiFlavour::PeerTube) {
-        return Some(Client::PeerTube(PeerTubeApi::new(&server.webserver, http.clone())));
+        return Some(Client::PeerTube(PeerTubeApi::new(
+            &server.webserver,
+            http.clone(),
+        )));
     }
 
     error!("server api unknown for {}", server.webserver);
@@ -155,18 +167,16 @@ async fn look_up_post(
 ) -> Result<PostRef, String> {
     let host = host_of(url).ok_or_else(|| "the URL has no host".to_string())?;
 
-    let server = get_server_info(&host, seen_hosts, http)
-        .await
-        .ok_or_else(|| {
-            let reason = seen_hosts
-                .get(&host)
-                .and_then(|info| info.get("error"))
-                .and_then(Value::as_str);
-            match reason {
-                Some(reason) => format!("server info for {host} is unavailable: {reason}"),
-                None => format!("server info for {host} is unavailable"),
-            }
-        })?;
+    let server = server_info(&host, seen_hosts, http).await.ok_or_else(|| {
+        let reason = seen_hosts
+            .get(&host)
+            .and_then(|info| info.get("error"))
+            .and_then(Value::as_str);
+        match reason {
+            Some(reason) => format!("server info for {host} is unavailable: {reason}"),
+            None => format!("server info for {host} is unavailable"),
+        }
+    })?;
     let client = client_for(&server, http).ok_or_else(|| {
         format!(
             "{host} runs {} and no supported API is known for it",
@@ -178,7 +188,7 @@ async fn look_up_post(
         .post_id_from(url)
         .await
         .ok_or_else(|| format!("the URL is not a {} post URL", client.flavour().as_str()))?;
-    Ok(PostRef(host, post_id))
+    Ok(PostRef::new(host, post_id))
 }
 
 #[cfg(test)]
@@ -211,14 +221,15 @@ mod tests {
         );
         let http = dummy_http();
 
-        let reason = look_up_post("https://nya.social/notes/81a131a4b49fff235e0b0575", &mut seen_hosts, &http)
-            .await
-            .unwrap_err();
+        let reason = look_up_post(
+            "https://nya.social/notes/81a131a4b49fff235e0b0575",
+            &mut seen_hosts,
+            &http,
+        )
+        .await
+        .unwrap_err();
 
-        assert!(
-            reason.contains("prohibited by robots.txt"),
-            "{reason}"
-        );
+        assert!(reason.contains("prohibited by robots.txt"), "{reason}");
         assert!(reason.contains("nya.social"), "{reason}");
     }
 

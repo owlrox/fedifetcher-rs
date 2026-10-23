@@ -3,7 +3,7 @@
 
 mod common;
 
-use fedifetcher::api::mastodon::{StopAt, get_paginated};
+use fedifetcher::api::mastodon::{get_paginated, StopAt};
 use fedifetcher::http::HttpClient;
 use httpmock::prelude::*;
 use httpmock::Method;
@@ -94,7 +94,8 @@ async fn stops_once_it_has_the_count_it_wanted() {
             when.method(Method::GET)
                 .path("/api/v1/timelines/home")
                 .query_param("max_id", "1");
-            then.status(200).json_body(json!([{"id": "0"}, {"id": "-1"}]));
+            then.status(200)
+                .json_body(json!([{"id": "0"}, {"id": "-1"}]));
         })
         .await;
     let http = client(&dir).await;
@@ -173,7 +174,8 @@ async fn stops_when_there_is_no_next_link() {
     let page1 = server
         .mock_async(|when, then| {
             when.method(Method::GET).path("/api/v1/timelines/home");
-            then.status(200).json_body(json!([{"id": "2"}, {"id": "1"}]));
+            then.status(200)
+                .json_body(json!([{"id": "2"}, {"id": "1"}]));
         })
         .await;
     let page2 = server
@@ -223,7 +225,6 @@ async fn an_error_status_is_reported() {
         None,
     )
     .await
-    .err()
-    .expect("a 500 must be an error");
+    .expect_err("a 500 must be an error");
     assert!(err.to_string().contains("500"), "{err}");
 }

@@ -1,21 +1,14 @@
-//! Error types. The Python original raises plain `Exception`s with messages
-//! that end up in the log; here they are strings wrapped in a newtype so the
-//! messages read the same.
+//! Error types.
+//!
+//! FediFetcher's errors carry the message that is logged. Each layer has its
+//! own type so callers can tell a configuration problem from a lock conflict
+//! from a general failure, and `From` impls let `?` convert between them.
 
-use std::fmt;
-
-/// The equivalent of a Python `Exception`: a message that is logged where the
-/// Python code logged the exception.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A general failure: an HTTP error, a database error, a parse failure.
+/// The message is what gets logged.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
 pub struct Error(pub String);
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Error {}
 
 impl From<String> for Error {
     fn from(message: String) -> Self {
@@ -29,17 +22,11 @@ impl From<&str> for Error {
     }
 }
 
-/// Raised when the supplied configuration cannot be used.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A configuration problem: an unknown log level, a value that will not
+/// coerce, a missing required option.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
 pub struct ConfigError(pub String);
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ConfigError {}
 
 impl From<ConfigError> for Error {
     fn from(err: ConfigError) -> Self {
@@ -47,17 +34,10 @@ impl From<ConfigError> for Error {
     }
 }
 
-/// Raised when another run holds the lock, or its age cannot be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Another run holds the lock, or the lock file cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
 pub struct LockedError(pub String);
-
-impl fmt::Display for LockedError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for LockedError {}
 
 impl From<LockedError> for Error {
     fn from(err: LockedError) -> Self {

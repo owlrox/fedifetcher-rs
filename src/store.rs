@@ -33,7 +33,10 @@ pub const SERVER_FAILURE_MAX_AGE: Duration = Duration::hours(1);
 /// Stored in the `replied_toots` table; a lookup that found nothing is
 /// remembered as a row of NULLs, so it is not asked about again.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RepliedToot(pub String, pub PostRef);
+pub struct RepliedToot {
+    pub url: String,
+    pub post_ref: PostRef,
+}
 
 /// Everything FediFetcher remembers between runs, plus this run's scratch
 /// space.
@@ -84,7 +87,12 @@ impl StateStore {
         for user in state.known_followings.iter().cloned().collect::<Vec<_>>() {
             state.all_known_users.add(&user, None);
         }
-        for user in state.recently_checked_users.iter().cloned().collect::<Vec<_>>() {
+        for user in state
+            .recently_checked_users
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             state.all_known_users.add(&user, None);
         }
         Ok(state)
@@ -145,7 +153,10 @@ fn parse_lock_content(text: &str) -> Option<LockContent> {
             .get("created")
             .and_then(Value::as_str)
             .and_then(timeutil::parse)?;
-        let pid = value.get("pid").and_then(Value::as_u64).map(|pid| pid as u32);
+        let pid = value
+            .get("pid")
+            .and_then(Value::as_u64)
+            .map(|pid| pid as u32);
         Some(LockContent { pid, created })
     } else {
         timeutil::parse(text.trim()).map(|created| LockContent { pid: None, created })
@@ -280,19 +291,27 @@ mod tests {
         state.seen_urls.add("https://remote.example/@a/1", None);
         state.known_followings.add("b@remote.example", None);
         state.recently_checked_users.add("c@remote.example", None);
+        state.replied_toot_server_ids.insert(
+            "https://home.example/@b/2".to_string(),
+            Some(RepliedToot {
+                url: "https://remote.example/@a/1".to_string(),
+                post_ref: PostRef::new("remote.example", "1"),
+            }),
+        );
         state
             .replied_toot_server_ids
-            .insert("https://home.example/@b/2".to_string(), Some(RepliedToot(
-                "https://remote.example/@a/1".to_string(),
-                PostRef::new("remote.example", "1"),
-            )));
-        state.replied_toot_server_ids.insert("https://home.example/@b/3".to_string(), None);
-        state.seen_hosts.add("remote.example", json!({
-            "webserver": "remote.example", "software": "mastodon", "version": "4.3",
-            "last_checked": timeutil::fmt_state_ts(timeutil::now()),
-            "mastodonApiSupport": true, "peertubeApiSupport": false,
-        }));
-        state.recently_checked_context.mark_fetched("uri", timeutil::now());
+            .insert("https://home.example/@b/3".to_string(), None);
+        state.seen_hosts.add(
+            "remote.example",
+            json!({
+                "webserver": "remote.example", "software": "mastodon", "version": "4.3",
+                "last_checked": timeutil::fmt_state_ts(timeutil::now()),
+                "mastodonApiSupport": true, "peertubeApiSupport": false,
+            }),
+        );
+        state
+            .recently_checked_context
+            .mark_fetched("uri", timeutil::now());
         session.finish().await.unwrap();
 
         let loaded = store.load(&pool).await.unwrap();
@@ -302,14 +321,18 @@ mod tests {
         assert!(loaded.seen_hosts.contains("remote.example"));
         assert!(loaded.recently_checked_context.contains("uri"));
         assert_eq!(
-            loaded.replied_toot_server_ids.get("https://home.example/@b/2"),
-            Some(&Some(RepliedToot(
-                "https://remote.example/@a/1".to_string(),
-                PostRef::new("remote.example", "1")
-            )))
+            loaded
+                .replied_toot_server_ids
+                .get("https://home.example/@b/2"),
+            Some(&Some(RepliedToot {
+                url: "https://remote.example/@a/1".to_string(),
+                post_ref: PostRef::new("remote.example", "1")
+            }))
         );
         assert_eq!(
-            loaded.replied_toot_server_ids.get("https://home.example/@b/3"),
+            loaded
+                .replied_toot_server_ids
+                .get("https://home.example/@b/3"),
             Some(&None)
         );
         // all_known_users is rebuilt from followings and recently checked users
@@ -343,7 +366,10 @@ mod tests {
         let pool = db::open(&config).await.unwrap();
         let old = timeutil::fmt_state_ts(timeutil::now() - Duration::days(10));
         let fresh = timeutil::fmt_state_ts(timeutil::now());
-        for (acct, first_seen) in [("old@remote.example", &old), ("fresh@remote.example", &fresh)] {
+        for (acct, first_seen) in [
+            ("old@remote.example", &old),
+            ("fresh@remote.example", &fresh),
+        ] {
             sqlx::query("INSERT INTO recently_checked_users (acct, first_seen) VALUES (?, ?)")
                 .bind(acct)
                 .bind(first_seen)
@@ -358,7 +384,9 @@ mod tests {
             !loaded.recently_checked_users.contains("old@remote.example"),
             "a user remembered longer ago than remember_users_for_hours is forgotten"
         );
-        assert!(loaded.recently_checked_users.contains("fresh@remote.example"));
+        assert!(loaded
+            .recently_checked_users
+            .contains("fresh@remote.example"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -387,11 +415,7 @@ mod tests {
         // an unreadable lock aborts
         std::fs::write(config.lock_path(), "not a timestamp").unwrap();
         let err = lock(&config).unwrap_err();
-        assert!(
-            err.0.starts_with("Cannot read lock file"),
-            "{}",
-            err.0
-        );
+        assert!(err.0.starts_with("Cannot read lock file"), "{}", err.0);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -403,11 +427,7 @@ mod tests {
         let dir = temp_dir();
         let config = test_config(&dir);
 
-        std::fs::write(
-            config.lock_path(),
-            timeutil::fmt_lock_ts(timeutil::now()),
-        )
-        .unwrap();
+        std::fs::write(config.lock_path(), timeutil::fmt_lock_ts(timeutil::now())).unwrap();
         let guard = lock(&config).expect("a legacy lock is reclaimed");
         assert!(config.lock_path().exists());
         drop(guard);
@@ -489,5 +509,4 @@ mod tests {
 
         assert!(parse_lock_content("not a timestamp").is_none());
     }
-
 }

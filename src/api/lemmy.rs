@@ -20,11 +20,14 @@ static USER_PATH: LazyLock<Regex> = LazyLock::new(|| anchored(r"^https?://[^/]+/
 
 static PROFILE_PATHS: LazyLock<Vec<Regex>> =
     LazyLock::new(|| vec![anchored(r"^https?://[^/]+/(?:u|c)/(?P<name>[^/]+)")]);
-static POST_PATHS: LazyLock<Vec<Regex>> =
-    LazyLock::new(|| vec![anchored(r"^https?://[^/]+/(?:comment|post)/(?P<name>[^/]+)")]);
+static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![anchored(
+        r"^https?://[^/]+/(?:comment|post)/(?P<name>[^/]+)",
+    )]
+});
 
 /// A Lemmy post or comment, which names itself by its ActivityPub id.
-pub fn to_post(raw: &Value) -> Option<Post> {
+pub fn parse_post(raw: &Value) -> Option<Post> {
     let ap_id = raw.get("ap_id").and_then(Value::as_str);
     let created_at = raw.get("published").and_then(parse_date);
     let (Some(ap_id), Some(created_at)) = (ap_id, created_at) else {
@@ -162,9 +165,7 @@ impl LemmyApi {
                 let describe = describe.clone();
                 let page = gathered.len() as i64 / PAGE_SIZE + 1;
                 async move {
-                    let url = format!(
-                        "{base}/api/v3/{path}&sort=New&limit={wanted}&page={page}"
-                    );
+                    let url = format!("{base}/api/v3/{path}&sort=New&limit={wanted}&page={page}");
                     let response = match http.get(&url, None).await {
                         Ok(response) => response,
                         Err(ex) => {
@@ -198,7 +199,7 @@ impl LemmyApi {
             PAGE_SIZE,
         )
         .await;
-        raw.map(|raw| usable(raw.iter().map(to_post)))
+        raw.map(|raw| usable(raw.iter().map(parse_post)))
     }
 
     pub async fn fetch_context_urls(&self, post_id: &str, post_url: &str) -> Vec<String> {
@@ -291,7 +292,9 @@ impl LemmyApi {
                     {
                         Some(ap_id) => urls.push(ap_id.to_string()),
                         None => {
-                            error!("Error parsing post {post_id} from {post_url}. Exception: KeyError");
+                            error!(
+                                "Error parsing post {post_id} from {post_url}. Exception: KeyError"
+                            );
                         }
                     }
                 }
@@ -308,7 +311,9 @@ impl LemmyApi {
         let resp = match self.http.get(&url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
-                error!("Error getting comments for post {post_id} from {post_url}. Exception: {ex}");
+                error!(
+                    "Error getting comments for post {post_id} from {post_url}. Exception: {ex}"
+                );
                 return Vec::new();
             }
         };
@@ -316,17 +321,20 @@ impl LemmyApi {
         if resp.status == 200 {
             match resp.json() {
                 Ok(res) => {
-                    let parsed = res.get("comments").and_then(Value::as_array).map(|comments| {
-                        comments
-                            .iter()
-                            .map(|info| {
-                                info.get("comment")
-                                    .and_then(|comment| comment.get("ap_id"))
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string)
-                            })
-                            .collect::<Option<Vec<String>>>()
-                    });
+                    let parsed = res
+                        .get("comments")
+                        .and_then(Value::as_array)
+                        .map(|comments| {
+                            comments
+                                .iter()
+                                .map(|info| {
+                                    info.get("comment")
+                                        .and_then(|comment| comment.get("ap_id"))
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string)
+                                })
+                                .collect::<Option<Vec<String>>>()
+                        });
                     match parsed {
                         Some(Some(list_of_urls)) => {
                             debug!("Got {} comments for post {post_url}", list_of_urls.len());
@@ -334,7 +342,9 @@ impl LemmyApi {
                             return urls;
                         }
                         _ => {
-                            error!("Error parsing comments for post {post_url}. Exception: KeyError");
+                            error!(
+                                "Error parsing comments for post {post_url}. Exception: KeyError"
+                            );
                         }
                     }
                 }
@@ -358,22 +368,22 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn to_post_reads_a_lemmy_post() {
+    fn parse_post_reads_a_lemmy_post() {
         let raw = json!({
             "id": 42,
             "ap_id": "https://lemmy.example/post/42",
             "published": "2026-10-22T01:23:45.123Z",
         });
-        let post = to_post(&raw).unwrap();
+        let post = parse_post(&raw).unwrap();
         assert_eq!(post.url, "https://lemmy.example/post/42");
         assert_eq!(post.uri, "https://lemmy.example/post/42");
         assert!(post.is_public);
     }
 
     #[test]
-    fn to_post_rejects_a_post_without_ap_id_or_date() {
-        assert!(to_post(&json!({"id": 1})).is_none());
-        assert!(to_post(&json!({"ap_id": "https://lemmy.example/post/1"})).is_none());
+    fn parse_post_rejects_a_post_without_ap_id_or_date() {
+        assert!(parse_post(&json!({"id": 1})).is_none());
+        assert!(parse_post(&json!({"ap_id": "https://lemmy.example/post/1"})).is_none());
     }
 
     #[tokio::test]

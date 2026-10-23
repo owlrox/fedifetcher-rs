@@ -41,7 +41,10 @@ impl Response {
             return links;
         };
         for part in split_link_header(value) {
-            let Some(url) = part.strip_prefix('<').and_then(|rest| rest.split('>').next()) else {
+            let Some(url) = part
+                .strip_prefix('<')
+                .and_then(|rest| rest.split('>').next())
+            else {
                 continue;
             };
             for param in part.split('>').nth(1).unwrap_or_default().split(';') {
@@ -129,7 +132,8 @@ impl HttpClient {
         let mut headers = self.headers.clone().unwrap_or_default();
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}")).unwrap_or(HeaderValue::from_static("")),
+            HeaderValue::from_str(&format!("Bearer {token}"))
+                .unwrap_or(HeaderValue::from_static("")),
         );
         let mut derived = self.clone();
         derived.headers = Some(headers);
@@ -218,7 +222,9 @@ impl HttpClient {
         let mut headers = self.headers.clone().unwrap_or_default();
         headers
             .entry(reqwest::header::USER_AGENT)
-            .or_insert_with(|| HeaderValue::from_str(&self.user_agent()).unwrap_or(HeaderValue::from_static("")));
+            .or_insert_with(|| {
+                HeaderValue::from_str(&self.user_agent()).unwrap_or(HeaderValue::from_static(""))
+            });
 
         let user_agent = headers
             .get(reqwest::header::USER_AGENT)
@@ -240,7 +246,8 @@ impl HttpClient {
             }
         }
 
-        let timeout = timeout.unwrap_or_else(|| Duration::from_secs(self.config.http_timeout.max(0) as u64));
+        let timeout =
+            timeout.unwrap_or_else(|| Duration::from_secs(self.config.http_timeout.max(0) as u64));
 
         let client = if allow_redirects {
             &self.client
@@ -270,12 +277,12 @@ impl HttpClient {
             let status = response.status().as_u16();
             if status != 429 {
                 let headers = response.headers().clone();
-                let text = response
-                    .text()
-                    .await
-                    .map_err(|ex| {
-                        Error(format!("Error reading response from {url}: {}", error_chain(&ex)))
-                    })?;
+                let text = response.text().await.map_err(|ex| {
+                    Error(format!(
+                        "Error reading response from {url}: {}",
+                        error_chain(&ex)
+                    ))
+                })?;
                 return Ok(Response {
                     status,
                     headers,
@@ -418,13 +425,13 @@ impl RobotsCache {
             Err(_) => RobotsEntry::Verdict(true),
         };
 
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(robots_url.to_string(), match &entry {
+        self.cache.lock().unwrap().insert(
+            robots_url.to_string(),
+            match &entry {
                 RobotsEntry::Text(text) => RobotsEntry::Text(text.clone()),
                 RobotsEntry::Verdict(verdict) => RobotsEntry::Verdict(*verdict),
-            });
+            },
+        );
         entry
     }
 
@@ -433,7 +440,7 @@ impl RobotsCache {
             return Ok(true);
         }
         let netloc = netloc_of(url);
-        if self.blocklist.iter().any(|blocked| *blocked == netloc) {
+        if self.blocklist.contains(&netloc) {
             // Never connect to these locations
             return Err(Error(format!(
                 "Connecting to {netloc} is prohibited by the configured blocklist"
@@ -530,10 +537,9 @@ fn decode_component(value: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
-            b'%'
-                if i + 2 < bytes.len()
-                    && bytes[i + 1].is_ascii_hexdigit()
-                    && bytes[i + 2].is_ascii_hexdigit() =>
+            b'%' if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit() =>
             {
                 let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("00");
                 out.push(u8::from_str_radix(hex, 16).unwrap_or(b'?'));
@@ -557,17 +563,26 @@ mod tests {
         assert_eq!(
             build_callback_url(
                 "https://watch.example/ping?rid=old&keep=1",
-                &[("rid".to_string(), "new".to_string()), ("msg".to_string(), "hi there".to_string())]
+                &[
+                    ("rid".to_string(), "new".to_string()),
+                    ("msg".to_string(), "hi there".to_string())
+                ]
             ),
             "https://watch.example/ping?rid=new&keep=1&msg=hi+there"
         );
         assert_eq!(
-            build_callback_url("https://watch.example/ping", &[("a".to_string(), "1".to_string())]),
+            build_callback_url(
+                "https://watch.example/ping",
+                &[("a".to_string(), "1".to_string())]
+            ),
             "https://watch.example/ping?a=1"
         );
         // blank values are kept
         assert_eq!(
-            build_callback_url("https://watch.example/ping?empty=", &[("a".to_string(), "1".to_string())]),
+            build_callback_url(
+                "https://watch.example/ping?empty=",
+                &[("a".to_string(), "1".to_string())]
+            ),
             "https://watch.example/ping?empty=&a=1"
         );
     }

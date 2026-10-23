@@ -5,8 +5,8 @@ mod common;
 
 use fedifetcher::api::mastodon::masked;
 use fedifetcher::web;
-use httpmock::Method;
 use httpmock::prelude::*;
+use httpmock::Method;
 
 const TOKEN: &str = "smoke-secret-token-123";
 
@@ -80,7 +80,7 @@ async fn post_debug(base: &str, form: &str) -> (u16, String) {
 /// Read the saved configuration back from the database into a Config.
 async fn saved_config(pool: &sqlx::SqlitePool) -> fedifetcher::config::Config {
     let raw = fedifetcher::db::load_config(pool).await.unwrap();
-    fedifetcher::config::build_config(raw).unwrap()
+    fedifetcher::config::Config::from_values(raw).unwrap()
 }
 
 #[tokio::test]
@@ -102,7 +102,10 @@ async fn every_page_renders_without_javascript() {
             body.contains("FediFetcher-rs"),
             "{path} should name the app -rs"
         );
-        assert!(!body.contains("<script"), "{path} must not contain JavaScript");
+        assert!(
+            !body.contains("<script"),
+            "{path} must not contain JavaScript"
+        );
     }
 
     let (status, body) = get(&format!("{base}/healthz")).await;
@@ -168,8 +171,14 @@ async fn the_config_page_masks_the_access_token() {
     assert_eq!(status, 200);
     assert!(body.contains(&masked(TOKEN)), "the token should be masked");
     assert!(!body.contains(TOKEN), "the token itself must not appear");
-    assert!(body.contains("respect_robots_txt"), "the new options are shown");
-    assert!(body.contains("respect_user_opt_out"), "the new options are shown");
+    assert!(
+        body.contains("respect_robots_txt"),
+        "the new options are shown"
+    );
+    assert!(
+        body.contains("respect_user_opt_out"),
+        "the new options are shown"
+    );
 }
 
 #[tokio::test]
@@ -220,12 +229,18 @@ async fn the_dashboard_shows_a_running_run_with_its_elapsed_time() {
 
     let (status, body) = get(&format!("{base}/")).await;
     assert_eq!(status, 200);
-    assert!(body.contains(">running<"), "the running run is in the history");
+    assert!(
+        body.contains(">running<"),
+        "the running run is in the history"
+    );
     assert!(
         body.contains("running for"),
         "its end time cell shows how long it has run"
     );
-    assert!(body.contains("badge running"), "the outcome gets its own badge");
+    assert!(
+        body.contains("badge running"),
+        "the outcome gets its own badge"
+    );
     assert!(
         body.contains("http-equiv=\"refresh\""),
         "the dashboard reloads itself while a run is live"
@@ -254,10 +269,7 @@ async fn the_logs_page_renders_lines_from_the_database() {
 
     let (status, body) = get(&format!("{base}/logs")).await;
     assert_eq!(status, 200);
-    assert!(
-        body.contains("<table"),
-        "the log should render as a table"
-    );
+    assert!(body.contains("<table"), "the log should render as a table");
     assert!(
         body.contains("<td>2026-10-22 16:05:07 -05:00</td>"),
         "the time column shows the entry's timestamp"
@@ -288,7 +300,13 @@ async fn the_logs_page_renders_levels_as_colored_pills() {
 
     insert_log(&dir, "2026-10-22 16:05:01 -05:00", "DEBUG", "a debug line").await;
     insert_log(&dir, "2026-10-22 16:05:02 -05:00", "INFO", "an info line").await;
-    insert_log(&dir, "2026-10-22 16:05:03 -05:00", "WARNING", "a warning line").await;
+    insert_log(
+        &dir,
+        "2026-10-22 16:05:03 -05:00",
+        "WARNING",
+        "a warning line",
+    )
+    .await;
     insert_log(&dir, "2026-10-22 16:05:04 -05:00", "ERROR", "an error line").await;
 
     let (status, body) = get(&format!("{base}/logs")).await;
@@ -359,7 +377,10 @@ async fn the_logs_page_sorts_by_the_clicked_column() {
         "ascending level order should be DEBUG, ERROR, INFO"
     );
     // the sorted column's heading shows the direction and offers to flip it
-    assert!(body.contains("(asc)"), "the sorted column shows its direction");
+    assert!(
+        body.contains("(asc)"),
+        "the sorted column shows its direction"
+    );
     assert!(
         body.contains("/logs?sort=level&amp;dir=desc"),
         "clicking the sorted column flips the direction"
@@ -385,7 +406,13 @@ async fn posting_clear_log_empties_the_database() {
     let dir = common::tmp_dir();
     let base = spawn_ui(&dir).await;
 
-    insert_log(&dir, "2026-10-22 16:05:07 -05:00", "INFO", "a line to clear").await;
+    insert_log(
+        &dir,
+        "2026-10-22 16:05:07 -05:00",
+        "INFO",
+        "a line to clear",
+    )
+    .await;
 
     let resp = client()
         .post(format!("{base}/logs/clear"))
@@ -487,7 +514,10 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
             && position(&body, "alpha.example") < position(&body, "gamma.example"),
         "software ascending is Akkoma, Mastodon, Pleroma"
     );
-    assert!(body.contains("(asc)"), "the sorted column shows its direction");
+    assert!(
+        body.contains("(asc)"),
+        "the sorted column shows its direction"
+    );
     assert!(
         body.contains("/hosts?tab=hosts&amp;sort=software&amp;dir=desc"),
         "clicking the sorted column flips the direction"
@@ -542,12 +572,13 @@ async fn seed_db(dir: &std::path::Path) {
     fedifetcher::db::insert_log(&pool, &log("INFO", "second line"))
         .await
         .unwrap();
-    let run = |started: &str, finished: &str, outcome: &str, message: &str| fedifetcher::db::RunRow {
-        started: started.to_string(),
-        finished: finished.to_string(),
-        outcome: outcome.to_string(),
-        message: message.to_string(),
-    };
+    let run =
+        |started: &str, finished: &str, outcome: &str, message: &str| fedifetcher::db::RunRow {
+            started: started.to_string(),
+            finished: finished.to_string(),
+            outcome: outcome.to_string(),
+            message: message.to_string(),
+        };
     fedifetcher::db::insert_run(
         &pool,
         &run(
@@ -597,7 +628,13 @@ async fn the_data_page_drills_into_the_databases_tables() {
     // those two tables have pages of their own
     let (status, body) = get(&format!("{base}/hosts")).await;
     assert_eq!(status, 200);
-    for tab in ["hosts", "opted_out_accounts", "private_posts", "runs", "seen_urls"] {
+    for tab in [
+        "hosts",
+        "opted_out_accounts",
+        "private_posts",
+        "runs",
+        "seen_urls",
+    ] {
         assert!(
             body.contains(&format!("href=\"/hosts?tab={tab}\"")),
             "the {tab} sub-tab is linked"
@@ -712,7 +749,10 @@ async fn the_stop_button_stops_a_running_run() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    assert!(running_page.contains("Running since"), "the run should be running");
+    assert!(
+        running_page.contains("Running since"),
+        "the run should be running"
+    );
     assert!(running_page.contains("Stop the running FediFetcher"));
     assert!(!running_page.contains("FediFetch NOW!"));
 
@@ -730,8 +770,14 @@ async fn the_stop_button_stops_a_running_run() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(body.contains("Stopped."), "the run should report being stopped");
-    assert!(body.contains(">stopped<"), "the outcome badge should say stopped");
+    assert!(
+        body.contains("Stopped."),
+        "the run should report being stopped"
+    );
+    assert!(
+        body.contains(">stopped<"),
+        "the outcome badge should say stopped"
+    );
     assert!(body.contains(">Idle<"), "the run should be over");
 }
 
@@ -774,7 +820,10 @@ async fn saving_the_config_page_writes_the_database() {
 async fn removing_a_token_via_the_config_page() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
-    config.access_tokens = vec!["first-token-aaaa".to_string(), "second-token-bbbb".to_string()];
+    config.access_tokens = vec![
+        "first-token-aaaa".to_string(),
+        "second-token-bbbb".to_string(),
+    ];
     let (base, pool) = spawn_ui_with(config).await;
 
     let (status, _, _) = post_config(&base, "remove_access_token=0").await;
@@ -796,7 +845,10 @@ async fn invalid_values_are_rejected_and_not_saved() {
     assert!(body.contains("http_timeout"), "the error names the option");
 
     assert!(
-        fedifetcher::db::load_config(&pool).await.unwrap().is_empty(),
+        fedifetcher::db::load_config(&pool)
+            .await
+            .unwrap()
+            .is_empty(),
         "a failed save must not write the config"
     );
     let (_, body) = get(&format!("{base}/config")).await;
@@ -813,7 +865,10 @@ async fn the_debug_page_names_the_server_and_links_in_the_nav() {
     assert!(body.contains("Test connection"));
     assert!(body.contains("Look up a user"));
     assert!(body.contains("Recent posts"));
-    assert!(body.contains("example.social"), "names the configured server");
+    assert!(
+        body.contains("example.social"),
+        "names the configured server"
+    );
     assert!(body.contains(&masked(TOKEN)), "names the token, masked");
     assert!(body.contains("href=\"/debug\""), "the nav links to the tab");
     assert!(!body.contains("<script"), "must not contain JavaScript");
@@ -937,9 +992,10 @@ async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
     state
         .recently_checked_context
         .mark_fetched("https://remote.example/@a/5", fedifetcher::timeutil::now());
-    state
-        .seen_hosts
-        .add("alpha.example", host_entry("Mastodon", "4.2.0", &["mastodon"], 3));
+    state.seen_hosts.add(
+        "alpha.example",
+        host_entry("Mastodon", "4.2.0", &["mastodon"], 3),
+    );
     fedifetcher::db::save_state(&pool, &state, fedifetcher::store::MAX_ENTRIES)
         .await
         .unwrap();
@@ -948,7 +1004,10 @@ async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
     // a post: fetch its context
     let (status, body) = get(&format!("{base}/hosts?tab=trigger_posts")).await;
     assert_eq!(status, 200);
-    assert!(body.contains("action=\"/fetch\""), "the row posts to /fetch");
+    assert!(
+        body.contains("action=\"/fetch\""),
+        "the row posts to /fetch"
+    );
     assert!(body.contains("name=\"kind\" value=\"post\""));
     assert!(
         body.contains("name=\"key\" value=\"https://remote.example/@a/1\""),

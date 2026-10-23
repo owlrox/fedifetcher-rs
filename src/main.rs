@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use fedifetcher::config::{Config, build_config, build_config_lenient};
+use fedifetcher::config::Config;
 use fedifetcher::{db, logging, run, web};
 
 #[derive(Parser)]
@@ -75,48 +75,42 @@ async fn main() -> ExitCode {
     // Serving only needs a config the page can edit; running needs a server
     // and an access token.
     let config = match &mode {
-        Mode::Run => build_config(stored),
-        Mode::Serve { .. } => build_config_lenient(stored),
+        Mode::Run => Config::from_values(stored),
+        Mode::Serve { .. } => Config::from_values_lenient(stored),
     };
     let config = match config {
         Ok(config) => config,
         Err(ex) => return config_error(ex),
     };
 
-    if let Err(ex) = logging::setup_logging(&config) {
-        return config_error(ex);
-    }
-
     // Every log line is written to the database, which the web UI reads for
     // the logs page and the run history.
-    if let Err(ex) = logging::setup_log_db(db.clone()).await {
-        eprintln!("CRITICAL:FediFetcher:{ex}");
-        return ExitCode::from(1);
-    }
+    let log_db = match logging::setup(&config, db.clone()) {
+        Ok(log_db) => log_db,
+        Err(ex) => return config_error(ex),
+    };
 
     match mode {
         Mode::Run => {
             let result = run::run_once(config, run::CancelToken::new(), &db).await;
             // wait for the log lines already received to reach the database
-            logging::shutdown_log_db().await;
+            log_db.shutdown().await;
             match result {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(_) => ExitCode::from(1),
             }
         }
-        Mode::Serve { bind, port } => {
-            match web::serve(config, &bind, port, db).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(ex) => {
-                    eprintln!("ERROR:FediFetcher:{ex}");
-                    ExitCode::from(1)
-                }
+        Mode::Serve { bind, port } => match web::serve(config, &bind, port, db).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(ex) => {
+                eprintln!("ERROR:FediFetcher:{ex}");
+                ExitCode::from(1)
             }
-        }
+        },
     }
 }
 
-/// The Python original logs a config problem as critical and exits 1.
+/// Log a config problem as critical and exit 1.
 fn config_error(ex: fedifetcher::error::ConfigError) -> ExitCode {
     eprintln!("CRITICAL:FediFetcher:{ex}");
     ExitCode::from(1)

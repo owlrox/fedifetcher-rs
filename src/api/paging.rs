@@ -21,7 +21,11 @@ where
         let wanted = (page_size).min(limit - gathered.len() as i64);
         let page = fetch(wanted, &gathered).await;
         let Some(page) = page else {
-            return if gathered.is_empty() { None } else { Some(gathered) };
+            return if gathered.is_empty() {
+                None
+            } else {
+                Some(gathered)
+            };
         };
 
         // a server with more to give fills the page it was asked for, so this
@@ -42,7 +46,7 @@ mod tests {
 
     #[tokio::test]
     async fn gathers_until_limit() {
-        let pages = vec![
+        let pages = [
             vec![json!(1), json!(2)],
             vec![json!(3), json!(4)],
             vec![json!(5)],
@@ -59,7 +63,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result, vec![json!(1), json!(2), json!(3), json!(4), json!(5)]);
+        assert_eq!(
+            result,
+            vec![json!(1), json!(2), json!(3), json!(4), json!(5)]
+        );
         assert_eq!(calls, 3);
     }
 

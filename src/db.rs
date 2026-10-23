@@ -6,9 +6,9 @@
 //! context. One file (`fedifetcher.db`) that the web UI can query and later
 //! runs consult.
 
+use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
-use serde_json::Value;
 
 use crate::config::{Config, RawValues};
 use crate::error::{Error, Result};
@@ -43,8 +43,12 @@ pub struct RunRow {
 
 /// Open the database, creating it and its tables if they are not there yet.
 pub async fn open(config: &Config) -> Result<SqlitePool> {
-    std::fs::create_dir_all(&config.state_dir)
-        .map_err(|ex| Error(format!("Could not create {}: {ex}", config.state_dir.display())))?;
+    std::fs::create_dir_all(&config.state_dir).map_err(|ex| {
+        Error(format!(
+            "Could not create {}: {ex}",
+            config.state_dir.display()
+        ))
+    })?;
     let path = config.state_dir.join("fedifetcher.db");
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -525,7 +529,10 @@ pub async fn list_tables(pool: &SqlitePool) -> Result<Vec<String>> {
     .fetch_all(pool)
     .await
     .map_err(db_error)?;
-    Ok(rows.iter().map(|row| row.get::<String, _>("name")).collect())
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect())
 }
 
 /// One table's columns, in declaration order, for the data page's table
@@ -533,7 +540,10 @@ pub async fn list_tables(pool: &SqlitePool) -> Result<Vec<String>> {
 pub async fn table_columns(pool: &SqlitePool, table: &str) -> Result<Vec<String>> {
     let sql = format!("PRAGMA table_info({})", quote_ident(table)?);
     let rows = sqlx::query(&sql).fetch_all(pool).await.map_err(db_error)?;
-    Ok(rows.iter().map(|row| row.get::<String, _>("name")).collect())
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect())
 }
 
 /// How many rows a table has.
@@ -592,7 +602,10 @@ pub async fn table_rows(
         .map(|row| {
             columns
                 .iter()
-                .map(|column| row.try_get::<Option<String>, _>(column.as_str()).unwrap_or(None))
+                .map(|column| {
+                    row.try_get::<Option<String>, _>(column.as_str())
+                        .unwrap_or(None)
+                })
                 .collect()
         })
         .collect())
@@ -738,7 +751,10 @@ impl TriggerPost {
         TriggerPost {
             uri: original.uri.clone(),
             url: original.url.clone(),
-            acct: original.account.as_ref().map(|account| account.acct.clone()),
+            acct: original
+                .account
+                .as_ref()
+                .map(|account| account.acct.clone()),
             author_url: original.account.as_ref().map(|account| account.url.clone()),
             replies_count: original.reply_count,
             created_at: Some(timeutil::fmt_state_ts(original.created_at)),
@@ -907,12 +923,13 @@ where
 /// The whole remembered state, read back from the database. Expiry and the
 /// derived collections are applied by the caller (`StateStore::load`).
 pub async fn load_state(pool: &SqlitePool) -> Result<State> {
-    let mut state = State::default();
-
-    state.seen_urls = load_timestamped_set(pool, "seen_urls", "uri").await?;
-    state.known_followings = load_timestamped_set(pool, "known_followings", "acct").await?;
-    state.recently_checked_users =
-        load_timestamped_set(pool, "recently_checked_users", "acct").await?;
+    let mut state = State {
+        seen_urls: load_timestamped_set(pool, "seen_urls", "uri").await?,
+        known_followings: load_timestamped_set(pool, "known_followings", "acct").await?,
+        recently_checked_users: load_timestamped_set(pool, "recently_checked_users", "acct")
+            .await?,
+        ..Default::default()
+    };
 
     let rows = sqlx::query(
         "SELECT host, webserver, software, version, mastodon_api, misskey_api, lemmy_api, peertube_api, last_checked, error, raw_nodeinfo FROM seen_hosts ORDER BY rowid",
@@ -922,7 +939,9 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
     .map_err(db_error)?;
     for row in rows {
         let host_row = host_row(&row);
-        state.seen_hosts.add(&host_row.host, host_row.to_state_value());
+        state
+            .seen_hosts
+            .add(&host_row.host, host_row.to_state_value());
     }
 
     let rows = sqlx::query("SELECT uri, last_seen, created_at FROM context_cache ORDER BY rowid")
@@ -934,14 +953,17 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
         let last_seen = timeutil::parse(&row.get::<String, _>("last_seen"));
         let created_at = timeutil::parse(&row.get::<String, _>("created_at"));
         if let (Some(last_seen), Some(created_at)) = (last_seen, created_at) {
-            state.recently_checked_context.record(&uri, last_seen, created_at);
+            state
+                .recently_checked_context
+                .record(&uri, last_seen, created_at);
         }
     }
 
-    let rows = sqlx::query("SELECT url, remote_url, server, post_id FROM replied_toots ORDER BY rowid")
-        .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+    let rows =
+        sqlx::query("SELECT url, remote_url, server, post_id FROM replied_toots ORDER BY rowid")
+            .fetch_all(pool)
+            .await
+            .map_err(db_error)?;
     for row in rows {
         let url: String = row.get("url");
         let replied = match (
@@ -949,9 +971,10 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
             row.get::<Option<String>, _>("server"),
             row.get::<Option<String>, _>("post_id"),
         ) {
-            (Some(remote_url), Some(server), Some(post_id)) => {
-                Some(RepliedToot(remote_url, PostRef::new(server, post_id)))
-            }
+            (Some(remote_url), Some(server), Some(post_id)) => Some(RepliedToot {
+                url: remote_url,
+                post_ref: PostRef::new(server, post_id),
+            }),
             // all-NULL columns remember a lookup that found nothing
             _ => None,
         };
@@ -1014,21 +1037,26 @@ pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) ->
     let start = replied.len().saturating_sub(max_entries);
     for (url, toot) in &replied[start..] {
         let (remote_url, server, post_id) = match toot {
-            Some(RepliedToot(remote_url, post_ref)) => (
+            Some(RepliedToot {
+                url: remote_url,
+                post_ref,
+            }) => (
                 Some(remote_url.clone()),
-                Some(post_ref.0.clone()),
-                Some(post_ref.1.clone()),
+                Some(post_ref.server.clone()),
+                Some(post_ref.post_id.clone()),
             ),
             None => (None, None, None),
         };
-        sqlx::query("INSERT INTO replied_toots (url, remote_url, server, post_id) VALUES (?, ?, ?, ?)")
-            .bind(*url)
-            .bind(remote_url)
-            .bind(server)
-            .bind(post_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        sqlx::query(
+            "INSERT INTO replied_toots (url, remote_url, server, post_id) VALUES (?, ?, ?, ?)",
+        )
+        .bind(*url)
+        .bind(remote_url)
+        .bind(server)
+        .bind(post_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
     }
 
     tx.commit().await.map_err(db_error)?;
@@ -1063,7 +1091,10 @@ async fn save_timestamped_set(
     max_entries: usize,
 ) -> Result<()> {
     let delete = format!("DELETE FROM {table}");
-    sqlx::query(&delete).execute(&mut **tx).await.map_err(db_error)?;
+    sqlx::query(&delete)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_error)?;
     let entries: Vec<_> = set.entries().collect();
     let start = entries.len().saturating_sub(max_entries);
     let insert = format!("INSERT INTO {table} ({key_column}, first_seen) VALUES (?, ?)");
@@ -1192,7 +1223,9 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
         for n in 0..5 {
-            insert_log(&pool, &log_row(&format!("line {n}"))).await.unwrap();
+            insert_log(&pool, &log_row(&format!("line {n}")))
+                .await
+                .unwrap();
         }
         let lines = recent_logs(&pool, 2, LogSort::Time, LogOrder::Desc)
             .await
@@ -1241,7 +1274,9 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
         for n in 0..3 {
-            insert_log(&pool, &log_row(&format!("line {n}"))).await.unwrap();
+            insert_log(&pool, &log_row(&format!("line {n}")))
+                .await
+                .unwrap();
         }
         clear_logs(&pool).await.unwrap();
         assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
@@ -1263,7 +1298,9 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
         for n in 0..3 {
-            insert_log(&pool, &log_row(&format!("line {n}"))).await.unwrap();
+            insert_log(&pool, &log_row(&format!("line {n}")))
+                .await
+                .unwrap();
         }
         prune_logs(&pool, 1).await.unwrap();
         let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
@@ -1332,7 +1369,9 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
 
-        let id = start_run(&pool, "2026-10-22 16:05:07 -05:00").await.unwrap();
+        let id = start_run(&pool, "2026-10-22 16:05:07 -05:00")
+            .await
+            .unwrap();
         let runs = recent_runs(&pool, 10).await.unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].outcome, "running");
@@ -1348,7 +1387,11 @@ mod tests {
         .await
         .unwrap();
         let runs = recent_runs(&pool, 10).await.unwrap();
-        assert_eq!(runs.len(), 1, "finishing updates the row instead of adding one");
+        assert_eq!(
+            runs.len(),
+            1,
+            "finishing updates the row instead of adding one"
+        );
         assert_eq!(runs[0].outcome, "ok");
         assert_eq!(runs[0].finished, "2026-10-22 16:05:08 -05:00");
         assert_eq!(runs[0].message, "Processing finished in 0:00:01");
@@ -1359,8 +1402,12 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
 
-        let _stale = start_run(&pool, "2026-10-22 16:05:07 -05:00").await.unwrap();
-        let done = start_run(&pool, "2026-10-22 17:05:07 -05:00").await.unwrap();
+        let _stale = start_run(&pool, "2026-10-22 16:05:07 -05:00")
+            .await
+            .unwrap();
+        let done = start_run(&pool, "2026-10-22 17:05:07 -05:00")
+            .await
+            .unwrap();
         finish_run(&pool, done, "2026-10-22 17:05:08 -05:00", "ok", "done")
             .await
             .unwrap();
@@ -1382,11 +1429,9 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
 
-        assert!(
-            !is_private_post(&pool, "https://remote.example/@a/1")
-                .await
-                .unwrap()
-        );
+        assert!(!is_private_post(&pool, "https://remote.example/@a/1")
+            .await
+            .unwrap());
         assert!(
             mark_private_post(&pool, "https://remote.example/@a/1")
                 .await
@@ -1399,17 +1444,19 @@ mod tests {
                 .unwrap(),
             "marking again records nothing new"
         );
-        assert!(is_private_post(&pool, "https://remote.example/@a/1").await.unwrap());
-        assert!(
-            !is_private_post(&pool, "https://remote.example/@a/2")
-                .await
-                .unwrap()
-        );
+        assert!(is_private_post(&pool, "https://remote.example/@a/1")
+            .await
+            .unwrap());
+        assert!(!is_private_post(&pool, "https://remote.example/@a/2")
+            .await
+            .unwrap());
         drop(pool);
 
         let pool = open(&config).await.unwrap();
         assert!(
-            is_private_post(&pool, "https://remote.example/@a/1").await.unwrap(),
+            is_private_post(&pool, "https://remote.example/@a/1")
+                .await
+                .unwrap(),
             "the mark survives a reopen"
         );
     }
@@ -1420,7 +1467,9 @@ mod tests {
         let pool = open(&config).await.unwrap();
 
         assert_eq!(
-            opted_out_account_reason(&pool, "bot@remote.example").await.unwrap(),
+            opted_out_account_reason(&pool, "bot@remote.example")
+                .await
+                .unwrap(),
             None
         );
         assert!(
@@ -1436,14 +1485,18 @@ mod tests {
             "marking again records nothing new"
         );
         assert_eq!(
-            opted_out_account_reason(&pool, "bot@remote.example").await.unwrap(),
+            opted_out_account_reason(&pool, "bot@remote.example")
+                .await
+                .unwrap(),
             Some("it is not indexable".to_string())
         );
         drop(pool);
 
         let pool = open(&config).await.unwrap();
         assert_eq!(
-            opted_out_account_reason(&pool, "bot@remote.example").await.unwrap(),
+            opted_out_account_reason(&pool, "bot@remote.example")
+                .await
+                .unwrap(),
             Some("it is not indexable".to_string()),
             "the mark survives a reopen"
         );
@@ -1478,8 +1531,14 @@ mod tests {
             in_reply_to_id: Some("https://remote.example/@alice/0".to_string()),
             in_reply_to_account_id: Some("parent-id".to_string()),
             reply_count: Some(5),
-            account: Some(User::new("alice@remote.example", "https://remote.example/@alice")),
-            mentions: vec![User::new("bob@remote.example", "https://remote.example/@bob")],
+            account: Some(User::new(
+                "alice@remote.example",
+                "https://remote.example/@alice",
+            )),
+            mentions: vec![User::new(
+                "bob@remote.example",
+                "https://remote.example/@bob",
+            )],
         };
         let wrapper = Post {
             url: "https://home.example/@bob/2".to_string(),
@@ -1526,7 +1585,10 @@ mod tests {
             in_reply_to_id: None,
             in_reply_to_account_id: None,
             reply_count: None,
-            account: Some(User::new("alice@remote.example", "https://remote.example/@alice")),
+            account: Some(User::new(
+                "alice@remote.example",
+                "https://remote.example/@alice",
+            )),
             mentions: vec![],
         };
         let record = TriggerPost::from_post(&post, "replies");
@@ -1537,20 +1599,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::type_complexity)]
     async fn trigger_posts_are_recorded_once_and_refreshed() {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
 
-        assert!(
-            trigger_post(&pool, "https://remote.example/@a/1")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(trigger_post(&pool, "https://remote.example/@a/1")
+            .await
+            .unwrap()
+            .is_none());
         assert_eq!(
             record_trigger_posts(
                 &pool,
-                &[sample_trigger_post("https://remote.example/@a/1", "home timeline")],
+                &[sample_trigger_post(
+                    "https://remote.example/@a/1",
+                    "home timeline"
+                )],
                 100,
             )
             .await
@@ -1602,8 +1666,15 @@ mod tests {
         .unwrap();
         assert_eq!(row.0, long_ago, "first_seen is kept from the first record");
         assert_ne!(row.1, long_ago, "last_seen is refreshed");
-        assert_eq!(row.2, "home timeline", "source is kept from the first record");
-        assert_eq!(row.3, Some(7), "the reply count follows the newest sighting");
+        assert_eq!(
+            row.2, "home timeline",
+            "source is kept from the first record"
+        );
+        assert_eq!(
+            row.3,
+            Some(7),
+            "the reply count follows the newest sighting"
+        );
         assert_eq!(
             row.4.as_deref(),
             Some("https://remote.example/@a/0"),
@@ -1633,9 +1704,13 @@ mod tests {
             .await
             .unwrap();
         }
-        record_trigger_posts(&pool, &[sample_trigger_post("https://remote.example/new", "test")], 3)
-            .await
-            .unwrap();
+        record_trigger_posts(
+            &pool,
+            &[sample_trigger_post("https://remote.example/new", "test")],
+            3,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(table_count(&pool, "trigger_posts").await.unwrap(), 3);
         assert!(
@@ -1666,7 +1741,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("fedifetcher.db");
         let setup = SqlitePoolOptions::new()
-            .connect_with(SqliteConnectOptions::new().filename(&path).create_if_missing(true))
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
             .await
             .unwrap();
         sqlx::query(
@@ -1726,15 +1805,19 @@ mod tests {
                 "lemmyApiSupport": false, "peertubeApiSupport": false,
             }),
         );
-        state
-            .seen_hosts
-            .add("down.example", crate::servers::failed_lookup_state("prohibited by robots.txt"));
+        state.seen_hosts.add(
+            "down.example",
+            crate::servers::failed_lookup_state("prohibited by robots.txt"),
+        );
         save_state(&pool, &state, 1000).await.unwrap();
 
         let columns = table_columns(&pool, "seen_hosts").await.unwrap();
         assert!(columns.contains(&"software".to_string()));
         assert!(columns.contains(&"mastodon_api".to_string()));
-        assert!(!columns.contains(&"info".to_string()), "no JSON blob column");
+        assert!(
+            !columns.contains(&"info".to_string()),
+            "no JSON blob column"
+        );
 
         let row: (Option<String>, Option<String>, bool, bool, String) = sqlx::query_as(
             "SELECT software, version, mastodon_api, peertube_api, raw_nodeinfo FROM seen_hosts WHERE host = 'remote.example'",
@@ -1753,9 +1836,10 @@ mod tests {
 
         // and the state reads back as it was
         let loaded = load_state(&pool).await.unwrap();
-        let info =
-            crate::servers::ServerInfo::from_state(loaded.seen_hosts.get("remote.example").unwrap())
-                .unwrap();
+        let info = crate::servers::ServerInfo::from_state(
+            loaded.seen_hosts.get("remote.example").unwrap(),
+        )
+        .unwrap();
         assert_eq!(info.software, "mastodon");
         assert_eq!(info.version, "4.3.0");
         assert!(info.supports(crate::servers::ApiFlavour::Mastodon));
@@ -1778,7 +1862,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("fedifetcher.db");
         let setup = SqlitePoolOptions::new()
-            .connect_with(SqliteConnectOptions::new().filename(&path).create_if_missing(true))
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
             .await
             .unwrap();
         sqlx::query("CREATE TABLE seen_hosts (host TEXT PRIMARY KEY, info TEXT NOT NULL)")
@@ -1809,8 +1897,14 @@ mod tests {
 
         let pool = open(&config).await.unwrap();
         let columns = table_columns(&pool, "seen_hosts").await.unwrap();
-        assert!(columns.contains(&"software".to_string()), "the fields are columns now");
-        assert!(!columns.contains(&"info".to_string()), "the JSON blob is gone");
+        assert!(
+            columns.contains(&"software".to_string()),
+            "the fields are columns now"
+        );
+        assert!(
+            !columns.contains(&"info".to_string()),
+            "the JSON blob is gone"
+        );
 
         let row: (Option<String>, Option<String>, bool, Option<String>) = sqlx::query_as(
             "SELECT software, version, mastodon_api, error FROM seen_hosts WHERE host = 'remote.example'",
@@ -1822,12 +1916,11 @@ mod tests {
         assert_eq!(row.1.as_deref(), Some("4.3.0"));
         assert!(row.2);
         assert_eq!(row.3, None);
-        let row: (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT software, error FROM seen_hosts WHERE host = 'down.example'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT software, error FROM seen_hosts WHERE host = 'down.example'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(row.0, None);
         assert_eq!(row.1.as_deref(), Some("prohibited by robots.txt"));
 
@@ -1838,10 +1931,10 @@ mod tests {
                 .unwrap();
         assert_eq!(info.software, "mastodon");
         assert!(info.supports(crate::servers::ApiFlavour::Mastodon));
-        assert!(
-            crate::servers::ServerInfo::from_state(state.seen_hosts.get("down.example").unwrap())
-                .is_none()
-        );
+        assert!(crate::servers::ServerInfo::from_state(
+            state.seen_hosts.get("down.example").unwrap()
+        )
+        .is_none());
     }
 
     #[tokio::test]
@@ -1932,10 +2025,12 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO scratch (name, note) VALUES ('x', NULL), ('y', 'text'), ('z', 42)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO scratch (name, note) VALUES ('x', NULL), ('y', 'text'), ('z', 42)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let columns = table_columns(&pool, "scratch").await.unwrap();
         assert_eq!(columns, ["name", "note"]);
@@ -1943,10 +2038,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows[0], [Some("x".to_string()), None], "SQL NULL is None");
-        assert_eq!(
-            rows[1],
-            [Some("y".to_string()), Some("text".to_string())]
-        );
+        assert_eq!(rows[1], [Some("y".to_string()), Some("text".to_string())]);
         assert_eq!(rows[2][1].as_deref(), Some("42"), "integers are text");
     }
 
@@ -1961,12 +2053,10 @@ mod tests {
         assert_eq!(table_count(&pool, "known_context_posts").await.unwrap(), 1);
 
         // a sighting with nothing found records nothing
-        assert!(
-            record_known_context_posts(&pool, &[])
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(record_known_context_posts(&pool, &[])
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1976,13 +2066,15 @@ mod tests {
 
         let uri = "https://remote.example/@a/1";
         let long_ago = timeutil::fmt_state_ts(timeutil::now() - time::Duration::days(30));
-        sqlx::query("INSERT INTO known_context_posts (uri, first_seen, last_seen) VALUES (?, ?, ?)")
-            .bind(uri)
-            .bind(&long_ago)
-            .bind(&long_ago)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO known_context_posts (uri, first_seen, last_seen) VALUES (?, ?, ?)",
+        )
+        .bind(uri)
+        .bind(&long_ago)
+        .bind(&long_ago)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let previous = record_known_context_posts(&pool, &[uri.to_string()])
             .await
@@ -2001,7 +2093,10 @@ mod tests {
                 .unwrap();
         assert_eq!(row.0, long_ago, "first_seen is kept from the first record");
         assert_ne!(row.1, long_ago, "last_seen is refreshed");
-        assert!(timeutil::parse(&row.1).is_some(), "the refresh is a real timestamp");
+        assert!(
+            timeutil::parse(&row.1).is_some(),
+            "the refresh is a real timestamp"
+        );
     }
 
     #[tokio::test]
@@ -2010,25 +2105,35 @@ mod tests {
         let pool = open(&config).await.unwrap();
         let columns = table_columns(&pool, "logs").await.unwrap();
 
-        assert!(
-            table_rows(&pool, "logs; DROP TABLE logs", &columns, "id", LogOrder::Asc, 10)
-                .await
-                .is_err()
-        );
-        assert!(
-            table_rows(&pool, "logs", &columns, "id; DROP TABLE logs", LogOrder::Asc, 10)
-                .await
-                .is_err()
-        );
+        assert!(table_rows(
+            &pool,
+            "logs; DROP TABLE logs",
+            &columns,
+            "id",
+            LogOrder::Asc,
+            10
+        )
+        .await
+        .is_err());
+        assert!(table_rows(
+            &pool,
+            "logs",
+            &columns,
+            "id; DROP TABLE logs",
+            LogOrder::Asc,
+            10
+        )
+        .await
+        .is_err());
         assert!(
             table_rows(&pool, "logs", &columns, "not_a_column", LogOrder::Asc, 10)
                 .await
                 .is_err(),
             "a sort column must be a real column"
         );
-        assert!(
-            table_columns(&pool, "logs\"; DROP TABLE logs").await.is_err()
-        );
+        assert!(table_columns(&pool, "logs\"; DROP TABLE logs")
+            .await
+            .is_err());
         assert!(table_count(&pool, "").await.is_err());
         // and the table survives
         assert!(table_count(&pool, "logs").await.is_ok());
@@ -2042,7 +2147,10 @@ mod tests {
         assert!(load_config(&pool).await.unwrap().is_empty());
 
         let mut values = RawValues::new();
-        values.insert("server".to_string(), Value::String("example.social".to_string()));
+        values.insert(
+            "server".to_string(),
+            Value::String("example.social".to_string()),
+        );
         values.insert(
             "access_tokens".to_string(),
             Value::Array(vec![Value::String("tok".to_string())]),
@@ -2054,7 +2162,10 @@ mod tests {
 
         // saving again replaces: options absent from the new set are cleared
         let mut cleared = RawValues::new();
-        cleared.insert("server".to_string(), Value::String("other.example".to_string()));
+        cleared.insert(
+            "server".to_string(),
+            Value::String("other.example".to_string()),
+        );
         save_config(&pool, &cleared).await.unwrap();
         assert_eq!(load_config(&pool).await.unwrap(), cleared);
     }
@@ -2076,15 +2187,19 @@ mod tests {
                 "mastodonApiSupport": true, "peertubeApiSupport": false,
             }),
         );
-        state.recently_checked_context.mark_fetched("uri", timeutil::now());
+        state
+            .recently_checked_context
+            .mark_fetched("uri", timeutil::now());
         state.replied_toot_server_ids.insert(
             "https://home.example/@b/2".to_string(),
-            Some(RepliedToot(
-                "https://remote.example/@a/1".to_string(),
-                PostRef::new("remote.example", "1"),
-            )),
+            Some(RepliedToot {
+                url: "https://remote.example/@a/1".to_string(),
+                post_ref: PostRef::new("remote.example", "1"),
+            }),
         );
-        state.replied_toot_server_ids.insert("https://home.example/@b/3".to_string(), None);
+        state
+            .replied_toot_server_ids
+            .insert("https://home.example/@b/3".to_string(), None);
         save_state(&pool, &state, 100).await.unwrap();
 
         let loaded = load_state(&pool).await.unwrap();
@@ -2094,14 +2209,18 @@ mod tests {
         assert!(loaded.seen_hosts.contains("remote.example"));
         assert!(loaded.recently_checked_context.contains("uri"));
         assert_eq!(
-            loaded.replied_toot_server_ids.get("https://home.example/@b/2"),
-            Some(&Some(RepliedToot(
-                "https://remote.example/@a/1".to_string(),
-                PostRef::new("remote.example", "1")
-            )))
+            loaded
+                .replied_toot_server_ids
+                .get("https://home.example/@b/2"),
+            Some(&Some(RepliedToot {
+                url: "https://remote.example/@a/1".to_string(),
+                post_ref: PostRef::new("remote.example", "1")
+            }))
         );
         assert_eq!(
-            loaded.replied_toot_server_ids.get("https://home.example/@b/3"),
+            loaded
+                .replied_toot_server_ids
+                .get("https://home.example/@b/3"),
             Some(&None),
             "a failed lookup is remembered as a NULL row"
         );
@@ -2119,7 +2238,9 @@ mod tests {
 
         let mut state = State::default();
         for n in 0..5 {
-            state.seen_urls.add(&format!("https://remote.example/{n}"), None);
+            state
+                .seen_urls
+                .add(&format!("https://remote.example/{n}"), None);
         }
         save_state(&pool, &state, 3).await.unwrap();
 
@@ -2135,18 +2256,33 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
 
-        assert_eq!(robots_cached(&pool, "https://a.example/robots.txt").await.unwrap(), None);
-        robots_store(&pool, "https://a.example/robots.txt", "allow").await.unwrap();
-        robots_store(&pool, "https://b.example/robots.txt", "allow").await.unwrap();
         assert_eq!(
-            robots_cached(&pool, "https://a.example/robots.txt").await.unwrap(),
+            robots_cached(&pool, "https://a.example/robots.txt")
+                .await
+                .unwrap(),
+            None
+        );
+        robots_store(&pool, "https://a.example/robots.txt", "allow")
+            .await
+            .unwrap();
+        robots_store(&pool, "https://b.example/robots.txt", "allow")
+            .await
+            .unwrap();
+        assert_eq!(
+            robots_cached(&pool, "https://a.example/robots.txt")
+                .await
+                .unwrap(),
             Some("allow".to_string())
         );
 
         // storing again replaces the earlier copy
-        robots_store(&pool, "https://a.example/robots.txt", "deny").await.unwrap();
+        robots_store(&pool, "https://a.example/robots.txt", "deny")
+            .await
+            .unwrap();
         assert_eq!(
-            robots_cached(&pool, "https://a.example/robots.txt").await.unwrap(),
+            robots_cached(&pool, "https://a.example/robots.txt")
+                .await
+                .unwrap(),
             Some("deny".to_string())
         );
 
@@ -2158,10 +2294,22 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert_eq!(robots_discard_stale(&pool, time::Duration::days(1)).await.unwrap(), 1);
-        assert_eq!(robots_cached(&pool, "https://a.example/robots.txt").await.unwrap(), None);
         assert_eq!(
-            robots_cached(&pool, "https://b.example/robots.txt").await.unwrap(),
+            robots_discard_stale(&pool, time::Duration::days(1))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            robots_cached(&pool, "https://a.example/robots.txt")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            robots_cached(&pool, "https://b.example/robots.txt")
+                .await
+                .unwrap(),
             Some("allow".to_string()),
             "a fresh entry is kept"
         );

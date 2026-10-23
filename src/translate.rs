@@ -1,7 +1,7 @@
 //! What every client needs to turn what a server sent into a shape we use.
 //!
-//! The shapes themselves are in `posts` and `users`; the `to_post` and
-//! `to_user` that build them live with the client that knows the dialect.
+//! The shapes themselves are in `posts` and `users`; the `parse_post` and
+//! `parse_user` that build them live with the client that knows the dialect.
 //! These are the three things all of those translations have in common.
 
 use regex::Regex;

@@ -1,9 +1,8 @@
 //! Datetime handling.
 //!
-//! The Python original passes `datetime`s around and serializes them with
-//! `str()`, producing strings like `2026-10-22 01:23:45.123456+00:00`. To keep
-//! state files readable and writable by both implementations, timestamps are
-//! written in that same shape, and both that shape and RFC 3339 are accepted
+//! Timestamps are written in the `str(datetime)` shape
+//! (`2026-10-22 01:23:45.123456+00:00`) for compatibility with state files
+//! written by earlier versions. Both that shape and RFC 3339 are accepted
 //! when reading.
 
 use time::macros::format_description;
@@ -182,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_python_str_shape() {
+    fn parses_the_legacy_datetime_shape() {
         let dt = parse("2026-10-22 01:23:45.123456+00:00").unwrap();
         assert_eq!(dt, datetime!(2026-10-22 01:23:45.123456 UTC));
         let dt = parse("2026-10-22 01:23:45+00:00").unwrap();
@@ -216,16 +215,16 @@ mod tests {
         let text = fmt_state_ts(dt);
         assert_eq!(text.len(), 25, "{text}");
         assert!(!text.contains('.'), "{text}");
-        assert!(text.as_bytes()[19] == b'+' || text.as_bytes()[19] == b'-', "{text}");
+        assert!(
+            text.as_bytes()[19] == b'+' || text.as_bytes()[19] == b'-',
+            "{text}"
+        );
         assert_eq!(parse(&text).unwrap(), dt);
     }
 
     #[test]
-    fn timedelta_formats_like_python() {
-        assert_eq!(
-            fmt_timedelta(Duration::seconds(5 * 60 + 23)),
-            "0:05:23"
-        );
+    fn timedelta_formats_with_days_and_fraction() {
+        assert_eq!(fmt_timedelta(Duration::seconds(5 * 60 + 23)), "0:05:23");
         assert_eq!(
             fmt_timedelta(Duration::days(1) + Duration::seconds(5)),
             "1 day, 0:00:05"

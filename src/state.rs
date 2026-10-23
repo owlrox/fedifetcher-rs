@@ -299,7 +299,10 @@ mod tests {
         cache.add("a.example", serde_json::json!({"x": 1}));
         assert!(cache.remove("a.example").is_some());
         assert!(!cache.contains("a.example"));
-        assert!(cache.remove("a.example").is_none(), "removing twice finds nothing");
+        assert!(
+            cache.remove("a.example").is_none(),
+            "removing twice finds nothing"
+        );
     }
 
     #[test]
@@ -329,20 +332,29 @@ mod tests {
         // too old: dropped
         cache.add("stale", info(now - Duration::days(31), "x"));
         // failed lookup, older than an hour: dropped
-        cache.add("failed", serde_json::json!({
-            "info": null, "last_checked": timeutil::fmt_state_ts(now - Duration::hours(2)),
-            "peertubeApiSupport": false,
-        }));
+        cache.add(
+            "failed",
+            serde_json::json!({
+                "info": null, "last_checked": timeutil::fmt_state_ts(now - Duration::hours(2)),
+                "peertubeApiSupport": false,
+            }),
+        );
         // failed lookup, recent: kept
-        cache.add("failed-recent", serde_json::json!({
-            "info": null, "last_checked": timeutil::fmt_state_ts(now - Duration::minutes(5)),
-            "peertubeApiSupport": false,
-        }));
+        cache.add(
+            "failed-recent",
+            serde_json::json!({
+                "info": null, "last_checked": timeutil::fmt_state_ts(now - Duration::minutes(5)),
+                "peertubeApiSupport": false,
+            }),
+        );
         // entry from before peertube support existed: dropped whatever its age
-        cache.add("legacy", serde_json::json!({
-            "webserver": "h", "software": "mastodon", "version": "4",
-            "last_checked": timeutil::fmt_state_ts(now),
-        }));
+        cache.add(
+            "legacy",
+            serde_json::json!({
+                "webserver": "h", "software": "mastodon", "version": "4",
+                "last_checked": timeutil::fmt_state_ts(now),
+            }),
+        );
 
         let dropped = cache.expire(Duration::days(30), Duration::hours(1));
         assert_eq!(dropped, 3);

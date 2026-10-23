@@ -9,7 +9,12 @@ use httpmock::prelude::*;
 use httpmock::Method;
 use uuid::Uuid;
 
-async fn notifier(dir: &std::path::Path, on_start: Option<String>, on_done: Option<String>, on_fail: Option<String>) -> Notifier {
+async fn notifier(
+    dir: &std::path::Path,
+    on_start: Option<String>,
+    on_done: Option<String>,
+    on_fail: Option<String>,
+) -> Notifier {
     let mut config = common::test_config(dir, "example.social");
     config.on_start = on_start;
     config.on_done = on_done;
@@ -32,7 +37,9 @@ async fn the_callback_is_really_sent() {
         .await;
     let ping = server
         .mock_async(|when, then| {
-            when.method(Method::GET).path("/start").query_param_exists("rid");
+            when.method(Method::GET)
+                .path("/start")
+                .query_param_exists("rid");
             then.status(200);
         })
         .await;
@@ -56,10 +63,9 @@ async fn callbacks_carry_the_run_id() {
     let dir = common::tmp_dir();
     let ping = server
         .mock_async(|when, then| {
-            when.method(Method::GET).path("/start").query_param(
-                "rid",
-                "00000000-0000-0000-0000-000000000001",
-            );
+            when.method(Method::GET)
+                .path("/start")
+                .query_param("rid", "00000000-0000-0000-0000-000000000001");
             then.status(200);
         })
         .await;
@@ -90,7 +96,13 @@ async fn the_done_callback_reports_how_long_it_took() {
             then.status(200);
         })
         .await;
-    let notify = notifier(&dir, None, Some(format!("{}/done", server.base_url())), None).await;
+    let notify = notifier(
+        &dir,
+        None,
+        Some(format!("{}/done", server.base_url())),
+        None,
+    )
+    .await;
 
     notify.done("all finished").await;
 

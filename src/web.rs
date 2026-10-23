@@ -19,15 +19,15 @@ use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::api::mastodon::{HomeServer, masked};
+use crate::api::mastodon::{masked, HomeServer};
 use crate::backfill::UserSet;
-use crate::config::{Config, RawValues, is_known_option, option_description};
+use crate::config::{is_known_option, option_description, Config, RawValues};
 use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
-use crate::run::{CancelToken, run_once};
-use crate::store::{State, StateStore, lock};
+use crate::run::{run_once, CancelToken};
+use crate::store::{lock, State, StateStore};
 use crate::timeutil;
 use crate::VERSION;
 
@@ -347,15 +347,16 @@ async fn data(
                 .find(|(table, _)| table == name)
                 .map(|(_, count)| *count)
                 .unwrap_or(0);
-            let rows = match db::table_rows(&state.db, name, &columns, &sort, order, TABLE_ROWS_SHOWN)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(ex) => {
-                    tracing::warn!("Could not read the {name} table: {ex}");
-                    Vec::new()
-                }
-            };
+            let rows =
+                match db::table_rows(&state.db, name, &columns, &sort, order, TABLE_ROWS_SHOWN)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(ex) => {
+                        tracing::warn!("Could not read the {name} table: {ex}");
+                        Vec::new()
+                    }
+                };
             TabView::Table {
                 name: name.clone(),
                 columns,
@@ -484,7 +485,10 @@ async fn save_config(
 
     if let Err(ex) = db::save_config(&state.db, &config.to_raw_values()).await {
         tracing::warn!("POST /config: not saved: {ex}");
-        return Err(save_error(StatusCode::INTERNAL_SERVER_ERROR, &ex.to_string()));
+        return Err(save_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &ex.to_string(),
+        ));
     }
     let after = config.to_raw_values();
     // option names only: the values can hold access tokens
@@ -778,8 +782,16 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str) {
     let cancel = CancelToken::new();
     match kind {
         "post" => {
-            fetch::force_post_context(&config, &home, &http, session.state(), &state.db, &cancel, key)
-                .await
+            fetch::force_post_context(
+                &config,
+                &home,
+                &http,
+                session.state(),
+                &state.db,
+                &cancel,
+                key,
+            )
+            .await
         }
         "user" => {
             let target = match set {
@@ -787,7 +799,14 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str) {
                 _ => UserSet::RecentlyCheckedUsers,
             };
             fetch::force_user_posts(
-                &config, &home, &http, session.state(), &state.db, &cancel, key, target,
+                &config,
+                &home,
+                &http,
+                session.state(),
+                &state.db,
+                &cancel,
+                key,
+                target,
             )
             .await
         }
@@ -1238,9 +1257,22 @@ fn hosts_table(
                 _ => ("lookup failed".to_string(), String::new()),
             }
         } else {
-            (text("software"), if apis.is_empty() { "none".to_string() } else { apis })
+            (
+                text("software"),
+                if apis.is_empty() {
+                    "none".to_string()
+                } else {
+                    apis
+                },
+            )
         };
-        rows.push((host.clone(), software, text("version"), apis, text("last_checked")));
+        rows.push((
+            host.clone(),
+            software,
+            text("version"),
+            apis,
+            text("last_checked"),
+        ));
     }
     // hosts alphabetically; the tie order for every other column
     rows.sort();
@@ -1414,9 +1446,9 @@ fn table_tab(
 /// posting to /fetch, which runs it in the background and redirects back to
 /// `back`.
 fn fetch_button(action: &TableAction, key: &str, back: &str) -> AnyView {
-    let set_field = action.set.map(|set| {
-        view! { <input type="hidden" name="set" value={set}/> }.into_any()
-    });
+    let set_field = action
+        .set
+        .map(|set| view! { <input type="hidden" name="set" value={set}/> }.into_any());
     view! {
         <td>
             <form method="post" action="/fetch" class="fetch">
@@ -1558,13 +1590,20 @@ fn sort_link(
 #[component]
 fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
-    let db_path = config.state_dir.join("fedifetcher.db").display().to_string();
+    let db_path = config
+        .state_dir
+        .join("fedifetcher.db")
+        .display()
+        .to_string();
     let optional = |value: &Option<String>| value.clone().unwrap_or_default();
     let mut rows: Vec<AnyView> = Vec::new();
     rows.push(text_row("server", &config.server));
     rows.push(tokens_row(&config));
     rows.push(text_row("user", &config.user));
-    rows.push(int_row("reply_interval_in_hours", config.reply_interval_in_hours));
+    rows.push(int_row(
+        "reply_interval_in_hours",
+        config.reply_interval_in_hours,
+    ));
     rows.push(int_row("home_timeline_length", config.home_timeline_length));
     rows.push(int_row("max_followings", config.max_followings));
     rows.push(int_row("max_followers", config.max_followers));
@@ -1575,13 +1614,31 @@ fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
     rows.push(bool_row("from_lists", config.from_lists));
     rows.push(int_row("max_list_length", config.max_list_length));
     rows.push(int_row("max_list_accounts", config.max_list_accounts));
-    rows.push(int_row("max_posts_per_account", config.max_posts_per_account));
-    rows.push(bool_row("backfill_with_context", config.backfill_with_context));
-    rows.push(bool_row("backfill_mentioned_users", config.backfill_mentioned_users));
+    rows.push(int_row(
+        "max_posts_per_account",
+        config.max_posts_per_account,
+    ));
+    rows.push(bool_row(
+        "backfill_with_context",
+        config.backfill_with_context,
+    ));
+    rows.push(bool_row(
+        "backfill_mentioned_users",
+        config.backfill_mentioned_users,
+    ));
     rows.push(bool_row("respect_robots_txt", config.respect_robots_txt));
-    rows.push(bool_row("respect_user_opt_out", config.respect_user_opt_out));
-    rows.push(int_row("remember_users_for_hours", config.remember_users_for_hours));
-    rows.push(int_row("remember_hosts_for_days", config.remember_hosts_for_days));
+    rows.push(bool_row(
+        "respect_user_opt_out",
+        config.respect_user_opt_out,
+    ));
+    rows.push(int_row(
+        "remember_users_for_hours",
+        config.remember_users_for_hours,
+    ));
+    rows.push(int_row(
+        "remember_hosts_for_days",
+        config.remember_hosts_for_days,
+    ));
     rows.push(int_row("http_timeout", config.http_timeout));
     rows.push(text_row(
         "rate_limit_cooldown",
@@ -1592,12 +1649,25 @@ fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
             .collect::<Vec<_>>()
             .join(", "),
     ));
-    rows.push(bool_row("hide_server_in_user_agent", config.hide_server_in_user_agent));
-    rows.push(text_row("instance_blocklist", &config.instance_blocklist.join(", ")));
-    rows.push(text_row("state_dir", &config.state_dir.display().to_string()));
+    rows.push(bool_row(
+        "hide_server_in_user_agent",
+        config.hide_server_in_user_agent,
+    ));
+    rows.push(text_row(
+        "instance_blocklist",
+        &config.instance_blocklist.join(", "),
+    ));
+    rows.push(text_row(
+        "state_dir",
+        &config.state_dir.display().to_string(),
+    ));
     rows.push(text_row(
         "lock_file",
-        &config.lock_file.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
+        &config
+            .lock_file
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
     ));
     rows.push(int_row("lock_hours", config.lock_hours));
     rows.push(text_row("on_start", &optional(&config.on_start)));
@@ -1733,7 +1803,8 @@ fn debug_result_view(outcome: &DebugOutcome) -> AnyView {
                 .iter()
                 .map(|post| {
                     let url = text_field(post, "url");
-                    let content = snippet(post.get("content").and_then(Value::as_str).unwrap_or(""));
+                    let content =
+                        snippet(post.get("content").and_then(Value::as_str).unwrap_or(""));
                     view! {
                         <tr>
                             <td>{text_field(post, "created_at")}</td>

@@ -6,12 +6,9 @@ use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info};
 
 use crate::api::mastodon::HomeServer;
-use crate::backfill::{UserSet, add_user_posts, filter_known_users};
+use crate::backfill::{add_user_posts, filter_known_users, UserSet};
 use crate::config::Config;
-use crate::context::{
-    add_context_urls, get_all_context_urls, get_all_known_context_urls,
-    get_all_replied_toot_server_ids,
-};
+use crate::context::{add_context_urls, context_urls, known_context_urls, replied_toot_server_ids};
 use crate::error::Result;
 use crate::http::HttpClient;
 use crate::posts::Post;
@@ -32,7 +29,7 @@ pub struct Context<'a> {
 }
 
 /// Get all replies to other users by the given users in the last day.
-pub async fn get_all_reply_toots(
+pub async fn reply_toots(
     home: &HomeServer,
     user_ids: &[String],
     reply_interval_hours: i64,
@@ -48,14 +45,14 @@ pub async fn get_all_reply_toots(
         if cancel.is_cancelled() {
             break;
         }
-        reply_toots.extend(get_reply_toots(user_id, home, replies_since, state).await);
+        reply_toots.extend(reply_toots_for_user(user_id, home, replies_since, state).await);
     }
     info!("Found {} reply toots", reply_toots.len());
     reply_toots
 }
 
 /// Get replies by the user to other users since the given date.
-async fn get_reply_toots(
+async fn reply_toots_for_user(
     user_id: &str,
     home: &HomeServer,
     reply_since: OffsetDateTime,
@@ -86,6 +83,7 @@ async fn get_reply_toots(
     toots
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_timeline_context(
     timeline_posts: Vec<Post>,
     home: &HomeServer,
@@ -96,7 +94,7 @@ async fn fetch_timeline_context(
     db: &SqlitePool,
     source: &str,
 ) {
-    let known_context_urls = get_all_known_context_urls(
+    let known_context_urls = known_context_urls(
         &config.server,
         &timeline_posts,
         http,
@@ -115,7 +113,8 @@ async fn fetch_timeline_context(
         let cut_off = timeutil::now_local() - Duration::minutes(60);
         for toot in &timeline_posts {
             let mut these_users: Vec<User> = Vec::new();
-            if mentioned_users.len() < 10 || (toot.created_at > cut_off && mentioned_users.len() < 30)
+            if mentioned_users.len() < 10
+                || (toot.created_at > cut_off && mentioned_users.len() < 30)
             {
                 these_users.extend(accounts_named_by(toot));
                 if let Some(reblog) = &toot.reblog {
@@ -217,7 +216,7 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
         .home
         .active_user_ids(ctx.config.reply_interval_in_hours as f64)
         .await?;
-    let reply_toots = get_all_reply_toots(
+    let reply_toots = reply_toots(
         ctx.home,
         &user_ids,
         ctx.config.reply_interval_in_hours,
@@ -225,7 +224,7 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
         ctx.state,
     )
     .await;
-    let known_context_urls = get_all_known_context_urls(
+    let known_context_urls = known_context_urls(
         &ctx.config.server,
         &reply_toots,
         ctx.http,
@@ -237,7 +236,7 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
     )
     .await;
     ctx.state.seen_urls.update(known_context_urls);
-    let replied_toot_ids = get_all_replied_toot_server_ids(
+    let replied_toot_ids = replied_toot_server_ids(
         &ctx.config.server,
         &reply_toots,
         ctx.http,
@@ -245,7 +244,7 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
         ctx.state,
     )
     .await;
-    let context_urls = get_all_context_urls(
+    let context_urls = context_urls(
         &ctx.config.server,
         replied_toot_ids,
         ctx.http,
@@ -282,7 +281,10 @@ async fn backfill_followings(ctx: &mut Context<'_>) -> Result<()> {
         ctx.config.max_followings
     );
     let user_id = ctx.home.user_id(config_user(ctx.config)).await?;
-    let followings = ctx.home.following(&user_id, ctx.config.max_followings).await?;
+    let followings = ctx
+        .home
+        .following(&user_id, ctx.config.max_followings)
+        .await?;
     let total = followings.len();
     let new_followings = filter_known_users(followings, &ctx.state.all_known_users);
     let new = new_followings.len();
@@ -304,9 +306,15 @@ async fn backfill_followings(ctx: &mut Context<'_>) -> Result<()> {
 
 /// Backfill posts of accounts that recently followed our user.
 async fn backfill_followers(ctx: &mut Context<'_>) -> Result<()> {
-    info!("Getting posts from last {} followers", ctx.config.max_followers);
+    info!(
+        "Getting posts from last {} followers",
+        ctx.config.max_followers
+    );
     let user_id = ctx.home.user_id(config_user(ctx.config)).await?;
-    let followers = ctx.home.followers(&user_id, ctx.config.max_followers).await?;
+    let followers = ctx
+        .home
+        .followers(&user_id, ctx.config.max_followers)
+        .await?;
     let total = followers.len();
     let new_followers = filter_known_users(followers, &ctx.state.all_known_users);
     let new = new_followers.len();
@@ -384,7 +392,10 @@ async fn backfill_from_notifications(ctx: &mut Context<'_>) -> Result<()> {
 
 /// Pull replies to the API key owner's bookmarks.
 async fn fetch_bookmark_context(ctx: &mut Context<'_>) -> Result<()> {
-    info!("Pulling replies to the last {} bookmarks", ctx.config.max_bookmarks);
+    info!(
+        "Pulling replies to the last {} bookmarks",
+        ctx.config.max_bookmarks
+    );
     let bookmarks = ctx.home.bookmarks(ctx.config.max_bookmarks).await?;
     pull_context_for(ctx, bookmarks, "bookmarks").await;
     Ok(())
@@ -402,7 +413,7 @@ async fn fetch_favourite_context(ctx: &mut Context<'_>) -> Result<()> {
 }
 
 async fn pull_context_for(ctx: &mut Context<'_>, posts: Vec<Post>, source: &str) {
-    let known_context_urls = get_all_known_context_urls(
+    let known_context_urls = known_context_urls(
         &ctx.config.server,
         &posts,
         ctx.http,

@@ -37,7 +37,10 @@ pub fn default_state_dir() -> PathBuf {
         }
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".local").join("state").join("fedifetcher");
+        return PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("fedifetcher");
     }
     PathBuf::from(".local/state/fedifetcher")
 }
@@ -175,13 +178,19 @@ impl Config {
     pub fn normalize_server(server: &str) -> String {
         let pattern = Regex::new(r"^(https://)?([^/]*)/?$").unwrap();
         match pattern.captures(server) {
-            Some(captures) => captures.get(2).map(|m| m.as_str()).unwrap_or(server).to_string(),
+            Some(captures) => captures
+                .get(2)
+                .map(|m| m.as_str())
+                .unwrap_or(server)
+                .to_string(),
             None => server.to_string(),
         }
     }
 
     pub fn lock_path(&self) -> PathBuf {
-        self.lock_file.clone().unwrap_or_else(|| self.state_dir.join("lock.lock"))
+        self.lock_file
+            .clone()
+            .unwrap_or_else(|| self.state_dir.join("lock.lock"))
     }
 
     /// Which tasks a run will do, in the order it will do them. An empty
@@ -219,7 +228,7 @@ impl Config {
     }
 
     /// Overlay raw values onto this config, coercing them the same way
-    /// `build_config` does, and normalizing the server name.
+    /// `Config::from_values` does, and normalizing the server name.
     pub fn apply_values(&mut self, values: &RawValues) -> Result<(), ConfigError> {
         apply(self, values)?;
         self.server = Config::normalize_server(&self.server);
@@ -244,8 +253,14 @@ impl Config {
                     .collect(),
             ),
         );
-        put("reply_interval_in_hours", Value::from(self.reply_interval_in_hours));
-        put("home_timeline_length", Value::from(self.home_timeline_length));
+        put(
+            "reply_interval_in_hours",
+            Value::from(self.reply_interval_in_hours),
+        );
+        put(
+            "home_timeline_length",
+            Value::from(self.home_timeline_length),
+        );
         put("user", Value::String(self.user.clone()));
         put("max_followings", Value::from(self.max_followings));
         put("max_followers", Value::from(self.max_followers));
@@ -256,13 +271,31 @@ impl Config {
         put("from_lists", Value::Bool(self.from_lists));
         put("max_list_length", Value::from(self.max_list_length));
         put("max_list_accounts", Value::from(self.max_list_accounts));
-        put("max_posts_per_account", Value::from(self.max_posts_per_account));
-        put("backfill_with_context", Value::Bool(self.backfill_with_context));
-        put("backfill_mentioned_users", Value::Bool(self.backfill_mentioned_users));
+        put(
+            "max_posts_per_account",
+            Value::from(self.max_posts_per_account),
+        );
+        put(
+            "backfill_with_context",
+            Value::Bool(self.backfill_with_context),
+        );
+        put(
+            "backfill_mentioned_users",
+            Value::Bool(self.backfill_mentioned_users),
+        );
         put("respect_robots_txt", Value::Bool(self.respect_robots_txt));
-        put("respect_user_opt_out", Value::Bool(self.respect_user_opt_out));
-        put("remember_users_for_hours", Value::from(self.remember_users_for_hours));
-        put("remember_hosts_for_days", Value::from(self.remember_hosts_for_days));
+        put(
+            "respect_user_opt_out",
+            Value::Bool(self.respect_user_opt_out),
+        );
+        put(
+            "remember_users_for_hours",
+            Value::from(self.remember_users_for_hours),
+        );
+        put(
+            "remember_hosts_for_days",
+            Value::from(self.remember_hosts_for_days),
+        );
         put("http_timeout", Value::from(self.http_timeout));
         put(
             "rate_limit_cooldown",
@@ -286,7 +319,10 @@ impl Config {
                     .collect(),
             ),
         );
-        put("state_dir", Value::String(self.state_dir.display().to_string()));
+        put(
+            "state_dir",
+            Value::String(self.state_dir.display().to_string()),
+        );
         if let Some(lock_file) = &self.lock_file {
             put("lock_file", Value::String(lock_file.display().to_string()));
         }
@@ -310,34 +346,39 @@ impl Config {
 /// option name.
 pub type RawValues = BTreeMap<String, Value>;
 
-/// Build a Config from the values stored in the database.
-pub fn build_config(stored: RawValues) -> Result<Config, ConfigError> {
-    build_config_with(stored, true)
-}
-
-/// Like `build_config`, but a missing server or access token is not an error:
-/// the web UI starts with an empty configuration, and the values are filled
-/// in through its config page.
-pub fn build_config_lenient(stored: RawValues) -> Result<Config, ConfigError> {
-    build_config_with(stored, false)
-}
-
-fn build_config_with(
-    stored: RawValues,
-    require_server_and_token: bool,
-) -> Result<Config, ConfigError> {
-    if require_server_and_token
-        && (!stored.contains_key("server")
-            || stored.get("access_tokens").map(is_empty_list).unwrap_or(true))
-    {
-        return Err(ConfigError(
-            "You must supply at least a server name and an access token".to_string(),
-        ));
+impl Config {
+    /// Build a Config from the values stored in the database.
+    pub fn from_values(stored: RawValues) -> Result<Config, ConfigError> {
+        Self::from_values_with(stored, true)
     }
 
-    let mut config = Config::default();
-    config.apply_values(&stored)?;
-    Ok(config)
+    /// Like [`Config::from_values`], but a missing server or access token is
+    /// not an error: the web UI starts with an empty configuration, and the
+    /// values are filled in through its config page.
+    pub fn from_values_lenient(stored: RawValues) -> Result<Config, ConfigError> {
+        Self::from_values_with(stored, false)
+    }
+
+    fn from_values_with(
+        stored: RawValues,
+        require_server_and_token: bool,
+    ) -> Result<Config, ConfigError> {
+        if require_server_and_token
+            && (!stored.contains_key("server")
+                || stored
+                    .get("access_tokens")
+                    .map(is_empty_list)
+                    .unwrap_or(true))
+        {
+            return Err(ConfigError(
+                "You must supply at least a server name and an access token".to_string(),
+            ));
+        }
+
+        let mut config = Config::default();
+        config.apply_values(&stored)?;
+        Ok(config)
+    }
 }
 
 fn is_empty_list(value: &Value) -> bool {
@@ -433,7 +474,9 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
         let result = match name.as_str() {
             "server" => coerce_string(value).map(|v| config.server = v),
             "access_tokens" => coerce_list(value).map(|v| config.access_tokens = v),
-            "reply_interval_in_hours" => coerce_int(value).map(|v| config.reply_interval_in_hours = v),
+            "reply_interval_in_hours" => {
+                coerce_int(value).map(|v| config.reply_interval_in_hours = v)
+            }
             "home_timeline_length" => coerce_int(value).map(|v| config.home_timeline_length = v),
             "user" => coerce_string(value).map(|v| config.user = v),
             "max_followings" => coerce_int(value).map(|v| config.max_followings = v),
@@ -451,9 +494,7 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
                 coerce_bool(value).map(|v| config.backfill_mentioned_users = v)
             }
             "respect_robots_txt" => coerce_bool(value).map(|v| config.respect_robots_txt = v),
-            "respect_user_opt_out" => {
-                coerce_bool(value).map(|v| config.respect_user_opt_out = v)
-            }
+            "respect_user_opt_out" => coerce_bool(value).map(|v| config.respect_user_opt_out = v),
             "remember_users_for_hours" => {
                 coerce_int(value).map(|v| config.remember_users_for_hours = v)
             }
@@ -461,9 +502,7 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
                 coerce_int(value).map(|v| config.remember_hosts_for_days = v)
             }
             "http_timeout" => coerce_int(value).map(|v| config.http_timeout = v),
-            "rate_limit_cooldown" => {
-                coerce_seconds(value).map(|v| config.rate_limit_cooldown = v)
-            }
+            "rate_limit_cooldown" => coerce_seconds(value).map(|v| config.rate_limit_cooldown = v),
             "hide_server_in_user_agent" => {
                 coerce_bool(value).map(|v| config.hide_server_in_user_agent = v)
             }
@@ -506,7 +545,9 @@ fn coerce_bool(value: &Value) -> CoerceResult<bool> {
 
 fn coerce_int(value: &Value) -> CoerceResult<i64> {
     match value {
-        Value::Number(n) => n.as_i64().ok_or_else(|| format!("{value} is not an integer")),
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| format!("{value} is not an integer")),
         Value::Bool(b) => Ok(*b as i64),
         Value::String(text) => text
             .trim()
@@ -629,9 +670,9 @@ mod tests {
 
     #[test]
     fn requires_server_and_token() {
-        assert!(build_config(RawValues::new()).is_err());
-        assert!(build_config(values(vec![("server", json!("x"))])).is_err());
-        assert!(build_config(minimal()).is_ok());
+        assert!(Config::from_values(RawValues::new()).is_err());
+        assert!(Config::from_values(values(vec![("server", json!("x"))])).is_err());
+        assert!(Config::from_values(minimal()).is_ok());
     }
 
     #[test]
@@ -679,12 +720,11 @@ mod tests {
 
     #[test]
     fn the_user_agent_option_round_trips() {
-        let config = build_config(
-            values(vec![
-                ("server", json!("example.social")),
-                ("access_tokens", json!(["t"])),
-                ("hide_server_in_user_agent", json!(true)),
-            ]))
+        let config = Config::from_values(values(vec![
+            ("server", json!("example.social")),
+            ("access_tokens", json!(["t"])),
+            ("hide_server_in_user_agent", json!(true)),
+        ]))
         .unwrap();
         assert!(config.hide_server_in_user_agent);
         assert!(
@@ -697,44 +737,41 @@ mod tests {
     fn server_is_normalized() {
         let mut raw = minimal();
         raw.insert("server".to_string(), json!("https://mstdn.thms.uk/"));
-        let config = build_config(raw).unwrap();
+        let config = Config::from_values(raw).unwrap();
         assert_eq!(config.server, "mstdn.thms.uk");
     }
 
     #[test]
-    fn bool_coercion_matches_python() {
+    fn bool_coercion_accepts_yes_no_values() {
         for truthy in ["1", "true", "yes", "on", " TRUE "] {
-            let config = build_config(
-                values(vec![
-                    ("server", json!("x")),
-                    ("access_tokens", json!(["t"])),
-                    ("from_lists", json!(truthy)),
-                ]))
+            let config = Config::from_values(values(vec![
+                ("server", json!("x")),
+                ("access_tokens", json!(["t"])),
+                ("from_lists", json!(truthy)),
+            ]))
             .unwrap();
             assert!(config.from_lists, "{truthy}");
         }
         for falsy in ["0", "false", "no", "off", ""] {
-            let config = build_config(
-                values(vec![
-                    ("server", json!("x")),
-                    ("access_tokens", json!(["t"])),
-                    ("from_lists", json!(falsy)),
-                ]))
+            let config = Config::from_values(values(vec![
+                ("server", json!("x")),
+                ("access_tokens", json!(["t"])),
+                ("from_lists", json!(falsy)),
+            ]))
             .unwrap();
             assert!(!config.from_lists, "{falsy}");
         }
-        assert!(build_config(
-            values(vec![
-                ("server", json!("x")),
-                ("access_tokens", json!(["t"])),
-                ("from_lists", json!("maybe")),
-            ]))
+        assert!(Config::from_values(values(vec![
+            ("server", json!("x")),
+            ("access_tokens", json!(["t"])),
+            ("from_lists", json!("maybe")),
+        ]))
         .is_err());
     }
 
     #[test]
-    fn defaults_match_python() {
-        let config = build_config(minimal()).unwrap();
+    fn defaults_match_the_documented_values() {
+        let config = Config::from_values(minimal()).unwrap();
         assert_eq!(config.max_posts_per_account, 40);
         assert!(config.backfill_with_context);
         assert!(config.backfill_mentioned_users);
@@ -754,62 +791,54 @@ mod tests {
 
     #[test]
     fn list_options_accept_comma_strings_and_arrays() {
-        let config = build_config(
-            values(vec![
-                ("server", json!("x")),
-                ("access_tokens", json!(["t"])),
-                ("instance_blocklist", json!("a.example, b.example")),
-            ]))
+        let config = Config::from_values(values(vec![
+            ("server", json!("x")),
+            ("access_tokens", json!(["t"])),
+            ("instance_blocklist", json!("a.example, b.example")),
+        ]))
         .unwrap();
         assert_eq!(config.instance_blocklist, vec!["a.example", "b.example"]);
 
-        let config = build_config(
-            values(vec![
-                ("server", json!("x")),
-                ("access_tokens", json!(["t"])),
-                ("instance_blocklist", json!(["a.example", "b.example"])),
-            ]))
+        let config = Config::from_values(values(vec![
+            ("server", json!("x")),
+            ("access_tokens", json!(["t"])),
+            ("instance_blocklist", json!(["a.example", "b.example"])),
+        ]))
         .unwrap();
         assert_eq!(config.instance_blocklist, vec!["a.example", "b.example"]);
     }
 
     #[test]
     fn the_rate_limit_cooldown_defaults_to_the_historical_series() {
-        let config = build_config(minimal()).unwrap();
+        let config = Config::from_values(minimal()).unwrap();
         // what the hardcoded 0.5s backoff growing fourfold each step waited
-        assert_eq!(
-            config.rate_limit_cooldown,
-            vec![0.5, 2.0, 8.0, 32.0, 128.0]
-        );
+        assert_eq!(config.rate_limit_cooldown, vec![0.5, 2.0, 8.0, 32.0, 128.0]);
     }
 
     #[test]
     fn the_rate_limit_cooldown_accepts_comma_strings_and_arrays() {
-        let config = build_config(
-            values(vec![
-                ("server", json!("x")),
-                ("access_tokens", json!(["t"])),
-                ("rate_limit_cooldown", json!("1, 2.5, 10")),
-            ]))
+        let config = Config::from_values(values(vec![
+            ("server", json!("x")),
+            ("access_tokens", json!(["t"])),
+            ("rate_limit_cooldown", json!("1, 2.5, 10")),
+        ]))
         .unwrap();
         assert_eq!(config.rate_limit_cooldown, vec![1.0, 2.5, 10.0]);
 
-        let config = build_config(
-            values(vec![
-                ("server", json!("x")),
-                ("access_tokens", json!(["t"])),
-                ("rate_limit_cooldown", json!([1, 2.5, 10])),
-            ]))
+        let config = Config::from_values(values(vec![
+            ("server", json!("x")),
+            ("access_tokens", json!(["t"])),
+            ("rate_limit_cooldown", json!([1, 2.5, 10])),
+        ]))
         .unwrap();
         assert_eq!(config.rate_limit_cooldown, vec![1.0, 2.5, 10.0]);
 
         // an empty list means no retries at all
-        let config = build_config(
-            values(vec![
-                ("server", json!("x")),
-                ("access_tokens", json!(["t"])),
-                ("rate_limit_cooldown", json!("")),
-            ]))
+        let config = Config::from_values(values(vec![
+            ("server", json!("x")),
+            ("access_tokens", json!(["t"])),
+            ("rate_limit_cooldown", json!("")),
+        ]))
         .unwrap();
         assert!(config.rate_limit_cooldown.is_empty());
     }
@@ -817,40 +846,38 @@ mod tests {
     #[test]
     fn the_rate_limit_cooldown_rejects_impossible_delays() {
         for bad in [json!("soon"), json!([-1, 2]), json!(["nan"]), json!(42)] {
-            let result = build_config(
-                values(vec![
-                    ("server", json!("x")),
-                    ("access_tokens", json!(["t"])),
-                    ("rate_limit_cooldown", bad.clone()),
-                ]));
+            let result = Config::from_values(values(vec![
+                ("server", json!("x")),
+                ("access_tokens", json!(["t"])),
+                ("rate_limit_cooldown", bad.clone()),
+            ]));
             assert!(result.is_err(), "{bad} should not parse");
         }
     }
 
     #[test]
     fn the_rate_limit_cooldown_round_trips_through_raw_values() {
-        let mut config = build_config(minimal()).unwrap();
+        let mut config = Config::from_values(minimal()).unwrap();
         config.rate_limit_cooldown = vec![0.25, 1.0, 60.0];
         let raw = config.to_raw_values();
-        let rebuilt = build_config(raw).unwrap();
+        let rebuilt = Config::from_values(raw).unwrap();
         assert_eq!(rebuilt.rate_limit_cooldown, vec![0.25, 1.0, 60.0]);
     }
 
     #[test]
     fn unknown_options_are_ignored() {
-        let config = build_config(
-            values(vec![
-                ("server", json!("x")),
-                ("access_tokens", json!(["t"])),
-                ("nonsense", json!(1)),
-            ]))
+        let config = Config::from_values(values(vec![
+            ("server", json!("x")),
+            ("access_tokens", json!(["t"])),
+            ("nonsense", json!(1)),
+        ]))
         .unwrap();
         assert_eq!(config.server, "x");
     }
 
     #[test]
     fn enabled_tasks_follow_the_config() {
-        let mut config = build_config(minimal()).unwrap();
+        let mut config = Config::from_values(minimal()).unwrap();
         assert!(
             config.enabled_tasks().is_empty(),
             "the defaults enable nothing"
@@ -866,12 +893,11 @@ mod tests {
 
     #[test]
     fn lenient_build_allows_an_empty_config() {
-        let config =
-            build_config_lenient(RawValues::new()).unwrap();
+        let config = Config::from_values_lenient(RawValues::new()).unwrap();
         assert_eq!(config.server, "");
         assert!(config.access_tokens.is_empty());
 
-        let config = build_config_lenient(minimal()).unwrap();
+        let config = Config::from_values_lenient(minimal()).unwrap();
         assert_eq!(config.server, "example.com");
         assert_eq!(config.access_tokens, vec!["token1".to_string()]);
     }

@@ -17,7 +17,11 @@ const ALLOW_ALL: &str = "User-agent: *\nAllow: /\n";
 
 /// The mock server's host:port, as the clients want it.
 fn host(server: &MockServer) -> String {
-    server.base_url().strip_prefix("http://").unwrap().to_string()
+    server
+        .base_url()
+        .strip_prefix("http://")
+        .unwrap()
+        .to_string()
 }
 
 async fn http(dir: &std::path::Path) -> HttpClient {
@@ -98,8 +102,7 @@ async fn the_mastodon_client_runs_against_a_live_http_server() {
 
     server
         .mock_async(|when, then| {
-            when.method(Method::GET)
-                .path("/api/v1/statuses/10/context");
+            when.method(Method::GET).path("/api/v1/statuses/10/context");
             then.status(200).json_body(serde_json::json!({
                 "ancestors": [{ "url": format!("http://{host}/@alice/9") }],
                 "descendants": [{ "url": format!("http://{host}/@alice/11") }],
@@ -195,7 +198,8 @@ async fn the_misskey_client_runs_against_a_live_http_server() {
     server
         .mock_async(|when, then| {
             when.method(Method::POST).path("/api/notes/children");
-            then.status(200).json_body(serde_json::json!([{ "id": "c1" }]));
+            then.status(200)
+                .json_body(serde_json::json!([{ "id": "c1" }]));
         })
         .await;
     server
@@ -416,7 +420,8 @@ async fn the_home_server_client_runs_against_a_live_http_server() {
             when.method(Method::GET)
                 .path("/api/v1/accounts/verify_credentials")
                 .header("Authorization", "Bearer secret-token");
-            then.status(200).json_body(serde_json::json!({ "id": "42" }));
+            then.status(200)
+                .json_body(serde_json::json!({ "id": "42" }));
         })
         .await;
     assert_eq!(home.user_id(None).await.unwrap(), "42");

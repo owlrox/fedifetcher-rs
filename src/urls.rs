@@ -7,24 +7,30 @@ use serde::{Deserialize, Serialize};
 /// Serializes as a two-element array, `[server, post_id]`, which is the shape
 /// the Python original writes into `replied_toot_server_ids`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PostRef(pub String, pub String);
+pub struct PostRef {
+    pub server: String,
+    pub post_id: String,
+}
 
 impl PostRef {
     pub fn new(server: impl Into<String>, post_id: impl Into<String>) -> Self {
-        PostRef(server.into(), post_id.into())
+        PostRef {
+            server: server.into(),
+            post_id: post_id.into(),
+        }
     }
 }
 
 impl Serialize for PostRef {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        (&self.0, &self.1).serialize(serializer)
+        (&self.server, &self.post_id).serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for PostRef {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let (server, post_id) = <(String, String)>::deserialize(deserializer)?;
-        Ok(PostRef(server, post_id))
+        Ok(PostRef { server, post_id })
     }
 }
 
@@ -34,10 +40,7 @@ impl<'de> Deserialize<'de> for PostRef {
 /// that can be worked out without knowing what software is answering.
 pub fn host_of(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://")?;
-    let netloc = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
+    let netloc = rest.split(['/', '?', '#']).next().unwrap_or_default();
     if netloc.is_empty() {
         None
     } else {
@@ -50,9 +53,16 @@ pub fn netloc_of(url: &str) -> String {
     match url.find("://") {
         Some(scheme_end) => {
             let rest = &url[scheme_end + 3..];
-            rest.split(['/', '?', '#']).next().unwrap_or_default().to_string()
+            rest.split(['/', '?', '#'])
+                .next()
+                .unwrap_or_default()
+                .to_string()
         }
-        None => url.split(['/', '?', '#']).next().unwrap_or_default().to_string(),
+        None => url
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -77,7 +87,10 @@ mod tests {
             host_of("https://mastodon.social/@user/123"),
             Some("mastodon.social".to_string())
         );
-        assert_eq!(host_of("https://host:8080/x"), Some("host:8080".to_string()));
+        assert_eq!(
+            host_of("https://host:8080/x"),
+            Some("host:8080".to_string())
+        );
         assert_eq!(host_of("https://host"), Some("host".to_string()));
         assert_eq!(host_of("http://host/x"), None);
         assert_eq!(host_of("https://"), None);
@@ -87,7 +100,10 @@ mod tests {
     #[test]
     fn post_ref_serializes_as_array() {
         let post = PostRef::new("example.com", "42");
-        assert_eq!(serde_json::to_string(&post).unwrap(), r#"["example.com","42"]"#);
+        assert_eq!(
+            serde_json::to_string(&post).unwrap(),
+            r#"["example.com","42"]"#
+        );
         let back: PostRef = serde_json::from_str(r#"["example.com","42"]"#).unwrap();
         assert_eq!(back, post);
     }

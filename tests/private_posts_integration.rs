@@ -5,7 +5,7 @@ mod common;
 
 use sqlx::SqlitePool;
 
-use fedifetcher::context::get_all_known_context_urls;
+use fedifetcher::context::known_context_urls;
 use fedifetcher::db;
 use fedifetcher::http::HttpClient;
 use fedifetcher::posts::Post;
@@ -38,7 +38,7 @@ async fn context_urls(
     state: &mut State,
     db: &SqlitePool,
 ) -> Vec<String> {
-    get_all_known_context_urls(
+    known_context_urls(
         "home.example",
         std::slice::from_ref(toot),
         http,
@@ -146,9 +146,13 @@ async fn the_summary_line_says_why_nothing_was_found() {
     let guard = logs.install();
 
     let private_toot = post("10", false);
-    assert!(context_urls(&private_toot, &http, &mut state, &db).await.is_empty());
+    assert!(context_urls(&private_toot, &http, &mut state, &db)
+        .await
+        .is_empty());
     let public_toot = post("11", true);
-    assert!(context_urls(&public_toot, &http, &mut state, &db).await.is_empty());
+    assert!(context_urls(&public_toot, &http, &mut state, &db)
+        .await
+        .is_empty());
 
     drop(guard);
     let log = logs.text();

@@ -70,7 +70,6 @@ async fn get_sends_our_user_agent() {
     client
         .get(&format!("{}/api", server.base_url()), None)
         .await
-        .ok()
         .expect("get should succeed");
     assert_eq!(api.hits(), 1);
 }
@@ -90,7 +89,8 @@ async fn a_failed_request_names_the_cause() {
         Err(err) => err.to_string(),
     };
     assert!(
-        message.starts_with("Error requesting http://127.0.0.1:1/api: error sending request for url"),
+        message
+            .starts_with("Error requesting http://127.0.0.1:1/api: error sending request for url"),
         "{message}"
     );
     assert!(
@@ -124,7 +124,10 @@ async fn requests_the_robots_file_forbids_are_refused() {
         .await
         .err()
         .expect("a robots.txt that forbids everything must refuse the request");
-    assert!(err.to_string().contains("prohibited by robots.txt"), "{err}");
+    assert!(
+        err.to_string().contains("prohibited by robots.txt"),
+        "{err}"
+    );
     assert_eq!(robots.hits(), 1);
     assert_eq!(api.hits(), 0);
 }
@@ -153,7 +156,6 @@ async fn robots_is_not_consulted_when_disabled_in_the_config() {
     let resp = client
         .get(&format!("{}/api", server.base_url()), None)
         .await
-        .ok()
         .expect("with robots.txt support off, the request should go ahead");
     assert_eq!(resp.status, 200);
     assert_eq!(robots.hits(), 0);
@@ -183,7 +185,6 @@ async fn a_client_ignoring_robots_is_not_checked() {
     let resp = client
         .get(&format!("{}/api", server.base_url()), None)
         .await
-        .ok()
         .expect("a client ignoring robots.txt should not be checked");
     assert_eq!(resp.status, 200);
     assert_eq!(robots.hits(), 0);
@@ -244,7 +245,10 @@ async fn a_host_blocked_by_robots_txt_is_logged_as_such() {
         .expect("a robots.txt that forbids everything must refuse the request");
     drop(guard);
 
-    assert!(err.to_string().contains("prohibited by robots.txt"), "{err}");
+    assert!(
+        err.to_string().contains("prohibited by robots.txt"),
+        "{err}"
+    );
     assert_eq!(api.hits(), 0);
     assert_eq!(robots.hits(), 1);
     let logged = logs.text();
@@ -292,7 +296,10 @@ async fn a_blocklisted_host_is_logged_as_such() {
         .lines()
         .find(|line| line.contains("Not fetching"))
         .unwrap_or_else(|| panic!("the skip should be logged, got:\n{logged}"));
-    assert!(line.contains(&netloc), "the log line names the instance: {line}");
+    assert!(
+        line.contains(&netloc),
+        "the log line names the instance: {line}"
+    );
     assert!(line.contains("blocklist"), "{line}");
     println!("logged: {line}");
 }
@@ -311,9 +318,9 @@ async fn rate_limited_requests_are_retried_after_the_reset() {
         .to_string();
     let limited = server
         .mock_async(|when, then| {
-            when.method(Method::GET).path("/api").matches(|_| {
-                RATE_LIMITED_HITS.fetch_add(1, Ordering::SeqCst) == 0
-            });
+            when.method(Method::GET)
+                .path("/api")
+                .matches(|_| RATE_LIMITED_HITS.fetch_add(1, Ordering::SeqCst) == 0);
             then.status(429).header("x-ratelimit-reset", reset);
         })
         .await;
@@ -332,7 +339,6 @@ async fn rate_limited_requests_are_retried_after_the_reset() {
     let resp = client
         .get(&format!("{}/api", server.base_url()), None)
         .await
-        .ok()
         .expect("the retry after the reset should succeed");
     assert_eq!(resp.status, 200);
     assert_eq!(limited.hits(), 1);
@@ -347,9 +353,9 @@ async fn rate_limited_requests_back_off_without_a_reset_header() {
     let dir = common::tmp_dir();
     let limited = server
         .mock_async(|when, then| {
-            when.method(Method::GET).path("/api").matches(|_| {
-                BACKOFF_HITS.fetch_add(1, Ordering::SeqCst) < 2
-            });
+            when.method(Method::GET)
+                .path("/api")
+                .matches(|_| BACKOFF_HITS.fetch_add(1, Ordering::SeqCst) < 2);
             then.status(429);
         })
         .await;
@@ -370,7 +376,6 @@ async fn rate_limited_requests_back_off_without_a_reset_header() {
     let resp = client
         .get(&format!("{}/api", server.base_url()), None)
         .await
-        .ok()
         .expect("the third try should succeed");
     assert_eq!(resp.status, 200);
     assert_eq!(limited.hits(), 2);
@@ -422,8 +427,8 @@ async fn robots_is_read_from_the_network_once_then_remembered() {
     let client = HttpClient::new(config, db);
     let url = format!("{}/api", server.base_url());
 
-    client.get(&url, None).await.ok().expect("first get");
-    client.get(&url, None).await.ok().expect("second get");
+    client.get(&url, None).await.expect("first get");
+    client.get(&url, None).await.expect("second get");
 
     assert_eq!(robots.hits(), 1, "robots.txt should be fetched only once");
     assert_eq!(api.hits(), 2);
@@ -446,11 +451,11 @@ async fn robots_is_cached_in_the_database_between_clients() {
     let db = common::test_db(&config).await;
 
     let first = HttpClient::new(config.clone(), db.clone());
-    first.get(&url, None).await.ok().expect("first client");
+    first.get(&url, None).await.expect("first client");
     assert_eq!(robots.hits(), 1);
 
     let second = HttpClient::new(config, db.clone());
-    second.get(&url, None).await.ok().expect("second client");
+    second.get(&url, None).await.expect("second client");
     assert_eq!(
         robots.hits(),
         1,
@@ -490,7 +495,10 @@ async fn a_refused_robots_file_denies_everything() {
         .await
         .err()
         .expect("a refused robots.txt must deny everything");
-    assert!(err.to_string().contains("prohibited by robots.txt"), "{err}");
+    assert!(
+        err.to_string().contains("prohibited by robots.txt"),
+        "{err}"
+    );
     assert_eq!(robots.hits(), 1);
     assert_eq!(api.hits(), 0);
 }
@@ -507,7 +515,6 @@ async fn an_unreachable_robots_file_allows_everything() {
         .robots()
         .can_fetch("FediFetcher/test", "https://127.0.0.1:9/api")
         .await
-        .ok()
         .expect("an unreachable host should not be an error");
     assert!(allowed, "an unreachable robots.txt should allow everything");
 }
@@ -702,7 +709,6 @@ async fn authenticated_clients_send_their_token_and_skip_robots() {
         .authenticated("secret")
         .get(&format!("{}/api", server.base_url()), None)
         .await
-        .ok()
         .expect("an authenticated client does not get checked against robots.txt");
     assert_eq!(resp.status, 200);
     assert_eq!(api.hits(), 1);
@@ -745,12 +751,10 @@ async fn the_original_client_is_unaffected_by_deriving_one() {
         .authenticated("secret")
         .get(&format!("{}/authed", server.base_url()), None)
         .await
-        .ok()
         .expect("authenticated get");
     client
         .get(&format!("{}/plain", server.base_url()), None)
         .await
-        .ok()
         .expect("plain get");
 
     assert_eq!(authed.hits(), 1);
@@ -783,7 +787,6 @@ async fn post_sends_the_body_as_json_and_the_client_headers() {
             None,
         )
         .await
-        .ok()
         .expect("post should succeed");
     assert_eq!(resp.status, 200);
     assert_eq!(api.hits(), 1);

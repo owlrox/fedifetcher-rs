@@ -38,7 +38,7 @@ static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 
 /// A PeerTube video, whose comments are the replies to it.
-pub fn to_post(raw: &Value) -> Option<Post> {
+pub fn parse_post(raw: &Value) -> Option<Post> {
     let url = raw.get("url").and_then(Value::as_str);
     let created_at = raw
         .get("publishedAt")
@@ -177,19 +177,18 @@ impl PeerTubeApi {
             PAGE_SIZE,
         )
         .await;
-        raw.map(|raw| usable(raw.iter().map(to_post)))
+        raw.map(|raw| usable(raw.iter().map(parse_post)))
     }
 
     /// Get the URLs of the comments of a given peertube video.
     pub async fn fetch_context_urls(&self, post_id: &str, post_url: &str) -> Vec<String> {
-        let url = format!(
-            "{}/api/v1/videos/{post_id}/comment-threads",
-            self.base
-        );
+        let url = format!("{}/api/v1/videos/{post_id}/comment-threads", self.base);
         let resp = match self.http.get(&url, None).await {
             Ok(resp) => resp,
             Err(ex) => {
-                error!("Error getting comments on video {post_id} from {post_url}. Exception: {ex}");
+                error!(
+                    "Error getting comments on video {post_id} from {post_url}. Exception: {ex}"
+                );
                 return Vec::new();
             }
         };
@@ -198,7 +197,10 @@ impl PeerTubeApi {
             return match resp.json() {
                 Ok(body) => match body.get("data").and_then(Value::as_array) {
                     Some(comments) => usable(comments.iter().map(|comment| {
-                        comment.get("url").and_then(Value::as_str).map(str::to_string)
+                        comment
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
                     })),
                     None => {
                         error!(
@@ -235,26 +237,26 @@ mod tests {
     }
 
     #[test]
-    fn to_post_reads_a_video() {
+    fn parse_post_reads_a_video() {
         let raw = json!({
             "uuid": "abc",
             "url": "https://peertube.example/w/abc",
             "publishedAt": "2026-10-22T01:23:45.123Z",
             "privacy": {"id": 2},
         });
-        let post = to_post(&raw).unwrap();
+        let post = parse_post(&raw).unwrap();
         assert_eq!(post.url, "https://peertube.example/w/abc");
         assert!(post.is_public);
     }
 
     #[test]
-    fn to_post_falls_back_to_created_at_and_hides_private_videos() {
+    fn parse_post_falls_back_to_created_at_and_hides_private_videos() {
         let raw = json!({
             "url": "https://peertube.example/w/abc",
             "createdAt": "2026-10-22T01:23:45Z",
             "privacy": {"id": 3},
         });
-        let post = to_post(&raw).unwrap();
+        let post = parse_post(&raw).unwrap();
         assert!(!post.is_public);
 
         // privacy is optional, and public is the default
@@ -262,13 +264,13 @@ mod tests {
             "url": "https://peertube.example/w/abc",
             "createdAt": "2026-10-22T01:23:45Z",
         });
-        assert!(to_post(&raw).unwrap().is_public);
+        assert!(parse_post(&raw).unwrap().is_public);
     }
 
     #[test]
-    fn to_post_rejects_a_video_without_url_or_date() {
-        assert!(to_post(&json!({"uuid": "abc"})).is_none());
-        assert!(to_post(&json!({"url": "https://peertube.example/w/abc"})).is_none());
+    fn parse_post_rejects_a_video_without_url_or_date() {
+        assert!(parse_post(&json!({"uuid": "abc"})).is_none());
+        assert!(parse_post(&json!({"url": "https://peertube.example/w/abc"})).is_none());
     }
 
     #[tokio::test]
@@ -310,8 +312,14 @@ mod tests {
             Some("p".to_string())
         );
         assert_eq!(api.post_id_from("https://peertube.example/w/p/xyz"), None);
-        assert_eq!(api.post_id_from("https://peertube.example/w/playlist"), Some("playlist".to_string()));
-        assert_eq!(api.post_id_from("https://peertube.example/accounts/alice"), None);
+        assert_eq!(
+            api.post_id_from("https://peertube.example/w/playlist"),
+            Some("playlist".to_string())
+        );
+        assert_eq!(
+            api.post_id_from("https://peertube.example/accounts/alice"),
+            None
+        );
     }
 
     #[test]
