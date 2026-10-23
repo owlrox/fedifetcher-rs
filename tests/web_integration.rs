@@ -83,6 +83,73 @@ async fn saved_config(pool: &sqlx::SqlitePool) -> fedifetcher::config::Config {
     fedifetcher::config::Config::from_values(raw).unwrap()
 }
 
+/// Every log line the process emits, for the page-load logging test. The
+/// web UI's handlers run on the server's tasks, not the test's thread, so
+/// unlike LogCapture this captures every thread. One test installs it,
+/// once per test binary.
+static PAGE_LOAD_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Install the page-load capture; a second call is a no-op.
+fn install_page_load_capture() {
+    /// The `message` field of an event.
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: String,
+    }
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            }
+        }
+    }
+
+    struct Capture;
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            PAGE_LOAD_LINES.lock().unwrap().push(visitor.message);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::TRACE)
+        }
+    }
+
+    let _ = tracing::subscriber::set_global_default(Capture);
+}
+
+/// The lines captured so far.
+fn page_load_lines() -> Vec<String> {
+    PAGE_LOAD_LINES.lock().unwrap().clone()
+}
+
 #[tokio::test]
 async fn every_page_renders_without_javascript() {
     let dir = common::tmp_dir();
@@ -144,6 +211,14 @@ async fn the_config_page_has_tooltips_from_the_docs() {
     assert!(
         body.contains("title=\"Omit your server's name from the User-Agent"),
         "the user agent option explains itself"
+    );
+    assert!(
+        body.contains("name=\"log_page_loads\""),
+        "the page-load logging option is on the page"
+    );
+    assert!(
+        body.contains("title=\"Log a line for every page load"),
+        "the page-load logging option explains itself"
     );
 }
 
@@ -799,7 +874,7 @@ async fn saving_the_config_page_writes_the_database() {
 
     let (status, location, _) = post_config(
         &base,
-        "server=example.social&new_access_token=smoke-secret-token-123&max_followers=5&from_lists=1&respect_robots_txt=0&http_timeout=9&hide_server_in_user_agent=1",
+        "server=example.social&new_access_token=smoke-secret-token-123&max_followers=5&from_lists=1&respect_robots_txt=0&http_timeout=9&hide_server_in_user_agent=1&log_page_loads=1",
     )
     .await;
     assert_eq!(status, 303, "the POST must redirect");
@@ -816,6 +891,10 @@ async fn saving_the_config_page_writes_the_database() {
         saved.hide_server_in_user_agent,
         "the page saves the user agent option"
     );
+    assert!(
+        saved.log_page_loads,
+        "the page saves the page-load logging option"
+    );
 
     // the page shows the saved values, and still masks the token
     let (status, body) = get(&format!("{base}/config")).await;
@@ -823,6 +902,41 @@ async fn saving_the_config_page_writes_the_database() {
     assert!(body.contains("example.social"));
     assert!(body.contains(&masked(TOKEN)));
     assert!(!body.contains(TOKEN), "the token itself must not appear");
+    assert!(
+        body.contains("name=\"log_page_loads\""),
+        "the page shows the page-load logging option"
+    );
+}
+
+/// Page loads are logged only when the config's toggle says so: off by
+/// default, on it logs one DEBUG line per GET.
+#[tokio::test]
+async fn page_loads_are_logged_only_when_the_config_says_so() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+    install_page_load_capture();
+
+    // off by default: loading a page logs nothing
+    let (status, _) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+    let lines = page_load_lines();
+    assert!(
+        !lines.iter().any(|line| line.contains("GET /logs")),
+        "no page load is logged by default:\n{}",
+        lines.join("\n")
+    );
+
+    // the config page's toggle turns the logging on
+    let (status, _, _) = post_config(&base, "log_page_loads=1").await;
+    assert_eq!(status, 303);
+    let (status, _) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+    let lines = page_load_lines();
+    assert!(
+        lines.iter().any(|line| line.contains("GET /logs")),
+        "a page load is logged once the toggle is on:\n{}",
+        lines.join("\n")
+    );
 }
 
 #[tokio::test]

@@ -126,8 +126,17 @@ pub fn app(config: Config, db: SqlitePool) -> Router {
         .with_state(state)
 }
 
+/// Log a page load, when the config's page-load toggle is on: one DEBUG
+/// line per GET. Off by default — a line per page load is noise until
+/// you are watching the UI's traffic.
+fn page_load(state: &AppState, message: &str) {
+    if state.config.lock().unwrap().log_page_loads {
+        tracing::debug!("{message}");
+    }
+}
+
 async fn dashboard(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
-    tracing::debug!("GET /");
+    page_load(&state, "GET /");
     let history = match db::recent_runs(&state.db, HISTORY_CAPACITY).await {
         Ok(runs) => runs,
         Err(ex) => {
@@ -284,7 +293,7 @@ async fn data(
     Query(query): Query<DataQuery>,
     headers: HeaderMap,
 ) -> Html<String> {
-    tracing::debug!("GET /data");
+    page_load(&state, "GET /data");
     let config = state.config.lock().unwrap().clone();
     let state_data = match StateStore::new(config).load(&state.db).await {
         Ok(data) => data,
@@ -426,7 +435,7 @@ async fn logs(
     Query(query): Query<LogsQuery>,
     headers: HeaderMap,
 ) -> Html<String> {
-    tracing::debug!("GET /logs");
+    page_load(&state, "GET /logs");
     let sort = LogSort::parse(query.sort.as_deref());
     let order = match query.dir.as_deref() {
         Some("asc") => LogOrder::Asc,
@@ -451,9 +460,16 @@ struct LiveQuery {
 
 /// The top bar's live-updates toggle: remember the choice in a cookie,
 /// then go back to the page it was clicked on.
-async fn live(Query(query): Query<LiveQuery>, headers: HeaderMap) -> impl IntoResponse {
+async fn live(
+    AxumState(state): AxumState<Arc<AppState>>,
+    Query(query): Query<LiveQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let on = query.on.as_deref() != Some("0");
-    tracing::debug!("GET /live: live updates {}", if on { "on" } else { "off" });
+    page_load(
+        &state,
+        &format!("GET /live: live updates {}", if on { "on" } else { "off" }),
+    );
     let value = if on { "1" } else { "0" };
     let cookie = format!("{LIVE_COOKIE}={value}; Path=/; Max-Age=31536000; SameSite=Lax");
     let back = referer_path(&headers).unwrap_or_else(|| "/".to_string());
@@ -503,7 +519,7 @@ async fn config_page(
     AxumState(state): AxumState<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Html<String> {
-    tracing::debug!("GET /config");
+    page_load(&state, "GET /config");
     let live = live_updates(&headers);
     render(move || view! { <ConfigPage state=state live=live /> })
 }
@@ -626,7 +642,7 @@ async fn debug_page(
     AxumState(state): AxumState<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Html<String> {
-    tracing::debug!("GET /debug");
+    page_load(&state, "GET /debug");
     let live = live_updates(&headers);
     render(move || view! { <DebugPage state=state result=None live=live /> })
 }
@@ -1785,6 +1801,7 @@ fn ConfigPage(state: Arc<AppState>, live: bool) -> impl IntoView {
     rows.push(text_row("on_fail", &optional(&config.on_fail)));
     rows.push(log_level_row(&config.log_level));
     rows.push(text_row("log_format", &config.log_format));
+    rows.push(bool_row("log_page_loads", config.log_page_loads));
     view! {
         <Page title="Config".to_string() live=live refresh=None>
             <section>

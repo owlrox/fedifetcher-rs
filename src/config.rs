@@ -130,6 +130,8 @@ pub struct Config {
     pub log_level: String,
     /// Specify the log format
     pub log_format: String,
+    /// Log a line for every page load of the web UI (default: disabled)
+    pub log_page_loads: bool,
 }
 
 impl Default for Config {
@@ -168,6 +170,7 @@ impl Default for Config {
             on_fail: None,
             log_level: "DEBUG".to_string(),
             log_format: "%(asctime)s: %(message)s".to_string(),
+            log_page_loads: false,
         }
     }
 }
@@ -338,6 +341,7 @@ impl Config {
         }
         put("log_level", Value::String(self.log_level.clone()));
         put("log_format", Value::String(self.log_format.clone()));
+        put("log_page_loads", Value::Bool(self.log_page_loads));
         values
     }
 }
@@ -422,6 +426,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "on_fail"
             | "log_level"
             | "log_format"
+            | "log_page_loads"
     )
 }
 
@@ -462,6 +467,7 @@ pub fn option_description(name: &str) -> Option<&'static str> {
         "on_fail" => "Pinged when processing has failed — use for 'dead man switch' monitoring of your task",
         "log_level" => "Severity of events to log: DEBUG, INFO, WARNING, ERROR or CRITICAL. Applies on restart",
         "log_format" => "The log format. Applies on restart",
+        "log_page_loads" => "Log a line for every page load of the web UI, at DEBUG (default: disabled)",
         _ => return None,
     })
 }
@@ -512,6 +518,7 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
             "on_fail" => coerce_optional_string(value).map(|v| config.on_fail = v),
             "log_level" => coerce_string(value).map(|v| config.log_level = v),
             "log_format" => coerce_string(value).map(|v| config.log_format = v),
+            "log_page_loads" => coerce_bool(value).map(|v| config.log_page_loads = v),
             // unknown options are ignored, as in the Python original
             _ => Ok(()),
         };
@@ -708,6 +715,7 @@ mod tests {
             "on_fail",
             "log_level",
             "log_format",
+            "log_page_loads",
         ] {
             assert!(is_known_option(name), "{name}");
             assert!(option_description(name).is_some(), "{name} has no tooltip");
@@ -783,6 +791,10 @@ mod tests {
         assert!(!config.from_lists);
         assert_eq!(config.log_level, "DEBUG");
         assert_eq!(config.log_format, "%(asctime)s: %(message)s");
+        assert!(
+            !config.log_page_loads,
+            "page loads are not logged by default"
+        );
         assert_eq!(config.lock_path(), config.state_dir.join("lock.lock"));
     }
 
