@@ -71,6 +71,29 @@ async fn get_sends_our_user_agent() {
 }
 
 #[tokio::test]
+async fn a_failed_request_names_the_cause() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.respect_robots_txt = false;
+    let client = HttpClient::new(config);
+
+    // port 1 on localhost refuses connections: no server and no network
+    // needed to produce a transport error
+    let message = match client.get("http://127.0.0.1:1/api", None, 5, 0.5).await {
+        Ok(_) => panic!("a refused connection is an error"),
+        Err(err) => err.to_string(),
+    };
+    assert!(
+        message.starts_with("Error requesting http://127.0.0.1:1/api: error sending request for url"),
+        "{message}"
+    );
+    assert!(
+        message.contains("client error (Connect)"),
+        "the message carries the cause chain, not just reqwest's summary: {message}"
+    );
+}
+
+#[tokio::test]
 async fn requests_the_robots_file_forbids_are_refused() {
     let server = MockServer::start_async().await;
     let dir = common::tmp_dir();

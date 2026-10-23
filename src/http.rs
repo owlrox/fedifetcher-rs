@@ -281,7 +281,7 @@ impl HttpClient {
             let response = request
                 .send()
                 .await
-                .map_err(|ex| Error(format!("Error requesting {url}: {ex}")))?;
+                .map_err(|ex| Error(format!("Error requesting {url}: {}", error_chain(&ex))))?;
 
             let status = response.status().as_u16();
             if status != 429 {
@@ -289,7 +289,9 @@ impl HttpClient {
                 let text = response
                     .text()
                     .await
-                    .map_err(|ex| Error(format!("Error reading response from {url}: {ex}")))?;
+                    .map_err(|ex| {
+                        Error(format!("Error reading response from {url}: {}", error_chain(&ex)))
+                    })?;
                 return Ok(Response {
                     status,
                     headers,
@@ -313,6 +315,21 @@ impl HttpClient {
 
 fn response_headers(response: &reqwest::Response) -> HeaderMap {
     response.headers().clone()
+}
+
+/// An error with its whole source chain spelled out, so a failed request
+/// says why it failed — a DNS error, a refused connection, a TLS error, a
+/// timeout — rather than reqwest's "error sending request for url (...)"
+/// alone, which hides the cause.
+fn error_chain(error: &impl std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 /// How long to wait before retrying a rate limited request: until the server
@@ -619,6 +636,45 @@ mod tests {
             build_callback_url("https://watch.example/ping?empty=", &[("a".to_string(), "1".to_string())]),
             "https://watch.example/ping?empty=&a=1"
         );
+    }
+
+    /// A stand-in for reqwest's error chain: an outer error, a middle
+    /// cause, and the root cause at the bottom.
+    #[derive(Debug)]
+    struct ChainError(&'static str, Option<Box<ChainError>>);
+
+    impl std::fmt::Display for ChainError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for ChainError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1
+                .as_deref()
+                .map(|cause| cause as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    #[test]
+    fn error_chain_spells_out_every_source() {
+        let error = ChainError(
+            "error sending request for url (https://example.invalid/)",
+            Some(Box::new(ChainError(
+                "client error (Connect)",
+                Some(Box::new(ChainError(
+                    "dns error: failed to lookup address information",
+                    None,
+                ))),
+            ))),
+        );
+        assert_eq!(
+            error_chain(&error),
+            "error sending request for url (https://example.invalid/): client error (Connect): dns error: failed to lookup address information"
+        );
+        // an error without sources is just itself
+        assert_eq!(error_chain(&ChainError("just this", None)), "just this");
     }
 
     #[test]
