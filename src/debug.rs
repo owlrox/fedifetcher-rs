@@ -42,7 +42,7 @@ pub async fn instance_info(base: &str, http: &HttpClient) -> Result<Value> {
     let url = format!("{base}/api/v1/instance");
     let resp = http.ignoring_robots().get(&url, None).await?;
     if resp.status != 200 {
-        return Err(Error(format!(
+        return Err(Error::Fetch(format!(
             "Error getting instance info from {base}. Status code: {}",
             resp.status
         )));
@@ -79,7 +79,7 @@ pub async fn lookup_account(
         return resp.json();
     }
     if resp.status == 404 {
-        return Err(Error(format!(
+        return Err(Error::Fetch(format!(
             "User {acct} was not found on server {base}."
         )));
     }
@@ -103,7 +103,7 @@ pub async fn account_posts(
     let id = account
         .get("id")
         .and_then(Value::as_str)
-        .ok_or_else(|| Error("account has no id".to_string()))?;
+        .ok_or_else(|| Error::Fetch("account has no id".to_string()))?;
     let url = format!("{base}/api/v1/accounts/{id}/statuses?exclude_replies=false&limit={limit}");
     let resp = http.authenticated(token).get(&url, None).await?;
     if resp.status != 200 {

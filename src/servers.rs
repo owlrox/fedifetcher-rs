@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use tracing::{debug, error, warn};
 
+use crate::error::{Error, Result};
 use crate::http::HttpClient;
 use crate::state::ServerCache;
 use crate::timeutil;
@@ -346,7 +347,7 @@ pub async fn server_info(
             Some(info)
         }
         Err(reason) => {
-            cache.add(server, failed_lookup_state(&reason));
+            cache.add(server, failed_lookup_state(&reason.to_string()));
             None
         }
     }
@@ -359,15 +360,15 @@ pub async fn nodeinfo(
     cache: &mut ServerCache,
     host_meta_fallback: bool,
     http: &HttpClient,
-) -> Result<ServerInfo, String> {
+) -> Result<ServerInfo> {
     let url = format!("https://{server}/.well-known/nodeinfo");
     let resp = match http.get(&url, Some(Duration::from_secs(30))).await {
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting host node info for {server}. Exception: {ex}");
-            return Err(format!(
+            return Err(Error::Fetch(format!(
                 "Error getting host node info for {server}. Exception: {ex}"
-            ));
+            )));
         }
     };
 
@@ -377,16 +378,16 @@ pub async fn nodeinfo(
     if resp.status != 200 && !host_meta_fallback {
         debug!("nodeinfo for {server} not found, checking host-meta");
         let Some(new_server) = server_from_host_meta(server, http).await else {
-            return Err(format!(
+            return Err(Error::Fetch(format!(
                 "no nodeinfo found for {server} (well-known returned {})",
                 resp.status
-            ));
+            )));
         };
         if new_server == server {
             debug!("host-meta for {server} did not get a new server.");
-            return Err(format!(
+            return Err(Error::Fetch(format!(
                 "host-meta for {server} did not identify a different web server"
-            ));
+            )));
         }
         return Box::pin(nodeinfo(&new_server, cache, true, http)).await;
     }
@@ -396,27 +397,27 @@ pub async fn nodeinfo(
             "Error getting well-known host node info for {server}. Status Code: {}",
             resp.status
         );
-        return Err(format!(
+        return Err(Error::Fetch(format!(
             "Error getting well-known host node info for {server}. Status Code: {}",
             resp.status
-        ));
+        )));
     }
 
     let node_location = match extract_node_location(&resp) {
         Ok(location) => location,
         Err(ex) => {
             error!("error getting server {server} info from well-known node info. Exception: {ex}");
-            return Err(format!(
+            return Err(Error::Fetch(format!(
                 "error getting server {server} info from well-known node info. Exception: {ex}"
-            ));
+            )));
         }
     };
 
     let Some(node_location) = node_location else {
         error!("could not find link to node info in well-known nodeinfo of {server}");
-        return Err(format!(
+        return Err(Error::Fetch(format!(
             "could not find link to node info in well-known nodeinfo of {server}"
-        ));
+        )));
     };
 
     // regrab server from node_location, again in the case of different
@@ -428,7 +429,9 @@ pub async fn nodeinfo(
         .map(|m| m.as_str().to_string())
     else {
         error!("Error getting web server name from {server}.");
-        return Err(format!("Error getting web server name from {server}."));
+        return Err(Error::Fetch(format!(
+            "Error getting web server name from {server}."
+        )));
     };
 
     // return early if the web domain has been seen previously (in cases with
@@ -437,8 +440,10 @@ pub async fn nodeinfo(
         let state = cache.get(&server).expect("checked contains");
         return match ServerInfo::from_state(state) {
             Some(info) => Ok(info),
-            None => Err(cached_failure_reason(cache, &server)
-                .unwrap_or_else(|| format!("no server info for {server}"))),
+            None => Err(Error::Fetch(
+                cached_failure_reason(cache, &server)
+                    .unwrap_or_else(|| format!("no server info for {server}")),
+            )),
         };
     }
 
@@ -449,9 +454,9 @@ pub async fn nodeinfo(
         Ok(resp) => resp,
         Err(ex) => {
             error!("Error getting host node info for {server}. Exception: {ex}");
-            return Err(format!(
+            return Err(Error::Fetch(format!(
                 "Error getting host node info for {server}. Exception: {ex}"
-            ));
+            )));
         }
     };
 
@@ -460,19 +465,19 @@ pub async fn nodeinfo(
             "Error getting host node info for {server}. Status Code: {}",
             resp.status
         );
-        return Err(format!(
+        return Err(Error::Fetch(format!(
             "Error getting host node info for {server}. Status Code: {}",
             resp.status
-        ));
+        )));
     }
 
     let nodeinfo = match resp.json() {
         Ok(nodeinfo) => nodeinfo,
         Err(ex) => {
             error!("error getting server {server} info from nodeinfo. Exception: {ex}");
-            return Err(format!(
+            return Err(Error::Fetch(format!(
                 "error getting server {server} info from nodeinfo. Exception: {ex}"
-            ));
+            )));
         }
     };
 
@@ -482,25 +487,23 @@ pub async fn nodeinfo(
         .unwrap_or(false)
     {
         warn!("server {server} does not support activitypub, skipping");
-        return Err(format!(
+        return Err(Error::Fetch(format!(
             "server {server} does not support activitypub, skipping"
-        ));
+        )));
     }
 
     match ServerInfo::from_nodeinfo(&server, &nodeinfo) {
         Some(info) => Ok(info),
         None => {
             error!("error getting server {server} info from nodeinfo. Exception: missing software name");
-            Err(format!(
+            Err(Error::Fetch(format!(
                 "error getting server {server} info from nodeinfo. Exception: missing software name"
-            ))
+            )))
         }
     }
 }
 
-fn extract_node_location(
-    resp: &crate::http::Response,
-) -> Result<Option<String>, crate::error::Error> {
+fn extract_node_location(resp: &crate::http::Response) -> Result<Option<String>> {
     let body = resp.json()?;
     let mut node_location = None;
     if let Some(links) = body.get("links").and_then(Value::as_array) {
@@ -546,9 +549,8 @@ pub async fn server_from_host_meta(server: &str, http: &HttpClient) -> Option<St
     }
 }
 
-fn parse_host_meta(text: &str, server: &str) -> Result<String, crate::error::Error> {
-    let document =
-        roxmltree::Document::parse(text).map_err(|ex| crate::error::Error(format!("{ex}")))?;
+fn parse_host_meta(text: &str, server: &str) -> Result<String> {
+    let document = roxmltree::Document::parse(text).map_err(Error::Xml)?;
     let lrdd = document
         .descendants()
         .filter(|node| node.is_element())
@@ -557,14 +559,14 @@ fn parse_host_meta(text: &str, server: &str) -> Result<String, crate::error::Err
                 && node.tag_name().namespace() == Some(XRD_NAMESPACE)
                 && node.attribute("rel") == Some("lrdd")
         })
-        .ok_or_else(|| crate::error::Error("no lrdd link".to_string()))?;
+        .ok_or_else(|| Error::Fetch("no lrdd link".to_string()))?;
     let template = lrdd
         .attribute("template")
-        .ok_or_else(|| crate::error::Error("lrdd link has no template".to_string()))?;
+        .ok_or_else(|| Error::Fetch("lrdd link has no template".to_string()))?;
     let pattern = Regex::new(r"https://(?P<server>[^/]+)/").unwrap();
     match pattern.captures(template).and_then(|c| c.name("server")) {
         Some(found) => Ok(found.as_str().to_string()),
-        None => Err(crate::error::Error(format!(
+        None => Err(Error::Fetch(format!(
             "server not found in lrdd for {server}"
         ))),
     }

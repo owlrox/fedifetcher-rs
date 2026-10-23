@@ -149,7 +149,7 @@ pub async fn run_once(config: Config, cancel: CancelToken, db: &SqlitePool) -> R
             // Python logs this as critical and exits without the usual failure log
             error!("{ex}");
             notifier.failed(&ex.to_string()).await;
-            return Err(ex.into());
+            return Err(ex);
         }
     };
     let mut session = match store.session(db).await {

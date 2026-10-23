@@ -24,7 +24,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use crate::config::Config;
 use crate::db::{self, LogRow};
-use crate::error::ConfigError;
+use crate::error::{Error, Result};
 use crate::timeutil;
 
 /// The date format: '%Y-%m-%d %H:%M:%S': "%Y-%m-%d %H:%M:%S %Z".
@@ -73,14 +73,14 @@ impl LogDb {
 ///
 /// The configured format goes to stderr, and a layer sends every line to
 /// the database (which the /logs page reads).
-pub fn setup(config: &Config, pool: SqlitePool) -> Result<LogDb, ConfigError> {
+pub fn setup(config: &Config, pool: SqlitePool) -> Result<LogDb> {
     let level = match config.log_level.to_uppercase().as_str() {
         "DEBUG" => "debug",
         "INFO" => "info",
         "WARNING" | "WARN" => "warn",
         "ERROR" | "CRITICAL" => "error",
         other => {
-            return Err(ConfigError(format!(
+            return Err(Error::Config(format!(
                 "Unknown level: {other:?} (DEBUG|INFO|WARNING|ERROR|CRITICAL)"
             )))
         }

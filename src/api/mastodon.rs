@@ -190,14 +190,14 @@ impl MastodonApi {
                 .get("id")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .ok_or_else(|| Error("response has no id".to_string()));
+                .ok_or_else(|| Error::Fetch("response has no id".to_string()));
         } else if response.status == 404 {
-            return Err(Error(format!(
+            return Err(Error::Fetch(format!(
                 "User {user} was not found on server {}.",
                 self.webserver
             )));
         }
-        Err(Error(format!(
+        Err(Error::Fetch(format!(
             "Error getting URL {url}. Status code: {}",
             response.status
         )))
@@ -334,11 +334,11 @@ fn context_urls(resp: &crate::http::Response) -> Result<Vec<String>> {
     let mut urls = Vec::new();
     for key in ["ancestors", "descendants"] {
         let Some(toots) = res.get(key).and_then(Value::as_array) else {
-            return Err(Error(format!("context has no {key}")));
+            return Err(Error::Fetch(format!("context has no {key}")));
         };
         for toot in toots {
             let Some(url) = toot.get("url").and_then(Value::as_str) else {
-                return Err(Error("context toot has no url".to_string()));
+                return Err(Error::Fetch("context toot has no url".to_string()));
             };
             urls.push(url.to_string());
         }
@@ -382,7 +382,7 @@ pub fn report_mastodon_error(
         Some(hint) => format!(" with token {hint}"),
         None => String::new(),
     };
-    Error(format!(
+    Error::Fetch(format!(
         "{error_message}{with_token}. Status code: {error_code} {subline}"
     ))
 }
@@ -457,7 +457,7 @@ fn wants_more(result: &[Value], stop_at: &StopAt) -> Result<bool> {
                 .get("created_at")
                 .and_then(Value::as_str)
                 .and_then(timeutil::parse)
-                .ok_or_else(|| Error("entry has no created_at".to_string()))?;
+                .ok_or_else(|| Error::Fetch("entry has no created_at".to_string()))?;
             Ok(created_at >= *since)
         }
     }
@@ -542,7 +542,7 @@ impl HomeServer {
             .get("id")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .ok_or_else(|| Error("response has no id".to_string()))
+            .ok_or_else(|| Error::Fetch("response has no id".to_string()))
     }
 
     async fn posts(&self, path: &str, stop_at: StopAt, required_scope: &str) -> Result<Vec<Post>> {

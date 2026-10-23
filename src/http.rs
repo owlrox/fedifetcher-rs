@@ -29,8 +29,7 @@ pub struct Response {
 
 impl Response {
     pub fn json(&self) -> Result<Value> {
-        serde_json::from_str(&self.text)
-            .map_err(|ex| Error(format!("Error parsing response as JSON: {ex}")))
+        serde_json::from_str(&self.text).map_err(Error::Json)
     }
 
     /// The `Link` response header, as a map of `rel` to URL, the way
@@ -236,7 +235,9 @@ impl HttpClient {
                 Ok(true) => {}
                 Ok(false) => {
                     info!("Not fetching {url}: its robots.txt disallows it");
-                    return Err(Error(format!("Querying {url} prohibited by robots.txt")));
+                    return Err(Error::Fetch(format!(
+                        "Querying {url} prohibited by robots.txt"
+                    )));
                 }
                 Err(ex) => {
                     // the configured blocklist; the error names the instance
@@ -269,19 +270,17 @@ impl HttpClient {
             if let Some(json) = json {
                 request = request.json(json);
             }
-            let response = request
-                .send()
-                .await
-                .map_err(|ex| Error(format!("Error requesting {url}: {}", error_chain(&ex))))?;
+            let response = request.send().await.map_err(|ex| Error::Http {
+                url: url.to_string(),
+                source: ex,
+            })?;
 
             let status = response.status().as_u16();
             if status != 429 {
                 let headers = response.headers().clone();
-                let text = response.text().await.map_err(|ex| {
-                    Error(format!(
-                        "Error reading response from {url}: {}",
-                        error_chain(&ex)
-                    ))
+                let text = response.text().await.map_err(|ex| Error::HttpRead {
+                    url: url.to_string(),
+                    source: ex,
                 })?;
                 return Ok(Response {
                     status,
@@ -291,7 +290,7 @@ impl HttpClient {
             }
 
             let Some(&backoff) = cooldown.get(step) else {
-                return Err(Error(format!(
+                return Err(Error::Fetch(format!(
                     "Maximum number of retries exceeded for rate limited request {url}"
                 )));
             };
@@ -305,21 +304,6 @@ impl HttpClient {
 
 fn response_headers(response: &reqwest::Response) -> HeaderMap {
     response.headers().clone()
-}
-
-/// An error with its whole source chain spelled out, so a failed request
-/// says why it failed — a DNS error, a refused connection, a TLS error, a
-/// timeout — rather than reqwest's "error sending request for url (...)"
-/// alone, which hides the cause.
-fn error_chain(error: &impl std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        text.push_str(": ");
-        text.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    text
 }
 
 /// How long to wait before retrying a rate limited request: until the server
@@ -442,7 +426,7 @@ impl RobotsCache {
         let netloc = netloc_of(url);
         if self.blocklist.contains(&netloc) {
             // Never connect to these locations
-            return Err(Error(format!(
+            return Err(Error::Fetch(format!(
                 "Connecting to {netloc} is prohibited by the configured blocklist"
             )));
         }
@@ -585,45 +569,6 @@ mod tests {
             ),
             "https://watch.example/ping?empty=&a=1"
         );
-    }
-
-    /// A stand-in for reqwest's error chain: an outer error, a middle
-    /// cause, and the root cause at the bottom.
-    #[derive(Debug)]
-    struct ChainError(&'static str, Option<Box<ChainError>>);
-
-    impl std::fmt::Display for ChainError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(self.0)
-        }
-    }
-
-    impl std::error::Error for ChainError {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            self.1
-                .as_deref()
-                .map(|cause| cause as &(dyn std::error::Error + 'static))
-        }
-    }
-
-    #[test]
-    fn error_chain_spells_out_every_source() {
-        let error = ChainError(
-            "error sending request for url (https://example.invalid/)",
-            Some(Box::new(ChainError(
-                "client error (Connect)",
-                Some(Box::new(ChainError(
-                    "dns error: failed to lookup address information",
-                    None,
-                ))),
-            ))),
-        );
-        assert_eq!(
-            error_chain(&error),
-            "error sending request for url (https://example.invalid/): client error (Connect): dns error: failed to lookup address information"
-        );
-        // an error without sources is just itself
-        assert_eq!(error_chain(&ChainError("just this", None)), "just this");
     }
 
     #[test]

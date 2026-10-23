@@ -111,7 +111,7 @@ async fn main() -> ExitCode {
 }
 
 /// Log a config problem as critical and exit 1.
-fn config_error(ex: fedifetcher::error::ConfigError) -> ExitCode {
+fn config_error(ex: fedifetcher::error::Error) -> ExitCode {
     eprintln!("CRITICAL:FediFetcher:{ex}");
     ExitCode::from(1)
 }

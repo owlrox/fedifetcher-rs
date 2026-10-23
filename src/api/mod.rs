@@ -10,6 +10,7 @@ pub mod peertube;
 use serde_json::Value;
 use tracing::error;
 
+use crate::error::{Error, Result};
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::servers::{server_info, ApiFlavor, ServerInfo};
@@ -161,8 +162,8 @@ async fn look_up_post(
     url: &str,
     seen_hosts: &mut ServerCache,
     http: &HttpClient,
-) -> Result<PostRef, String> {
-    let host = host_of(url).ok_or_else(|| "the URL has no host".to_string())?;
+) -> Result<PostRef> {
+    let host = host_of(url).ok_or_else(|| Error::Fetch("the URL has no host".to_string()))?;
 
     let server = server_info(&host, seen_hosts, http).await.ok_or_else(|| {
         let reason = seen_hosts
@@ -170,21 +171,25 @@ async fn look_up_post(
             .and_then(|info| info.get("error"))
             .and_then(Value::as_str);
         match reason {
-            Some(reason) => format!("server info for {host} is unavailable: {reason}"),
-            None => format!("server info for {host} is unavailable"),
+            Some(reason) => {
+                Error::Fetch(format!("server info for {host} is unavailable: {reason}"))
+            }
+            None => Error::Fetch(format!("server info for {host} is unavailable")),
         }
     })?;
     let client = client_for(&server, http).ok_or_else(|| {
-        format!(
+        Error::Fetch(format!(
             "{host} runs {} and no supported API is known for it",
             server.software
-        )
+        ))
     })?;
 
-    let post_id = client
-        .post_id_from(url)
-        .await
-        .ok_or_else(|| format!("the URL is not a {} post URL", client.flavor().as_str()))?;
+    let post_id = client.post_id_from(url).await.ok_or_else(|| {
+        Error::Fetch(format!(
+            "the URL is not a {} post URL",
+            client.flavor().as_str()
+        ))
+    })?;
     Ok(PostRef::new(host, post_id))
 }
 
@@ -226,6 +231,7 @@ mod tests {
         .await
         .unwrap_err();
 
+        let reason = reason.to_string();
         assert!(reason.contains("prohibited by robots.txt"), "{reason}");
         assert!(reason.contains("nya.social"), "{reason}");
     }
@@ -237,6 +243,6 @@ mod tests {
         let reason = look_up_post("not a url", &mut seen_hosts, &http)
             .await
             .unwrap_err();
-        assert_eq!(reason, "the URL has no host");
+        assert_eq!(reason.to_string(), "the URL has no host");
     }
 }

@@ -50,18 +50,16 @@ const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Open the database, creating it and its tables if they are not there yet.
 pub async fn open(config: &Config) -> Result<SqlitePool> {
-    std::fs::create_dir_all(&config.state_dir).map_err(|ex| {
-        Error(format!(
-            "Could not create {}: {ex}",
-            config.state_dir.display()
-        ))
+    std::fs::create_dir_all(&config.state_dir).map_err(|ex| Error::Io {
+        context: format!("Could not create {}", config.state_dir.display()),
+        source: ex,
     })?;
     let path = config.state_dir.join("fedifetcher.db");
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(sqlite_options(&path, BUSY_TIMEOUT))
         .await
-        .map_err(|ex| Error(format!("Could not open {}: {ex}", path.display())))?;
+        .map_err(|ex| Error::DbOpen { path, source: ex })?;
     create_schema(&pool).await?;
     Ok(pool)
 }
@@ -93,8 +91,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,8 +102,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS private_posts (
             uri TEXT PRIMARY KEY,
@@ -114,8 +110,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS opted_out_accounts (
             acct TEXT PRIMARY KEY,
@@ -124,8 +119,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS known_context_posts (
             uri TEXT PRIMARY KEY,
@@ -134,8 +128,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS trigger_posts (
             uri TEXT PRIMARY KEY,
@@ -155,8 +148,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS config (
             key TEXT PRIMARY KEY,
@@ -164,8 +156,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS seen_urls (
             uri TEXT PRIMARY KEY,
@@ -173,8 +164,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS known_followings (
             acct TEXT PRIMARY KEY,
@@ -182,8 +172,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS recently_checked_users (
             acct TEXT PRIMARY KEY,
@@ -191,8 +180,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     create_seen_hosts(pool).await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS context_cache (
@@ -202,8 +190,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS replied_toots (
             url TEXT PRIMARY KEY,
@@ -213,8 +200,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS robots_cache (
             url TEXT PRIMARY KEY,
@@ -223,8 +209,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     // databases written by earlier versions get their tables reshaped here
     migrate_trigger_posts(pool).await?;
     migrate_seen_hosts(pool).await?;
@@ -250,8 +235,7 @@ async fn create_seen_hosts(pool: &SqlitePool) -> Result<()> {
         )",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     Ok(())
 }
 
@@ -271,10 +255,7 @@ async fn migrate_trigger_posts(pool: &SqlitePool) -> Result<()> {
         if !columns.iter().any(|name| name == column) {
             // the column and kind come from the hardcoded list above
             let sql = format!("ALTER TABLE trigger_posts ADD COLUMN {column} {kind}");
-            sqlx::query(AssertSqlSafe(sql))
-                .execute(pool)
-                .await
-                .map_err(db_error)?;
+            sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
         }
     }
     Ok(())
@@ -323,7 +304,7 @@ where
                 debug!("Database is locked; retrying the write (attempt {attempt})");
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
             }
-            Err(ex) => return Err(db_error(ex)),
+            Err(ex) => return Err(ex.into()),
         }
     }
 }
@@ -338,12 +319,10 @@ async fn migrate_seen_hosts(pool: &SqlitePool) -> Result<()> {
     }
     let rows = sqlx::query("SELECT host, info FROM seen_hosts ORDER BY rowid")
         .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     sqlx::query("ALTER TABLE seen_hosts RENAME TO seen_hosts_legacy")
         .execute(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     create_seen_hosts(pool).await?;
     for row in rows {
         let host: String = row.get("host");
@@ -351,14 +330,11 @@ async fn migrate_seen_hosts(pool: &SqlitePool) -> Result<()> {
         let Ok(value) = serde_json::from_str::<Value>(&info) else {
             continue;
         };
-        insert_host_row(pool, &HostRow::from_state_value(&host, &value))
-            .await
-            .map_err(db_error)?;
+        insert_host_row(pool, &HostRow::from_state_value(&host, &value)).await?;
     }
     sqlx::query("DROP TABLE seen_hosts_legacy")
         .execute(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(())
 }
 
@@ -367,14 +343,13 @@ async fn migrate_seen_hosts(pool: &SqlitePool) -> Result<()> {
 pub async fn load_config(pool: &SqlitePool) -> Result<RawValues> {
     let rows = sqlx::query("SELECT key, value FROM config ORDER BY rowid")
         .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     let mut values = RawValues::new();
     for row in rows {
         let key: String = row.get("key");
         let text: String = row.get("value");
         let value: Value = serde_json::from_str(&text)
-            .map_err(|ex| Error(format!("Cannot read the stored option {key}: {ex}")))?;
+            .map_err(|ex| Error::Config(format!("Cannot read the stored option {key}: {ex}")))?;
         values.insert(key, value);
     }
     Ok(values)
@@ -383,20 +358,16 @@ pub async fn load_config(pool: &SqlitePool) -> Result<RawValues> {
 /// Replace the stored configuration: options absent from `values` are
 /// cleared, so an unset option stays unset when the config is read back.
 pub async fn save_config(pool: &SqlitePool, values: &RawValues) -> Result<()> {
-    let mut tx = pool.begin().await.map_err(db_error)?;
-    sqlx::query("DELETE FROM config")
-        .execute(&mut *tx)
-        .await
-        .map_err(db_error)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM config").execute(&mut *tx).await?;
     for (key, value) in values {
         sqlx::query("INSERT INTO config (key, value) VALUES (?, ?)")
             .bind(key)
             .bind(value.to_string())
             .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+            .await?;
     }
-    tx.commit().await.map_err(db_error)?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -408,8 +379,7 @@ pub async fn insert_log(pool: &SqlitePool, row: &LogRow) -> Result<()> {
         .bind(&row.target)
         .bind(&row.message)
         .execute(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(())
 }
 
@@ -460,8 +430,7 @@ pub async fn recent_logs(
     let rows = sqlx::query("SELECT ts, level, target, message FROM logs ORDER BY id DESC LIMIT ?")
         .bind(max as i64)
         .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     // newest first
     let mut lines: Vec<LogRow> = rows
         .iter()
@@ -494,10 +463,7 @@ pub async fn recent_logs(
 /// Delete every log line; the /logs page's clear button. Lines already on
 /// stderr stay there; the database is what the page reads.
 pub async fn clear_logs(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("DELETE FROM logs")
-        .execute(pool)
-        .await
-        .map_err(db_error)?;
+    sqlx::query("DELETE FROM logs").execute(pool).await?;
     Ok(())
 }
 
@@ -506,8 +472,7 @@ pub async fn prune_logs(pool: &SqlitePool, keep: i64) -> Result<()> {
     sqlx::query("DELETE FROM logs WHERE id <= (SELECT COALESCE(MAX(id), 0) - ? FROM logs)")
         .bind(keep)
         .execute(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(())
 }
 
@@ -519,8 +484,7 @@ pub async fn insert_run(pool: &SqlitePool, run: &RunRow) -> Result<()> {
         .bind(&run.outcome)
         .bind(&run.message)
         .execute(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(())
 }
 
@@ -533,8 +497,7 @@ pub async fn start_run(pool: &SqlitePool, started: &str) -> Result<i64> {
     )
     .bind(started)
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     Ok(result.last_insert_rowid())
 }
 
@@ -553,8 +516,7 @@ pub async fn finish_run(
         .bind(message)
         .bind(id)
         .execute(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(())
 }
 
@@ -570,8 +532,7 @@ pub async fn interrupt_stale_runs(pool: &SqlitePool) -> Result<u64> {
         WHERE outcome = 'running'",
     )
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     Ok(result.rows_affected())
 }
 
@@ -582,8 +543,7 @@ pub async fn recent_runs(pool: &SqlitePool, max: usize) -> Result<Vec<RunRow>> {
     )
     .bind(max as i64)
     .fetch_all(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     Ok(rows
         .iter()
         .map(|row| RunRow {
@@ -603,7 +563,7 @@ pub async fn list_tables(pool: &SqlitePool) -> Result<Vec<String>> {
     )
     .fetch_all(pool)
     .await
-    .map_err(db_error)?;
+    ?;
     Ok(rows
         .iter()
         .map(|row| row.get::<String, _>("name"))
@@ -614,10 +574,7 @@ pub async fn list_tables(pool: &SqlitePool) -> Result<Vec<String>> {
 /// view.
 pub async fn table_columns(pool: &SqlitePool, table: &str) -> Result<Vec<String>> {
     let sql = format!("PRAGMA table_info({})", quote_ident(table)?);
-    let rows = sqlx::query(AssertSqlSafe(sql))
-        .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+    let rows = sqlx::query(AssertSqlSafe(sql)).fetch_all(pool).await?;
     Ok(rows
         .iter()
         .map(|row| row.get::<String, _>("name"))
@@ -629,8 +586,7 @@ pub async fn table_count(pool: &SqlitePool, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {}", quote_ident(table)?);
     let count: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
         .fetch_one(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(count)
 }
 
@@ -649,7 +605,9 @@ pub async fn table_rows(
         return Ok(Vec::new());
     }
     if !columns.iter().any(|column| column == sort) {
-        return Err(Error(format!("{sort:?} is not a column of {table:?}")));
+        return Err(Error::Fetch(format!(
+            "{sort:?} is not a column of {table:?}"
+        )));
     }
     let table_q = quote_ident(table)?;
     let select: Vec<String> = columns
@@ -673,8 +631,7 @@ pub async fn table_rows(
     let rows = sqlx::query(AssertSqlSafe(sql))
         .bind(max)
         .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(rows
         .iter()
         .map(|row| {
@@ -698,7 +655,9 @@ fn quote_ident(name: &str) -> Result<String> {
     if safe {
         Ok(format!("\"{name}\""))
     } else {
-        Err(Error(format!("{name:?} is not a table or column name")))
+        Err(Error::Fetch(format!(
+            "{name:?} is not a table or column name"
+        )))
     }
 }
 
@@ -711,8 +670,7 @@ pub async fn mark_private_post(pool: &SqlitePool, uri: &str) -> Result<bool> {
             .bind(uri)
             .bind(timeutil::fmt_state_ts(timeutil::now()))
             .execute(pool)
-            .await
-            .map_err(db_error)?;
+            .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -721,8 +679,7 @@ pub async fn is_private_post(pool: &SqlitePool, uri: &str) -> Result<bool> {
     let found = sqlx::query("SELECT uri FROM private_posts WHERE uri = ? LIMIT 1")
         .bind(uri)
         .fetch_optional(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(found.is_some())
 }
 
@@ -736,8 +693,7 @@ pub async fn mark_opted_out_account(pool: &SqlitePool, acct: &str, reason: &str)
     .bind(reason)
     .bind(timeutil::fmt_state_ts(timeutil::now()))
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -746,8 +702,7 @@ pub async fn opted_out_account_reason(pool: &SqlitePool, acct: &str) -> Result<O
     let found = sqlx::query("SELECT reason FROM opted_out_accounts WHERE acct = ? LIMIT 1")
         .bind(acct)
         .fetch_optional(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(found.map(|row| row.get("reason")))
 }
 
@@ -766,8 +721,7 @@ pub async fn record_known_context_posts(
             sqlx::query_scalar("SELECT last_seen FROM known_context_posts WHERE uri = ?")
                 .bind(uri)
                 .fetch_optional(pool)
-                .await
-                .map_err(db_error)?;
+                .await?;
         sqlx::query(
             "INSERT INTO known_context_posts (uri, first_seen, last_seen) VALUES (?, ?, ?)
                 ON CONFLICT(uri) DO UPDATE SET last_seen = excluded.last_seen",
@@ -776,8 +730,7 @@ pub async fn record_known_context_posts(
         .bind(&now)
         .bind(&now)
         .execute(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
         previous.push(last_seen);
     }
     Ok(previous)
@@ -952,7 +905,7 @@ pub async fn trigger_post(pool: &SqlitePool, uri: &str) -> Result<Option<Trigger
     .bind(uri)
     .fetch_optional(pool)
     .await
-    .map_err(db_error)?;
+    ?;
     Ok(row.map(|row| TriggerPost {
         uri: row.get("uri"),
         url: row.get("url"),
@@ -1025,7 +978,7 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
     )
     .fetch_all(pool)
     .await
-    .map_err(db_error)?;
+    ?;
     for row in rows {
         let host_row = host_row(&row);
         state
@@ -1035,8 +988,7 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
 
     let rows = sqlx::query("SELECT uri, last_seen, created_at FROM context_cache ORDER BY rowid")
         .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     for row in rows {
         let uri: String = row.get("uri");
         let last_seen = timeutil::parse(&row.get::<String, _>("last_seen"));
@@ -1051,8 +1003,7 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
     let rows =
         sqlx::query("SELECT url, remote_url, server, post_id FROM replied_toots ORDER BY rowid")
             .fetch_all(pool)
-            .await
-            .map_err(db_error)?;
+            .await?;
     for row in rows {
         let url: String = row.get("url");
         let replied = match (
@@ -1167,10 +1118,7 @@ async fn load_timestamped_set(
     key_column: &str,
 ) -> Result<TimestampedSet> {
     let sql = format!("SELECT {key_column}, first_seen FROM {table} ORDER BY rowid");
-    let rows = sqlx::query(AssertSqlSafe(sql))
-        .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+    let rows = sqlx::query(AssertSqlSafe(sql)).fetch_all(pool).await?;
     let mut set = TimestampedSet::new();
     for row in rows {
         let item: String = row.get(key_column);
@@ -1211,8 +1159,7 @@ pub async fn robots_cached(pool: &SqlitePool, url: &str) -> Result<Option<String
     let row: Option<(String,)> = sqlx::query_as("SELECT text FROM robots_cache WHERE url = ?")
         .bind(url)
         .fetch_optional(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(row.map(|(text,)| text))
 }
 
@@ -1227,8 +1174,7 @@ pub async fn robots_store(pool: &SqlitePool, url: &str, text: &str) -> Result<()
     .bind(text)
     .bind(&fetched_at)
     .execute(pool)
-    .await
-    .map_err(db_error)?;
+    .await?;
     Ok(())
 }
 
@@ -1238,8 +1184,7 @@ pub async fn robots_discard_stale(pool: &SqlitePool, max_age: time::Duration) ->
     let result = sqlx::query("DELETE FROM robots_cache WHERE fetched_at < ?")
         .bind(&cutoff)
         .execute(pool)
-        .await
-        .map_err(db_error)?;
+        .await?;
     Ok(result.rows_affected())
 }
 
@@ -1250,10 +1195,6 @@ pub fn memory_pool() -> SqlitePool {
     SqlitePoolOptions::new()
         .connect_lazy("sqlite::memory:")
         .unwrap()
-}
-
-fn db_error(ex: sqlx::Error) -> Error {
-    Error(format!("Database error: {ex}"))
 }
 
 #[cfg(test)]

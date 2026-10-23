@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::error::ConfigError;
+use crate::error::{Error, Result};
 
 const TRUTHY: &[&str] = &["1", "true", "yes", "on"];
 const FALSEY: &[&str] = &["0", "false", "no", "off", ""];
@@ -229,7 +229,7 @@ impl Config {
 
     /// Overlay raw values onto this config, coercing them the same way
     /// `Config::from_values` does, and normalizing the server name.
-    pub fn apply_values(&mut self, values: &RawValues) -> Result<(), ConfigError> {
+    pub fn apply_values(&mut self, values: &RawValues) -> Result<()> {
         apply(self, values)?;
         self.server = Config::normalize_server(&self.server);
         Ok(())
@@ -348,21 +348,18 @@ pub type RawValues = BTreeMap<String, Value>;
 
 impl Config {
     /// Build a Config from the values stored in the database.
-    pub fn from_values(stored: RawValues) -> Result<Config, ConfigError> {
+    pub fn from_values(stored: RawValues) -> Result<Config> {
         Self::from_values_with(stored, true)
     }
 
     /// Like [`Config::from_values`], but a missing server or access token is
     /// not an error: the web UI starts with an empty configuration, and the
     /// values are filled in through its config page.
-    pub fn from_values_lenient(stored: RawValues) -> Result<Config, ConfigError> {
+    pub fn from_values_lenient(stored: RawValues) -> Result<Config> {
         Self::from_values_with(stored, false)
     }
 
-    fn from_values_with(
-        stored: RawValues,
-        require_server_and_token: bool,
-    ) -> Result<Config, ConfigError> {
+    fn from_values_with(stored: RawValues, require_server_and_token: bool) -> Result<Config> {
         if require_server_and_token
             && (!stored.contains_key("server")
                 || stored
@@ -370,7 +367,7 @@ impl Config {
                     .map(is_empty_list)
                     .unwrap_or(true))
         {
-            return Err(ConfigError(
+            return Err(Error::Config(
                 "You must supply at least a server name and an access token".to_string(),
             ));
         }
@@ -469,7 +466,7 @@ pub fn option_description(name: &str) -> Option<&'static str> {
     })
 }
 
-fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
+fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
     for (name, value) in values {
         let result = match name.as_str() {
             "server" => coerce_string(value).map(|v| config.server = v),
@@ -518,14 +515,12 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
             // unknown options are ignored, as in the Python original
             _ => Ok(()),
         };
-        result.map_err(|ex| ConfigError(format!("Cannot read option {name}: {ex}")))?;
+        result.map_err(|ex| Error::Config(format!("Cannot read option {name}: {ex}")))?;
     }
     Ok(())
 }
 
-type CoerceResult<T> = Result<T, String>;
-
-fn coerce_bool(value: &Value) -> CoerceResult<bool> {
+fn coerce_bool(value: &Value) -> Result<bool> {
     match value {
         Value::Bool(b) => Ok(*b),
         Value::Number(n) => Ok(n.as_i64().unwrap_or(0) != 0),
@@ -536,58 +531,58 @@ fn coerce_bool(value: &Value) -> CoerceResult<bool> {
             } else if FALSEY.contains(&text.as_str()) {
                 Ok(false)
             } else {
-                Err(format!("{text:?} is not a yes/no value"))
+                Err(Error::Config(format!("{text:?} is not a yes/no value")))
             }
         }
-        _ => Err(format!("{value} is not a yes/no value")),
+        _ => Err(Error::Config(format!("{value} is not a yes/no value"))),
     }
 }
 
-fn coerce_int(value: &Value) -> CoerceResult<i64> {
+fn coerce_int(value: &Value) -> Result<i64> {
     match value {
         Value::Number(n) => n
             .as_i64()
-            .ok_or_else(|| format!("{value} is not an integer")),
+            .ok_or_else(|| Error::Config(format!("{value} is not an integer"))),
         Value::Bool(b) => Ok(*b as i64),
         Value::String(text) => text
             .trim()
             .parse::<i64>()
-            .map_err(|_| format!("{text:?} is not an integer")),
-        _ => Err(format!("{value} is not an integer")),
+            .map_err(|_| Error::Config(format!("{text:?} is not an integer"))),
+        _ => Err(Error::Config(format!("{value} is not an integer"))),
     }
 }
 
-fn coerce_string(value: &Value) -> CoerceResult<String> {
+fn coerce_string(value: &Value) -> Result<String> {
     match value {
         Value::String(s) => Ok(s.clone()),
         Value::Number(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(b.to_string()),
-        _ => Err(format!("{value} is not a string")),
+        _ => Err(Error::Config(format!("{value} is not a string"))),
     }
 }
 
-fn coerce_optional_string(value: &Value) -> CoerceResult<Option<String>> {
+fn coerce_optional_string(value: &Value) -> Result<Option<String>> {
     match value {
         Value::Null => Ok(None),
         other => coerce_string(other).map(Some),
     }
 }
 
-fn coerce_path(value: &Value) -> CoerceResult<PathBuf> {
+fn coerce_path(value: &Value) -> Result<PathBuf> {
     match value {
         Value::String(s) => Ok(PathBuf::from(s)),
-        _ => Err(format!("{value} is not a path")),
+        _ => Err(Error::Config(format!("{value} is not a path"))),
     }
 }
 
-fn coerce_optional_path(value: &Value) -> CoerceResult<Option<PathBuf>> {
+fn coerce_optional_path(value: &Value) -> Result<Option<PathBuf>> {
     match value {
         Value::Null => Ok(None),
         other => coerce_path(other).map(Some),
     }
 }
 
-fn coerce_list(value: &Value) -> CoerceResult<Vec<String>> {
+fn coerce_list(value: &Value) -> Result<Vec<String>> {
     match value {
         // a comma-separated string, as on the command line
         Value::String(text) => Ok(text
@@ -601,26 +596,28 @@ fn coerce_list(value: &Value) -> CoerceResult<Vec<String>> {
             .map(|item| match item {
                 Value::String(s) => Ok(s.clone()),
                 Value::Number(n) => Ok(n.to_string()),
-                _ => Err(format!("{item} is not a string")),
+                _ => Err(Error::Config(format!("{item} is not a string"))),
             })
             .collect(),
-        _ => Err(format!("{value} is not a list of values")),
+        _ => Err(Error::Config(format!("{value} is not a list of values"))),
     }
 }
 
 /// A list of seconds, as a comma-separated string or an array of numbers.
 /// Every entry must be a finite, non-negative number: a negative or NaN
 /// delay would panic when the wait is built.
-fn coerce_seconds(value: &Value) -> CoerceResult<Vec<f64>> {
+fn coerce_seconds(value: &Value) -> Result<Vec<f64>> {
     let parse = |text: &str| {
         let seconds: f64 = text
             .trim()
             .parse()
-            .map_err(|_| format!("{text:?} is not a number of seconds"))?;
+            .map_err(|_| Error::Config(format!("{text:?} is not a number of seconds")))?;
         if seconds.is_finite() && seconds >= 0.0 {
             Ok(seconds)
         } else {
-            Err(format!("{text:?} is not a number of seconds"))
+            Err(Error::Config(format!(
+                "{text:?} is not a number of seconds"
+            )))
         }
     };
     match value {
@@ -636,19 +633,19 @@ fn coerce_seconds(value: &Value) -> CoerceResult<Vec<f64>> {
             .map(|item| match item {
                 Value::Number(n) => n
                     .as_f64()
-                    .ok_or_else(|| format!("{item} is not a number of seconds"))
+                    .ok_or_else(|| Error::Config(format!("{item} is not a number of seconds")))
                     .and_then(|seconds| {
                         if seconds.is_finite() && seconds >= 0.0 {
                             Ok(seconds)
                         } else {
-                            Err(format!("{item} is not a number of seconds"))
+                            Err(Error::Config(format!("{item} is not a number of seconds")))
                         }
                     }),
                 Value::String(text) => parse(text),
-                _ => Err(format!("{item} is not a number of seconds")),
+                _ => Err(Error::Config(format!("{item} is not a number of seconds"))),
             })
             .collect(),
-        _ => Err(format!("{value} is not a list of seconds")),
+        _ => Err(Error::Config(format!("{value} is not a list of seconds"))),
     }
 }
 

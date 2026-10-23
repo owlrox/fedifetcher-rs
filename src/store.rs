@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 
 use crate::config::Config;
 use crate::db;
-use crate::error::{LockedError, Result};
+use crate::error::{Error, Result};
 use crate::state::{ContextCache, ServerCache, TimestampedSet};
 use crate::timeutil;
 use crate::urls::PostRef;
@@ -252,7 +252,7 @@ fn process_alive(_pid: u32) -> bool {
 /// crashed — is reclaimed on the spot, as is one older than `lock_hours`, and
 /// one too old to name a holder (written by a previous version), so a single
 /// long-running service never has to wait out a lock it left behind.
-pub fn lock(config: &Config) -> std::result::Result<LockGuard, LockedError> {
+pub fn lock(config: &Config) -> Result<LockGuard> {
     let path = config.lock_path();
 
     if path.exists() {
@@ -261,7 +261,7 @@ pub fn lock(config: &Config) -> std::result::Result<LockGuard, LockedError> {
             .ok()
             .and_then(|text| parse_lock_content(&text))
             .ok_or_else(|| {
-                LockedError(format!(
+                Error::Locked(format!(
                     "Cannot read lock file {} - aborting.",
                     path.display()
                 ))
@@ -271,7 +271,7 @@ pub fn lock(config: &Config) -> std::result::Result<LockGuard, LockedError> {
         if age < Duration::hours(config.lock_hours) {
             match content.pid {
                 Some(pid) if process_alive(pid) => {
-                    return Err(LockedError(format!(
+                    return Err(Error::Locked(format!(
                         "Lock file age is {} - below --lock-hours={} provided: held by process {} since {} ({}). Another FediFetcher is running.",
                         timeutil::fmt_timedelta(age),
                         config.lock_hours,
@@ -310,8 +310,10 @@ pub fn lock(config: &Config) -> std::result::Result<LockGuard, LockedError> {
         "pid": std::process::id(),
         "created": timeutil::fmt_lock_ts(timeutil::now()),
     });
-    std::fs::write(&path, content.to_string())
-        .map_err(|ex| LockedError(format!("Cannot write lock file {}: {ex}", path.display())))?;
+    std::fs::write(&path, content.to_string()).map_err(|ex| Error::Io {
+        context: format!("Cannot write lock file {}", path.display()),
+        source: ex,
+    })?;
     Ok(LockGuard { path })
 }
 
@@ -475,7 +477,7 @@ mod tests {
         let guard = lock(&config).unwrap();
         assert!(config.lock_path().exists());
         let err = lock(&config).unwrap_err();
-        assert!(err.0.contains("below --lock-hours=24"), "{}", err.0);
+        assert!(err.to_string().contains("below --lock-hours=24"), "{err}");
         drop(guard);
         assert!(!config.lock_path().exists());
 
@@ -492,7 +494,10 @@ mod tests {
         // an unreadable lock aborts
         std::fs::write(config.lock_path(), "not a timestamp").unwrap();
         let err = lock(&config).unwrap_err();
-        assert!(err.0.starts_with("Cannot read lock file"), "{}", err.0);
+        assert!(
+            err.to_string().starts_with("Cannot read lock file"),
+            "{err}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -558,11 +563,11 @@ mod tests {
         )
         .unwrap();
         let err = lock(&config).unwrap_err();
-        assert!(err.0.contains("below --lock-hours=24"), "{}", err.0);
+        assert!(err.to_string().contains("below --lock-hours=24"), "{err}");
         assert!(
-            err.0.contains(&format!("held by process {live_pid}")),
-            "{}",
-            err.0
+            err.to_string()
+                .contains(&format!("held by process {live_pid}")),
+            "{err}"
         );
         assert!(
             config.lock_path().exists(),
