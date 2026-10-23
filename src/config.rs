@@ -1,10 +1,9 @@
-//! Configuration: one struct, read from defaults, the database, the
-//! environment and the command line, in increasing order of precedence.
+//! Configuration: one struct, built from defaults and the values stored in
+//! the database.
 //!
-//! The database holds the configuration between runs; the web UI edits it
-//! there. There is no config file: the `ff_*` environment variables and the
-//! command line flags override the stored values, with every option spelled
-//! the same way in all places.
+//! The database is the only source of configuration — the web UI edits it
+//! there — so there is no config file, no `ff_*` environment variables and
+//! no command line flags.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -16,9 +15,6 @@ use crate::error::ConfigError;
 
 const TRUTHY: &[&str] = &["1", "true", "yes", "on"];
 const FALSEY: &[&str] = &["0", "false", "no", "off", ""];
-
-const ENV_PREFIX: &str = "ff_";
-const ACCESS_TOKEN_ENV_PREFIX: &str = "ff_access_token";
 
 /// Where a checkout keeps its state, and has since long before there was a
 /// choice.
@@ -310,47 +306,29 @@ impl Config {
     }
 }
 
-/// The raw, uncoerced values from one source, keyed by option name.
+/// The raw, uncoerced configuration values stored in the database, keyed by
+/// option name.
 pub type RawValues = BTreeMap<String, Value>;
 
-/// Build a Config from the database, the environment and the command line.
-///
-/// Later sources win: `stored`, then `environ`, then `cli`.
-pub fn build_config(
-    stored: RawValues,
-    environ: RawValues,
-    cli: RawValues,
-) -> Result<Config, ConfigError> {
-    build_config_with(stored, environ, cli, true)
+/// Build a Config from the values stored in the database.
+pub fn build_config(stored: RawValues) -> Result<Config, ConfigError> {
+    build_config_with(stored, true)
 }
 
 /// Like `build_config`, but a missing server or access token is not an error:
 /// the web UI starts with an empty configuration, and the values are filled
 /// in through its config page.
-pub fn build_config_lenient(
-    stored: RawValues,
-    environ: RawValues,
-    cli: RawValues,
-) -> Result<Config, ConfigError> {
-    build_config_with(stored, environ, cli, false)
+pub fn build_config_lenient(stored: RawValues) -> Result<Config, ConfigError> {
+    build_config_with(stored, false)
 }
 
 fn build_config_with(
     stored: RawValues,
-    environ: RawValues,
-    cli: RawValues,
     require_server_and_token: bool,
 ) -> Result<Config, ConfigError> {
-    let mut values: RawValues = RawValues::new();
-    for source in [stored, environ, cli] {
-        for (key, value) in source {
-            values.insert(key, value);
-        }
-    }
-
     if require_server_and_token
-        && (!values.contains_key("server")
-            || values.get("access_tokens").map(is_empty_list).unwrap_or(true))
+        && (!stored.contains_key("server")
+            || stored.get("access_tokens").map(is_empty_list).unwrap_or(true))
     {
         return Err(ConfigError(
             "You must supply at least a server name and an access token".to_string(),
@@ -358,7 +336,7 @@ fn build_config_with(
     }
 
     let mut config = Config::default();
-    config.apply_values(&values)?;
+    config.apply_values(&stored)?;
     Ok(config)
 }
 
@@ -368,31 +346,6 @@ fn is_empty_list(value: &Value) -> bool {
         Value::Null => true,
         _ => false,
     }
-}
-
-/// Read the `ff_*` environment variables into raw values.
-///
-/// Any variable starting with `ff_access_token` supplies an access token.
-pub fn read_environ(environ: &[(String, String)]) -> RawValues {
-    let mut values = RawValues::new();
-    let mut tokens: Vec<String> = Vec::new();
-    for (name, value) in environ {
-        let name = name.to_lowercase();
-        if let Some(token) = name.strip_prefix(ACCESS_TOKEN_ENV_PREFIX) {
-            let _ = token;
-            tokens.push(value.clone());
-        } else if let Some(option) = name.strip_prefix(ENV_PREFIX) {
-            if is_known_option(option) {
-                values.insert(option.to_string(), Value::String(value.clone()));
-            }
-        }
-    }
-    if !tokens.is_empty() {
-        values.insert("access_tokens".to_string(), Value::Array(
-            tokens.into_iter().map(Value::String).collect(),
-        ));
-    }
-    values
 }
 
 pub fn is_known_option(name: &str) -> bool {
@@ -676,9 +629,9 @@ mod tests {
 
     #[test]
     fn requires_server_and_token() {
-        assert!(build_config(RawValues::new(), RawValues::new(), RawValues::new()).is_err());
-        assert!(build_config(values(vec![("server", json!("x"))]), RawValues::new(), RawValues::new()).is_err());
-        assert!(build_config(minimal(), RawValues::new(), RawValues::new()).is_ok());
+        assert!(build_config(RawValues::new()).is_err());
+        assert!(build_config(values(vec![("server", json!("x"))])).is_err());
+        assert!(build_config(minimal()).is_ok());
     }
 
     #[test]
@@ -731,10 +684,7 @@ mod tests {
                 ("server", json!("example.social")),
                 ("access_tokens", json!(["t"])),
                 ("hide_server_in_user_agent", json!(true)),
-            ]),
-            RawValues::new(),
-            RawValues::new(),
-        )
+            ]))
         .unwrap();
         assert!(config.hide_server_in_user_agent);
         assert!(
@@ -744,25 +694,10 @@ mod tests {
     }
 
     #[test]
-    fn later_sources_win() {
-        let file = values(vec![
-            ("server", json!("file.example")),
-            ("access_tokens", json!(["filetoken"])),
-            ("max_followers", json!(5)),
-        ]);
-        let environ = values(vec![("max_followers", json!("7"))]);
-        let cli = values(vec![("max_followers", json!("9"))]);
-        let config = build_config(file, environ, cli).unwrap();
-        assert_eq!(config.server, "file.example");
-        assert_eq!(config.access_tokens, vec!["filetoken".to_string()]);
-        assert_eq!(config.max_followers, 9);
-    }
-
-    #[test]
     fn server_is_normalized() {
         let mut raw = minimal();
         raw.insert("server".to_string(), json!("https://mstdn.thms.uk/"));
-        let config = build_config(raw, RawValues::new(), RawValues::new()).unwrap();
+        let config = build_config(raw).unwrap();
         assert_eq!(config.server, "mstdn.thms.uk");
     }
 
@@ -774,10 +709,7 @@ mod tests {
                     ("server", json!("x")),
                     ("access_tokens", json!(["t"])),
                     ("from_lists", json!(truthy)),
-                ]),
-                RawValues::new(),
-                RawValues::new(),
-            )
+                ]))
             .unwrap();
             assert!(config.from_lists, "{truthy}");
         }
@@ -787,10 +719,7 @@ mod tests {
                     ("server", json!("x")),
                     ("access_tokens", json!(["t"])),
                     ("from_lists", json!(falsy)),
-                ]),
-                RawValues::new(),
-                RawValues::new(),
-            )
+                ]))
             .unwrap();
             assert!(!config.from_lists, "{falsy}");
         }
@@ -799,16 +728,13 @@ mod tests {
                 ("server", json!("x")),
                 ("access_tokens", json!(["t"])),
                 ("from_lists", json!("maybe")),
-            ]),
-            RawValues::new(),
-            RawValues::new(),
-        )
+            ]))
         .is_err());
     }
 
     #[test]
     fn defaults_match_python() {
-        let config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        let config = build_config(minimal()).unwrap();
         assert_eq!(config.max_posts_per_account, 40);
         assert!(config.backfill_with_context);
         assert!(config.backfill_mentioned_users);
@@ -833,10 +759,7 @@ mod tests {
                 ("server", json!("x")),
                 ("access_tokens", json!(["t"])),
                 ("instance_blocklist", json!("a.example, b.example")),
-            ]),
-            RawValues::new(),
-            RawValues::new(),
-        )
+            ]))
         .unwrap();
         assert_eq!(config.instance_blocklist, vec!["a.example", "b.example"]);
 
@@ -845,17 +768,14 @@ mod tests {
                 ("server", json!("x")),
                 ("access_tokens", json!(["t"])),
                 ("instance_blocklist", json!(["a.example", "b.example"])),
-            ]),
-            RawValues::new(),
-            RawValues::new(),
-        )
+            ]))
         .unwrap();
         assert_eq!(config.instance_blocklist, vec!["a.example", "b.example"]);
     }
 
     #[test]
     fn the_rate_limit_cooldown_defaults_to_the_historical_series() {
-        let config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        let config = build_config(minimal()).unwrap();
         // what the hardcoded 0.5s backoff growing fourfold each step waited
         assert_eq!(
             config.rate_limit_cooldown,
@@ -870,10 +790,7 @@ mod tests {
                 ("server", json!("x")),
                 ("access_tokens", json!(["t"])),
                 ("rate_limit_cooldown", json!("1, 2.5, 10")),
-            ]),
-            RawValues::new(),
-            RawValues::new(),
-        )
+            ]))
         .unwrap();
         assert_eq!(config.rate_limit_cooldown, vec![1.0, 2.5, 10.0]);
 
@@ -882,10 +799,7 @@ mod tests {
                 ("server", json!("x")),
                 ("access_tokens", json!(["t"])),
                 ("rate_limit_cooldown", json!([1, 2.5, 10])),
-            ]),
-            RawValues::new(),
-            RawValues::new(),
-        )
+            ]))
         .unwrap();
         assert_eq!(config.rate_limit_cooldown, vec![1.0, 2.5, 10.0]);
 
@@ -895,10 +809,7 @@ mod tests {
                 ("server", json!("x")),
                 ("access_tokens", json!(["t"])),
                 ("rate_limit_cooldown", json!("")),
-            ]),
-            RawValues::new(),
-            RawValues::new(),
-        )
+            ]))
         .unwrap();
         assert!(config.rate_limit_cooldown.is_empty());
     }
@@ -911,20 +822,17 @@ mod tests {
                     ("server", json!("x")),
                     ("access_tokens", json!(["t"])),
                     ("rate_limit_cooldown", bad.clone()),
-                ]),
-                RawValues::new(),
-                RawValues::new(),
-            );
+                ]));
             assert!(result.is_err(), "{bad} should not parse");
         }
     }
 
     #[test]
     fn the_rate_limit_cooldown_round_trips_through_raw_values() {
-        let mut config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        let mut config = build_config(minimal()).unwrap();
         config.rate_limit_cooldown = vec![0.25, 1.0, 60.0];
         let raw = config.to_raw_values();
-        let rebuilt = build_config(raw, RawValues::new(), RawValues::new()).unwrap();
+        let rebuilt = build_config(raw).unwrap();
         assert_eq!(rebuilt.rate_limit_cooldown, vec![0.25, 1.0, 60.0]);
     }
 
@@ -935,38 +843,14 @@ mod tests {
                 ("server", json!("x")),
                 ("access_tokens", json!(["t"])),
                 ("nonsense", json!(1)),
-            ]),
-            RawValues::new(),
-            RawValues::new(),
-        )
+            ]))
         .unwrap();
         assert_eq!(config.server, "x");
     }
 
     #[test]
-    fn environ_reads_ff_prefixed_variables() {
-        let environ = vec![
-            ("FF_SERVER".to_string(), "env.example".to_string()),
-            ("ff_max_followers".to_string(), "12".to_string()),
-            ("ff_access_token_one".to_string(), "tok1".to_string()),
-            ("ff_access_token_two".to_string(), "tok2".to_string()),
-            ("ff_unknown_option".to_string(), "x".to_string()),
-            ("unrelated".to_string(), "y".to_string()),
-        ];
-        let raw = read_environ(&environ);
-        assert_eq!(raw.get("server"), Some(&json!("env.example")));
-        assert_eq!(raw.get("max_followers"), Some(&json!("12")));
-        assert_eq!(
-            raw.get("access_tokens"),
-            Some(&json!(["tok1", "tok2"]))
-        );
-        assert!(!raw.contains_key("unknown_option"));
-        assert!(!raw.contains_key("unrelated"));
-    }
-
-    #[test]
     fn enabled_tasks_follow_the_config() {
-        let mut config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        let mut config = build_config(minimal()).unwrap();
         assert!(
             config.enabled_tasks().is_empty(),
             "the defaults enable nothing"
@@ -983,11 +867,11 @@ mod tests {
     #[test]
     fn lenient_build_allows_an_empty_config() {
         let config =
-            build_config_lenient(RawValues::new(), RawValues::new(), RawValues::new()).unwrap();
+            build_config_lenient(RawValues::new()).unwrap();
         assert_eq!(config.server, "");
         assert!(config.access_tokens.is_empty());
 
-        let config = build_config_lenient(minimal(), RawValues::new(), RawValues::new()).unwrap();
+        let config = build_config_lenient(minimal()).unwrap();
         assert_eq!(config.server, "example.com");
         assert_eq!(config.access_tokens, vec!["token1".to_string()]);
     }

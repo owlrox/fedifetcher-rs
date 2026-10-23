@@ -80,12 +80,7 @@ async fn post_debug(base: &str, form: &str) -> (u16, String) {
 /// Read the saved configuration back from the database into a Config.
 async fn saved_config(pool: &sqlx::SqlitePool) -> fedifetcher::config::Config {
     let raw = fedifetcher::db::load_config(pool).await.unwrap();
-    fedifetcher::config::build_config(
-        raw,
-        fedifetcher::config::RawValues::new(),
-        fedifetcher::config::RawValues::new(),
-    )
-    .unwrap()
+    fedifetcher::config::build_config(raw).unwrap()
 }
 
 #[tokio::test]
