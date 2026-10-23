@@ -215,6 +215,102 @@ pub fn failed_lookup_state(reason: &str) -> Value {
     })
 }
 
+/// One row of the seen_hosts table: a host's fields broken out of the JSON
+/// the state used to keep them in. `raw_nodeinfo` stays JSON — its shape is
+/// the server's own — but everything FediFetcher reads is a column.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostRow {
+    pub host: String,
+    pub webserver: Option<String>,
+    pub software: Option<String>,
+    pub version: Option<String>,
+    pub mastodon_api: bool,
+    pub misskey_api: bool,
+    pub lemmy_api: bool,
+    pub peertube_api: bool,
+    pub last_checked: Option<String>,
+    /// Why the lookup failed, when it did.
+    pub error: Option<String>,
+    /// The nodeinfo document, as JSON text.
+    pub raw_nodeinfo: Option<String>,
+}
+
+impl HostRow {
+    /// The row for one seen_hosts entry, as the state spells it.
+    pub fn from_state_value(host: &str, value: &Value) -> Self {
+        let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+        let supported = |flavour: ApiFlavour| {
+            value
+                .get(flavour.state_key())
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        };
+        HostRow {
+            host: host.to_string(),
+            webserver: text("webserver"),
+            software: text("software"),
+            version: text("version"),
+            mastodon_api: supported(ApiFlavour::Mastodon),
+            misskey_api: supported(ApiFlavour::Misskey),
+            lemmy_api: supported(ApiFlavour::Lemmy),
+            peertube_api: supported(ApiFlavour::PeerTube),
+            last_checked: text("last_checked"),
+            error: text("error"),
+            raw_nodeinfo: value.get("rawnodeinfo").map(Value::to_string),
+        }
+    }
+
+    /// The seen_hosts entry this row reads back as: the same shape
+    /// `ServerInfo::to_state` and `failed_lookup_state` write, so the state
+    /// in memory is unchanged by the trip through columns. A row that
+    /// recorded a failed lookup — the only entries with an `error` — reads
+    /// back as the failure it was; anything else keeps the fields the hosts
+    /// page shows, even when it has no webserver to name.
+    pub fn to_state_value(&self) -> Value {
+        if self.error.is_some() {
+            return serde_json::json!({
+                "info": null,
+                "error": self.error,
+                "last_checked": self.last_checked,
+            });
+        }
+        let mut state = Map::new();
+        state.insert("webserver".to_string(), serde_json::json!(self.webserver));
+        state.insert("software".to_string(), serde_json::json!(self.software));
+        state.insert("version".to_string(), serde_json::json!(self.version));
+        if let Some(raw) = &self.raw_nodeinfo {
+            // the document as it was; one that does not parse reads as null
+            let parsed = serde_json::from_str(raw).unwrap_or(Value::Null);
+            state.insert("rawnodeinfo".to_string(), parsed);
+        }
+        state.insert(
+            "last_checked".to_string(),
+            serde_json::json!(self.last_checked),
+        );
+        for flavour in [
+            ApiFlavour::Mastodon,
+            ApiFlavour::Misskey,
+            ApiFlavour::Lemmy,
+            ApiFlavour::PeerTube,
+        ] {
+            state.insert(
+                flavour.state_key().to_string(),
+                Value::Bool(self.supported(flavour)),
+            );
+        }
+        Value::Object(state)
+    }
+
+    fn supported(&self, flavour: ApiFlavour) -> bool {
+        match flavour {
+            ApiFlavour::Mastodon => self.mastodon_api,
+            ApiFlavour::Misskey => self.misskey_api,
+            ApiFlavour::Lemmy => self.lemmy_api,
+            ApiFlavour::PeerTube => self.peertube_api,
+        }
+    }
+}
+
 /// The reason a cached lookup failed, if the cache records one.
 fn cached_failure_reason(cache: &ServerCache, server: &str) -> Option<String> {
     cache
@@ -543,6 +639,52 @@ mod tests {
         assert!(ServerInfo::from_state(&state).is_none());
         assert_eq!(state["error"], serde_json::json!("prohibited by robots.txt"));
         assert!(ServerInfo::from_state(&serde_json::json!({"foo": 1})).is_none());
+    }
+
+    #[test]
+    fn host_rows_round_trip_through_columns() {
+        let nodeinfo = serde_json::json!({
+            "software": {"name": "mastodon", "version": "4.3.0"},
+            "protocols": ["activitypub"],
+        });
+        let info = ServerInfo::from_nodeinfo("remote.example", &nodeinfo).unwrap();
+        let value = info.to_state();
+
+        let row = HostRow::from_state_value("remote.example", &value);
+        assert_eq!(row.host, "remote.example");
+        assert_eq!(row.webserver.as_deref(), Some("remote.example"));
+        assert_eq!(row.software.as_deref(), Some("mastodon"));
+        assert_eq!(row.version.as_deref(), Some("4.3.0"));
+        assert!(row.mastodon_api);
+        assert!(!row.misskey_api);
+        assert!(!row.lemmy_api);
+        assert!(!row.peertube_api);
+        assert!(row.raw_nodeinfo.is_some(), "the nodeinfo document is kept");
+        assert_eq!(row.error, None);
+
+        // and the row reads back as the entry it was
+        let back = row.to_state_value();
+        assert_eq!(back["last_checked"], value["last_checked"]);
+        assert_eq!(back["rawnodeinfo"], value["rawnodeinfo"]);
+        let reread = ServerInfo::from_state(&back).unwrap();
+        assert_eq!(reread.software, "mastodon");
+        assert_eq!(reread.version, "4.3.0");
+        assert!(reread.supports(ApiFlavour::Mastodon));
+    }
+
+    #[test]
+    fn a_failed_lookup_round_trips_through_columns() {
+        let value = failed_lookup_state("prohibited by robots.txt");
+        let row = HostRow::from_state_value("down.example", &value);
+        assert_eq!(row.webserver, None);
+        assert_eq!(row.error.as_deref(), Some("prohibited by robots.txt"));
+        assert!(row.last_checked.is_some());
+
+        let back = row.to_state_value();
+        assert!(ServerInfo::from_state(&back).is_none(), "still a failed lookup");
+        assert_eq!(back["error"], serde_json::json!("prohibited by robots.txt"));
+        // the failure keeps no api support keys, so expiry drops it as before
+        assert!(back.get("peertubeApiSupport").is_none());
     }
 
     #[test]

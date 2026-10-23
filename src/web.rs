@@ -67,6 +67,15 @@ enum RunStatus {
 /// Serve the web UI until the process is stopped. The config page saves to
 /// the database.
 pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std::io::Result<()> {
+    // A run row still marked running belongs to a process that is gone —
+    // unless another process holds the lock and is running right now, in
+    // which case the sweep is skipped and the row is left alone.
+    if let Ok(guard) = lock(&config) {
+        if let Err(ex) = db::interrupt_stale_runs(&db).await {
+            tracing::warn!("Could not mark interrupted runs: {ex}");
+        }
+        drop(guard);
+    }
     let app = app(config, db);
 
     let addr: std::net::SocketAddr = format!("{bind}:{port}")
@@ -630,8 +639,17 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     if let Ok(guard) = state.run_guard.clone().try_lock_owned() {
         tracing::info!("POST /run: run triggered from the web UI");
         state.cancel.reset();
+        let started = timeutil::now();
+        // the run is recorded the moment it starts, so the dashboard's
+        // history shows it while it is still going
+        let run_id = match db::start_run(&state.db, &timeutil::fmt_state_ts(started)).await {
+            Ok(id) => Some(id),
+            Err(ex) => {
+                tracing::warn!("Could not record the run's start in the database: {ex}");
+                None
+            }
+        };
         tokio::spawn(async move {
-            let started = timeutil::now();
             {
                 let mut ui = state.ui.lock().unwrap();
                 ui.status = RunStatus::Running { since: started };
@@ -646,14 +664,18 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
                 Ok(message) => ("ok".to_string(), message.clone()),
                 Err(ex) => ("error".to_string(), ex.to_string()),
             };
-            let record = RunRow {
-                started: timeutil::fmt_state_ts(started),
-                finished: timeutil::fmt_state_ts(finished),
-                outcome: outcome_label,
-                message,
-            };
-            if let Err(ex) = db::insert_run(&state.db, &record).await {
-                tracing::warn!("Could not record the run in the database: {ex}");
+            if let Some(id) = run_id {
+                if let Err(ex) = db::finish_run(
+                    &state.db,
+                    id,
+                    &timeutil::fmt_state_ts(finished),
+                    &outcome_label,
+                    &message,
+                )
+                .await
+                {
+                    tracing::warn!("Could not record the run's end in the database: {ex}");
+                }
             }
 
             let mut ui = state.ui.lock().unwrap();
@@ -1027,8 +1049,11 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl In
         ),
     ];
 
+    // a run still in progress refreshes the page, so its elapsed time ticks
+    // and its row flips to finished when it ends
+    let live = history.iter().any(|record| record.outcome == "running");
     view! {
-        <Page title="Dashboard".to_string() refresh=None>
+        <Page title="Dashboard".to_string() refresh=if live { Some(5) } else { None }>
             <section>
                 <h2>"Run"</h2>
                 <p>
@@ -1105,12 +1130,26 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl In
                                         let badge = match record.outcome.as_str() {
                                             "ok" => "ok",
                                             "stopped" => "stopped",
+                                            "running" => "running",
                                             _ => "error",
+                                        };
+                                        // a run still going has no end time;
+                                        // its cell shows how long it has run
+                                        let finished = if record.outcome == "running" {
+                                            match timeutil::parse(&record.started) {
+                                                Some(since) => format!(
+                                                    "running for {}",
+                                                    timeutil::fmt_timedelta(timeutil::now() - since)
+                                                ),
+                                                None => "running".to_string(),
+                                            }
+                                        } else {
+                                            record.finished.clone()
                                         };
                                         view! {
                                             <tr>
                                                 <td>{record.started}</td>
-                                                <td>{record.finished}</td>
+                                                <td>{finished}</td>
                                                 <td><span class=format!("badge {badge}")>{record.outcome}</span></td>
                                                 <td>{record.message}</td>
                                             </tr>

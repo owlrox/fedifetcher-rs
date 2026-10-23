@@ -208,6 +208,31 @@ async fn posting_run_redirects_back_and_records_the_run() {
 }
 
 #[tokio::test]
+async fn the_dashboard_shows_a_running_run_with_its_elapsed_time() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    // a run recorded as started but not finished, as one in progress is
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
+    fedifetcher::db::start_run(&db, &started).await.unwrap();
+
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains(">running<"), "the running run is in the history");
+    assert!(
+        body.contains("running for"),
+        "its end time cell shows how long it has run"
+    );
+    assert!(body.contains("badge running"), "the outcome gets its own badge");
+    assert!(
+        body.contains("http-equiv=\"refresh\""),
+        "the dashboard reloads itself while a run is live"
+    );
+}
+
+#[tokio::test]
 async fn the_logs_page_renders_lines_from_the_database() {
     let dir = common::tmp_dir();
     let base = spawn_ui(&dir).await;
@@ -891,8 +916,14 @@ async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
             uri: "https://remote.example/@a/1".to_string(),
             url: "https://remote.example/@a/1".to_string(),
             acct: Some("a@remote.example".to_string()),
+            author_url: None,
             replies_count: Some(2),
             created_at: None,
+            in_reply_to_id: None,
+            in_reply_to_account_id: None,
+            is_public: true,
+            is_boost: false,
+            mentions: None,
             source: "home timeline".to_string(),
         }],
         1000,

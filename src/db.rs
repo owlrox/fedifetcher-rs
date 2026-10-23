@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::config::{Config, RawValues};
 use crate::error::{Error, Result};
 use crate::posts::Post;
+use crate::servers::HostRow;
 use crate::state::TimestampedSet;
 use crate::store::{RepliedToot, State};
 use crate::timeutil;
@@ -119,7 +120,13 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             created_at TEXT,
             source TEXT NOT NULL,
             first_seen TEXT NOT NULL,
-            last_seen TEXT NOT NULL
+            last_seen TEXT NOT NULL,
+            in_reply_to_id TEXT,
+            in_reply_to_account_id TEXT,
+            is_public INTEGER NOT NULL DEFAULT 1,
+            is_boost INTEGER NOT NULL DEFAULT 0,
+            author_url TEXT,
+            mentions TEXT
         )",
     )
     .execute(&pool)
@@ -161,15 +168,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
     .execute(&pool)
     .await
     .map_err(db_error)?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS seen_hosts (
-            host TEXT PRIMARY KEY,
-            info TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .map_err(db_error)?;
+    create_seen_hosts(&pool).await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS context_cache (
             uri TEXT PRIMARY KEY,
@@ -201,7 +200,87 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
     .execute(&pool)
     .await
     .map_err(db_error)?;
+    // databases written by earlier versions get their tables reshaped here
+    migrate_trigger_posts(&pool).await?;
+    migrate_seen_hosts(&pool).await?;
     Ok(pool)
+}
+
+/// Create the seen_hosts table, whose fields are columns rather than one
+/// JSON blob.
+async fn create_seen_hosts(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS seen_hosts (
+            host TEXT PRIMARY KEY,
+            webserver TEXT,
+            software TEXT,
+            version TEXT,
+            mastodon_api INTEGER NOT NULL DEFAULT 0,
+            misskey_api INTEGER NOT NULL DEFAULT 0,
+            lemmy_api INTEGER NOT NULL DEFAULT 0,
+            peertube_api INTEGER NOT NULL DEFAULT 0,
+            last_checked TEXT,
+            error TEXT,
+            raw_nodeinfo TEXT
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
+    Ok(())
+}
+
+/// Add the columns an older trigger_posts table is missing, keeping the rows
+/// it already has (the new columns read as a public, non-boost post).
+async fn migrate_trigger_posts(pool: &SqlitePool) -> Result<()> {
+    let columns = table_columns(pool, "trigger_posts").await?;
+    let missing = [
+        ("in_reply_to_id", "TEXT"),
+        ("in_reply_to_account_id", "TEXT"),
+        ("is_public", "INTEGER NOT NULL DEFAULT 1"),
+        ("is_boost", "INTEGER NOT NULL DEFAULT 0"),
+        ("author_url", "TEXT"),
+        ("mentions", "TEXT"),
+    ];
+    for (column, kind) in missing {
+        if !columns.iter().any(|name| name == column) {
+            let sql = format!("ALTER TABLE trigger_posts ADD COLUMN {column} {kind}");
+            sqlx::query(&sql).execute(pool).await.map_err(db_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rebuild a seen_hosts table that kept every field in one JSON `info`
+/// column, breaking each row's fields out into columns. Rows whose JSON does
+/// not parse are dropped, as the load path dropped them.
+async fn migrate_seen_hosts(pool: &SqlitePool) -> Result<()> {
+    let columns = table_columns(pool, "seen_hosts").await?;
+    if !columns.iter().any(|name| name == "info") {
+        return Ok(());
+    }
+    let rows = sqlx::query("SELECT host, info FROM seen_hosts ORDER BY rowid")
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
+    sqlx::query("ALTER TABLE seen_hosts RENAME TO seen_hosts_legacy")
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+    create_seen_hosts(pool).await?;
+    for row in rows {
+        let host: String = row.get("host");
+        let info: String = row.get("info");
+        let Ok(value) = serde_json::from_str::<Value>(&info) else {
+            continue;
+        };
+        insert_host_row(pool, &HostRow::from_state_value(&host, &value)).await?;
+    }
+    sqlx::query("DROP TABLE seen_hosts_legacy")
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(())
 }
 
 /// The stored configuration as raw values: the database's whole `config`
@@ -364,6 +443,57 @@ pub async fn insert_run(pool: &SqlitePool, run: &RunRow) -> Result<()> {
         .await
         .map_err(db_error)?;
     Ok(())
+}
+
+/// Record a run the moment it starts, so the dashboard's history shows it
+/// while it is still going: the row reads `running`, with no end time, until
+/// `finish_run` completes it. Returns the row's id.
+pub async fn start_run(pool: &SqlitePool, started: &str) -> Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO runs (started, finished, outcome, message) VALUES (?, '', 'running', '')",
+    )
+    .bind(started)
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
+    Ok(result.last_insert_rowid())
+}
+
+/// Complete the run `start_run` recorded: its end time, its outcome, and
+/// the message it finished with.
+pub async fn finish_run(
+    pool: &SqlitePool,
+    id: i64,
+    finished: &str,
+    outcome: &str,
+    message: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE runs SET finished = ?, outcome = ?, message = ? WHERE id = ?")
+        .bind(finished)
+        .bind(outcome)
+        .bind(message)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(())
+}
+
+/// Mark runs still recorded as running as interrupted. The web UI calls this
+/// when it starts, under the lock: a `running` row it finds then belongs to
+/// a process that is gone, and would otherwise read as running forever.
+pub async fn interrupt_stale_runs(pool: &SqlitePool) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE runs SET
+            outcome = 'error',
+            message = 'Interrupted: FediFetcher stopped while this run was in progress',
+            finished = started
+        WHERE outcome = 'running'",
+    )
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
+    Ok(result.rows_affected())
 }
 
 /// The most recent runs, newest first.
@@ -567,7 +697,9 @@ pub async fn record_known_context_posts(
 pub const TRIGGER_POSTS_KEPT: i64 = 100_000;
 
 /// A post a run scanned for context — one of the posts that generate the
-/// need for backfilling — as the `trigger_posts` table records it.
+/// need for backfilling — as the `trigger_posts` table records it, with
+/// everything the scan pulled in on it: its links, its visibility, and the
+/// accounts it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TriggerPost {
     /// The post's uri, as its server spells it.
@@ -576,10 +708,22 @@ pub struct TriggerPost {
     pub url: String,
     /// Who wrote it, `name@host` when the server said.
     pub acct: Option<String>,
+    /// The author's profile URL, when the server said.
+    pub author_url: Option<String>,
     /// How many replies the server said it had, when it said.
     pub replies_count: Option<i64>,
     /// When the post was made, as a state timestamp.
     pub created_at: Option<String>,
+    /// The uri of the post this one replies to, when it is a reply.
+    pub in_reply_to_id: Option<String>,
+    /// The account id of the post this one replies to, when it is a reply.
+    pub in_reply_to_account_id: Option<String>,
+    /// Whether the server said the post is public.
+    pub is_public: bool,
+    /// Whether the post the scan was given was a boost.
+    pub is_boost: bool,
+    /// The accounts the post mentions, `name@host` each, comma-separated.
+    pub mentions: Option<String>,
     /// Which task first scanned it: home timeline, replies, bookmarks,
     /// favourites, lists, backfill, or a manual fetch.
     pub source: String,
@@ -595,8 +739,25 @@ impl TriggerPost {
             uri: original.uri.clone(),
             url: original.url.clone(),
             acct: original.account.as_ref().map(|account| account.acct.clone()),
+            author_url: original.account.as_ref().map(|account| account.url.clone()),
             replies_count: original.reply_count,
             created_at: Some(timeutil::fmt_state_ts(original.created_at)),
+            in_reply_to_id: original.in_reply_to_id.clone(),
+            in_reply_to_account_id: original.in_reply_to_account_id.clone(),
+            is_public: original.is_public,
+            is_boost: post.is_boost(),
+            mentions: if original.mentions.is_empty() {
+                None
+            } else {
+                Some(
+                    original
+                        .mentions
+                        .iter()
+                        .map(|user| user.acct.clone())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            },
             source: source.to_string(),
         }
     }
@@ -628,20 +789,32 @@ pub async fn record_trigger_posts(
             fresh += 1;
         }
         sqlx::query(
-            "INSERT INTO trigger_posts (uri, url, acct, replies_count, created_at, source, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO trigger_posts (uri, url, acct, author_url, replies_count, created_at, in_reply_to_id, in_reply_to_account_id, is_public, is_boost, mentions, source, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(uri) DO UPDATE SET
                     url = excluded.url,
                     acct = excluded.acct,
+                    author_url = excluded.author_url,
                     replies_count = excluded.replies_count,
                     created_at = excluded.created_at,
+                    in_reply_to_id = excluded.in_reply_to_id,
+                    in_reply_to_account_id = excluded.in_reply_to_account_id,
+                    is_public = excluded.is_public,
+                    is_boost = excluded.is_boost,
+                    mentions = excluded.mentions,
                     last_seen = excluded.last_seen",
         )
         .bind(&post.uri)
         .bind(&post.url)
         .bind(&post.acct)
+        .bind(&post.author_url)
         .bind(post.replies_count)
         .bind(&post.created_at)
+        .bind(&post.in_reply_to_id)
+        .bind(&post.in_reply_to_account_id)
+        .bind(post.is_public)
+        .bind(post.is_boost)
+        .bind(&post.mentions)
         .bind(&post.source)
         .bind(&now)
         .bind(&now)
@@ -666,7 +839,7 @@ pub async fn record_trigger_posts(
 /// never scanned it.
 pub async fn trigger_post(pool: &SqlitePool, uri: &str) -> Result<Option<TriggerPost>> {
     let row = sqlx::query(
-        "SELECT uri, url, acct, replies_count, created_at, source FROM trigger_posts WHERE uri = ?",
+        "SELECT uri, url, acct, author_url, replies_count, created_at, in_reply_to_id, in_reply_to_account_id, is_public, is_boost, mentions, source FROM trigger_posts WHERE uri = ?",
     )
     .bind(uri)
     .fetch_optional(pool)
@@ -676,10 +849,59 @@ pub async fn trigger_post(pool: &SqlitePool, uri: &str) -> Result<Option<Trigger
         uri: row.get("uri"),
         url: row.get("url"),
         acct: row.get("acct"),
+        author_url: row.get("author_url"),
         replies_count: row.get("replies_count"),
         created_at: row.get("created_at"),
+        in_reply_to_id: row.get("in_reply_to_id"),
+        in_reply_to_account_id: row.get("in_reply_to_account_id"),
+        is_public: row.get("is_public"),
+        is_boost: row.get("is_boost"),
+        mentions: row.get("mentions"),
         source: row.get("source"),
     }))
+}
+
+/// Read one seen_hosts row, whose fields are columns.
+fn host_row(row: &sqlx::sqlite::SqliteRow) -> HostRow {
+    HostRow {
+        host: row.get("host"),
+        webserver: row.get("webserver"),
+        software: row.get("software"),
+        version: row.get("version"),
+        mastodon_api: row.get("mastodon_api"),
+        misskey_api: row.get("misskey_api"),
+        lemmy_api: row.get("lemmy_api"),
+        peertube_api: row.get("peertube_api"),
+        last_checked: row.get("last_checked"),
+        error: row.get("error"),
+        raw_nodeinfo: row.get("raw_nodeinfo"),
+    }
+}
+
+/// Write one seen_hosts row, whose fields are columns.
+async fn insert_host_row<'e, E>(executor: E, row: &HostRow) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query(
+        "INSERT INTO seen_hosts (host, webserver, software, version, mastodon_api, misskey_api, lemmy_api, peertube_api, last_checked, error, raw_nodeinfo)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&row.host)
+    .bind(&row.webserver)
+    .bind(&row.software)
+    .bind(&row.version)
+    .bind(row.mastodon_api)
+    .bind(row.misskey_api)
+    .bind(row.lemmy_api)
+    .bind(row.peertube_api)
+    .bind(&row.last_checked)
+    .bind(&row.error)
+    .bind(&row.raw_nodeinfo)
+    .execute(executor)
+    .await
+    .map_err(db_error)?;
+    Ok(())
 }
 
 /// The whole remembered state, read back from the database. Expiry and the
@@ -692,18 +914,15 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
     state.recently_checked_users =
         load_timestamped_set(pool, "recently_checked_users", "acct").await?;
 
-    let rows = sqlx::query("SELECT host, info FROM seen_hosts ORDER BY rowid")
-        .fetch_all(pool)
-        .await
-        .map_err(db_error)?;
+    let rows = sqlx::query(
+        "SELECT host, webserver, software, version, mastodon_api, misskey_api, lemmy_api, peertube_api, last_checked, error, raw_nodeinfo FROM seen_hosts ORDER BY rowid",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_error)?;
     for row in rows {
-        let host: String = row.get("host");
-        let info: String = row.get("info");
-        // an entry that does not parse is skipped, as a malformed state file
-        // line was
-        if let Ok(value) = serde_json::from_str::<Value>(&info) {
-            state.seen_hosts.add(&host, value);
-        }
+        let host_row = host_row(&row);
+        state.seen_hosts.add(&host_row.host, host_row.to_state_value());
     }
 
     let rows = sqlx::query("SELECT uri, last_seen, created_at FROM context_cache ORDER BY rowid")
@@ -770,12 +989,7 @@ pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) ->
         .await
         .map_err(db_error)?;
     for (host, info) in state.seen_hosts.iter() {
-        sqlx::query("INSERT INTO seen_hosts (host, info) VALUES (?, ?)")
-            .bind(host)
-            .bind(info.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        insert_host_row(&mut *tx, &HostRow::from_state_value(host, info)).await?;
     }
 
     sqlx::query("DELETE FROM context_cache")
@@ -1114,6 +1328,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_is_recorded_while_running_and_completed_when_done() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let id = start_run(&pool, "2026-10-22 16:05:07 -05:00").await.unwrap();
+        let runs = recent_runs(&pool, 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].outcome, "running");
+        assert_eq!(runs[0].finished, "", "no end time while the run is going");
+
+        finish_run(
+            &pool,
+            id,
+            "2026-10-22 16:05:08 -05:00",
+            "ok",
+            "Processing finished in 0:00:01",
+        )
+        .await
+        .unwrap();
+        let runs = recent_runs(&pool, 10).await.unwrap();
+        assert_eq!(runs.len(), 1, "finishing updates the row instead of adding one");
+        assert_eq!(runs[0].outcome, "ok");
+        assert_eq!(runs[0].finished, "2026-10-22 16:05:08 -05:00");
+        assert_eq!(runs[0].message, "Processing finished in 0:00:01");
+    }
+
+    #[tokio::test]
+    async fn stale_running_runs_are_marked_interrupted() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let _stale = start_run(&pool, "2026-10-22 16:05:07 -05:00").await.unwrap();
+        let done = start_run(&pool, "2026-10-22 17:05:07 -05:00").await.unwrap();
+        finish_run(&pool, done, "2026-10-22 17:05:08 -05:00", "ok", "done")
+            .await
+            .unwrap();
+
+        assert_eq!(interrupt_stale_runs(&pool).await.unwrap(), 1);
+        let runs = recent_runs(&pool, 10).await.unwrap();
+        assert_eq!(runs[0].outcome, "ok", "a finished run is left alone");
+        assert_eq!(runs[1].outcome, "error");
+        assert!(runs[1].message.contains("Interrupted"));
+        assert_eq!(
+            interrupt_stale_runs(&pool).await.unwrap(),
+            0,
+            "nothing left to mark"
+        );
+    }
+
+    #[tokio::test]
     async fn private_posts_are_marked_once_and_survive_reopening() {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
@@ -1190,8 +1454,14 @@ mod tests {
             uri: uri.to_string(),
             url: uri.to_string(),
             acct: Some("a@remote.example".to_string()),
+            author_url: Some("https://remote.example/@a".to_string()),
             replies_count: Some(3),
             created_at: Some("2026-10-22 16:05:07 -05:00".to_string()),
+            in_reply_to_id: Some("https://remote.example/@a/0".to_string()),
+            in_reply_to_account_id: Some("parent".to_string()),
+            is_public: true,
+            is_boost: false,
+            mentions: Some("b@remote.example,c@remote.example".to_string()),
             source: source.to_string(),
         }
     }
@@ -1205,11 +1475,11 @@ mod tests {
             created_at: timeutil::now(),
             is_public: true,
             reblog: None,
-            in_reply_to_id: None,
-            in_reply_to_account_id: None,
+            in_reply_to_id: Some("https://remote.example/@alice/0".to_string()),
+            in_reply_to_account_id: Some("parent-id".to_string()),
             reply_count: Some(5),
             account: Some(User::new("alice@remote.example", "https://remote.example/@alice")),
-            mentions: vec![],
+            mentions: vec![User::new("bob@remote.example", "https://remote.example/@bob")],
         };
         let wrapper = Post {
             url: "https://home.example/@bob/2".to_string(),
@@ -1227,9 +1497,43 @@ mod tests {
         assert_eq!(record.uri, "https://remote.example/@alice/1");
         assert_eq!(record.url, "https://remote.example/@alice/1");
         assert_eq!(record.acct.as_deref(), Some("alice@remote.example"));
+        assert_eq!(
+            record.author_url.as_deref(),
+            Some("https://remote.example/@alice")
+        );
         assert_eq!(record.replies_count, Some(5));
+        assert_eq!(
+            record.in_reply_to_id.as_deref(),
+            Some("https://remote.example/@alice/0")
+        );
+        assert_eq!(record.in_reply_to_account_id.as_deref(), Some("parent-id"));
+        assert!(record.is_public);
+        assert!(record.is_boost, "the scan was given a boost");
+        assert_eq!(record.mentions.as_deref(), Some("bob@remote.example"));
         assert_eq!(record.source, "home timeline");
         assert!(record.created_at.is_some());
+    }
+
+    #[test]
+    fn trigger_post_from_post_records_a_plain_post_as_itself() {
+        use crate::users::User;
+        let post = Post {
+            url: "https://remote.example/@alice/1".to_string(),
+            uri: "https://remote.example/@alice/1".to_string(),
+            created_at: timeutil::now(),
+            is_public: false,
+            reblog: None,
+            in_reply_to_id: None,
+            in_reply_to_account_id: None,
+            reply_count: None,
+            account: Some(User::new("alice@remote.example", "https://remote.example/@alice")),
+            mentions: vec![],
+        };
+        let record = TriggerPost::from_post(&post, "replies");
+        assert!(!record.is_public);
+        assert!(!record.is_boost);
+        assert_eq!(record.mentions, None, "no mentions records nothing");
+        assert_eq!(record.in_reply_to_id, None);
     }
 
     #[tokio::test]
@@ -1279,8 +1583,18 @@ mod tests {
             0,
             "a sighting of a known post is not new"
         );
-        let row: (String, String, String, Option<i64>) = sqlx::query_as(
-            "SELECT first_seen, last_seen, source, replies_count FROM trigger_posts WHERE uri = ?",
+        let row: (
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            bool,
+            bool,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT first_seen, last_seen, source, replies_count, in_reply_to_id, author_url, is_public, is_boost, mentions FROM trigger_posts WHERE uri = ?",
         )
         .bind("https://remote.example/@a/1")
         .fetch_one(&pool)
@@ -1290,6 +1604,15 @@ mod tests {
         assert_ne!(row.1, long_ago, "last_seen is refreshed");
         assert_eq!(row.2, "home timeline", "source is kept from the first record");
         assert_eq!(row.3, Some(7), "the reply count follows the newest sighting");
+        assert_eq!(
+            row.4.as_deref(),
+            Some("https://remote.example/@a/0"),
+            "the reply link follows the newest sighting"
+        );
+        assert_eq!(row.5.as_deref(), Some("https://remote.example/@a"));
+        assert!(row.6, "the visibility follows the newest sighting");
+        assert!(!row.7);
+        assert_eq!(row.8.as_deref(), Some("b@remote.example,c@remote.example"));
     }
 
     #[tokio::test]
@@ -1332,6 +1655,193 @@ mod tests {
         // recording nothing records nothing, and prunes nothing
         assert_eq!(record_trigger_posts(&pool, &[], 3).await.unwrap(), 0);
         assert_eq!(table_count(&pool, "trigger_posts").await.unwrap(), 3);
+    }
+
+    /// Open a database whose trigger_posts table predates the columns that
+    /// record what a scan pulled in on each post, and check the table is
+    /// reshaped with its rows kept.
+    #[tokio::test]
+    async fn an_older_trigger_posts_table_is_migrated() {
+        let (config, dir) = test_config();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fedifetcher.db");
+        let setup = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path).create_if_missing(true))
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE trigger_posts (
+                uri TEXT PRIMARY KEY, url TEXT NOT NULL, acct TEXT, replies_count INTEGER,
+                created_at TEXT, source TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
+            )",
+        )
+        .execute(&setup)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO trigger_posts (uri, url, source, first_seen, last_seen) VALUES (?, ?, 'home timeline', 'old', 'old')",
+        )
+        .bind("https://remote.example/@a/1")
+        .bind("https://remote.example/@a/1")
+        .execute(&setup)
+        .await
+        .unwrap();
+        drop(setup);
+
+        let pool = open(&config).await.unwrap();
+        let columns = table_columns(&pool, "trigger_posts").await.unwrap();
+        for expected in [
+            "in_reply_to_id",
+            "in_reply_to_account_id",
+            "is_public",
+            "is_boost",
+            "author_url",
+            "mentions",
+        ] {
+            assert!(columns.contains(&expected.to_string()), "{expected} added");
+        }
+        let old = trigger_post(&pool, "https://remote.example/@a/1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.source, "home timeline", "the old row is kept");
+        assert!(old.is_public, "an old row reads as a public post");
+        assert!(!old.is_boost);
+        assert_eq!(old.in_reply_to_id, None);
+    }
+
+    #[tokio::test]
+    async fn seen_hosts_are_stored_in_columns() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let mut state = State::default();
+        state.seen_hosts.add(
+            "remote.example",
+            serde_json::json!({
+                "webserver": "remote.example", "software": "mastodon", "version": "4.3.0",
+                "rawnodeinfo": {"software": {"name": "mastodon", "version": "4.3.0"}},
+                "last_checked": timeutil::fmt_state_ts(timeutil::now()),
+                "mastodonApiSupport": true, "misskeyApiSupport": false,
+                "lemmyApiSupport": false, "peertubeApiSupport": false,
+            }),
+        );
+        state
+            .seen_hosts
+            .add("down.example", crate::servers::failed_lookup_state("prohibited by robots.txt"));
+        save_state(&pool, &state, 1000).await.unwrap();
+
+        let columns = table_columns(&pool, "seen_hosts").await.unwrap();
+        assert!(columns.contains(&"software".to_string()));
+        assert!(columns.contains(&"mastodon_api".to_string()));
+        assert!(!columns.contains(&"info".to_string()), "no JSON blob column");
+
+        let row: (Option<String>, Option<String>, bool, bool, String) = sqlx::query_as(
+            "SELECT software, version, mastodon_api, peertube_api, raw_nodeinfo FROM seen_hosts WHERE host = 'remote.example'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("mastodon"));
+        assert_eq!(row.1.as_deref(), Some("4.3.0"));
+        assert!(row.2);
+        assert!(!row.3);
+        assert!(
+            row.4.contains("mastodon"),
+            "the nodeinfo document is kept whole"
+        );
+
+        // and the state reads back as it was
+        let loaded = load_state(&pool).await.unwrap();
+        let info =
+            crate::servers::ServerInfo::from_state(loaded.seen_hosts.get("remote.example").unwrap())
+                .unwrap();
+        assert_eq!(info.software, "mastodon");
+        assert_eq!(info.version, "4.3.0");
+        assert!(info.supports(crate::servers::ApiFlavour::Mastodon));
+        assert!(
+            crate::servers::ServerInfo::from_state(loaded.seen_hosts.get("down.example").unwrap())
+                .is_none(),
+            "a failed lookup still reads as a failure"
+        );
+        assert_eq!(
+            loaded.seen_hosts.get("down.example").unwrap()["error"],
+            serde_json::json!("prohibited by robots.txt")
+        );
+    }
+
+    /// Open a database whose seen_hosts table kept every field in one JSON
+    /// column, and check the rows are broken out into columns.
+    #[tokio::test]
+    async fn an_older_seen_hosts_table_is_migrated_to_columns() {
+        let (config, dir) = test_config();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fedifetcher.db");
+        let setup = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path).create_if_missing(true))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE seen_hosts (host TEXT PRIMARY KEY, info TEXT NOT NULL)")
+            .execute(&setup)
+            .await
+            .unwrap();
+        let success = serde_json::json!({
+            "webserver": "remote.example", "software": "mastodon", "version": "4.3.0",
+            "rawnodeinfo": {"software": {"name": "mastodon", "version": "4.3.0"}},
+            "last_checked": timeutil::fmt_state_ts(timeutil::now()),
+            "mastodonApiSupport": true, "misskeyApiSupport": false,
+            "lemmyApiSupport": false, "peertubeApiSupport": false,
+        });
+        let failure = crate::servers::failed_lookup_state("prohibited by robots.txt");
+        sqlx::query("INSERT INTO seen_hosts (host, info) VALUES (?, ?)")
+            .bind("remote.example")
+            .bind(success.to_string())
+            .execute(&setup)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO seen_hosts (host, info) VALUES (?, ?)")
+            .bind("down.example")
+            .bind(failure.to_string())
+            .execute(&setup)
+            .await
+            .unwrap();
+        drop(setup);
+
+        let pool = open(&config).await.unwrap();
+        let columns = table_columns(&pool, "seen_hosts").await.unwrap();
+        assert!(columns.contains(&"software".to_string()), "the fields are columns now");
+        assert!(!columns.contains(&"info".to_string()), "the JSON blob is gone");
+
+        let row: (Option<String>, Option<String>, bool, Option<String>) = sqlx::query_as(
+            "SELECT software, version, mastodon_api, error FROM seen_hosts WHERE host = 'remote.example'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("mastodon"));
+        assert_eq!(row.1.as_deref(), Some("4.3.0"));
+        assert!(row.2);
+        assert_eq!(row.3, None);
+        let row: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT software, error FROM seen_hosts WHERE host = 'down.example'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, None);
+        assert_eq!(row.1.as_deref(), Some("prohibited by robots.txt"));
+
+        // and the migrated rows read back as the state they were
+        let state = load_state(&pool).await.unwrap();
+        let info =
+            crate::servers::ServerInfo::from_state(state.seen_hosts.get("remote.example").unwrap())
+                .unwrap();
+        assert_eq!(info.software, "mastodon");
+        assert!(info.supports(crate::servers::ApiFlavour::Mastodon));
+        assert!(
+            crate::servers::ServerInfo::from_state(state.seen_hosts.get("down.example").unwrap())
+                .is_none()
+        );
     }
 
     #[tokio::test]
