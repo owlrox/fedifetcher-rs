@@ -16,7 +16,6 @@ use leptos::prelude::*;
 use regex::Regex;
 use serde_json::Value;
 use sqlx::SqlitePool;
-use time::OffsetDateTime;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::api::mastodon::{masked, HomeServer};
@@ -68,7 +67,6 @@ struct AppState {
     /// The database everything is stored in: the configuration, the state,
     /// the log lines, the run history.
     db: SqlitePool,
-    ui: Mutex<UiState>,
     /// Held for the duration of a web-triggered run, so two clicks cannot
     /// overlap; the lock file keeps other processes out.
     run_guard: Arc<AsyncMutex<()>>,
@@ -78,15 +76,6 @@ struct AppState {
     /// Set by the pause button; the running run holds between tasks and
     /// items until it is cleared — or stopped.
     pause: Pause,
-}
-
-struct UiState {
-    status: RunStatus,
-}
-
-enum RunStatus {
-    Idle,
-    Running { since: OffsetDateTime },
 }
 
 /// Serve the web UI until the process is stopped. The config page saves to
@@ -119,9 +108,6 @@ pub fn app(config: Config, db: SqlitePool) -> Router {
     let state = Arc::new(AppState {
         config: Mutex::new(config),
         db,
-        ui: Mutex::new(UiState {
-            status: RunStatus::Idle,
-        }),
         run_guard: Arc::new(AsyncMutex::new(())),
         cancel: CancelToken::new(),
         pause: Pause::new(),
@@ -183,9 +169,17 @@ async fn dashboard(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMa
         };
         counts.push((label.to_string(), count));
     }
+    // the run in progress comes from the same history read — one source,
+    // so the page's status and its history can never disagree
+    let running = history
+        .iter()
+        .find(|record| record.outcome == "running")
+        .map(|record| record.started.clone());
     let live = live_updates(&headers);
     render(move || {
-        view! { <Dashboard state=state history=history data=data counts=counts live=live /> }
+        view! {
+            <Dashboard state=state running=running history=history data=data counts=counts live=live />
+        }
     })
 }
 
@@ -439,7 +433,8 @@ async fn data(
     };
 
     let live = live_updates(&headers);
-    render(move || view! { <DataPage state=state tabs=tabs tab=tab live=live /> })
+    let running = run_in_progress(&state).await;
+    render(move || view! { <DataPage state=state running=running tabs=tabs tab=tab live=live /> })
 }
 
 /// The data page was /hosts once, before the page was renamed; old links
@@ -480,7 +475,12 @@ async fn logs(
             Vec::new()
         }
     };
-    render(move || view! { <LogsPage state=state rows=rows sort=sort order=order live=live /> })
+    let running = run_in_progress(&state).await;
+    render(move || {
+        view! {
+            <LogsPage state=state running=running rows=rows sort=sort order=order live=live />
+        }
+    })
 }
 
 /// The /live query string: whether live updates are on.
@@ -536,6 +536,25 @@ fn referer_path(headers: &HeaderMap) -> Option<String> {
     Some(path)
 }
 
+/// The run in progress, as the run history's newest row records it: the
+/// row's started timestamp, or `None` when no run is in progress. The
+/// run history is the one source of run status — every page's status
+/// pill and the dashboard's badge derive from it — so a run that starts
+/// or finishes between two reads can no longer leave them disagreeing.
+async fn run_in_progress(state: &AppState) -> Option<String> {
+    match db::recent_runs(&state.db, 1).await {
+        Ok(runs) => runs
+            .into_iter()
+            .next()
+            .filter(|run| run.outcome == "running")
+            .map(|run| run.started),
+        Err(ex) => {
+            tracing::warn!("Could not read the run history: {ex}");
+            None
+        }
+    }
+}
+
 /// Empty the log the /logs page shows, and redirect back to it.
 async fn clear_logs(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     tracing::info!("POST /logs/clear: clearing the log");
@@ -552,7 +571,8 @@ async fn config_page(
 ) -> Html<String> {
     page_load(&state, "GET /config");
     let live = live_updates(&headers);
-    render(move || view! { <ConfigPage state=state live=live /> })
+    let running = run_in_progress(&state).await;
+    render(move || view! { <ConfigPage state=state running=running live=live /> })
 }
 
 /// Save the config page's form: apply the fields to the effective config,
@@ -603,12 +623,7 @@ async fn save_config(
     let before = config.to_raw_values();
     if let Err(ex) = config.apply_values(&values) {
         tracing::warn!("POST /config: not saved: {ex}");
-        return Err(save_error(
-            &state,
-            StatusCode::BAD_REQUEST,
-            &ex.to_string(),
-            live,
-        ));
+        return Err(save_error(&state, StatusCode::BAD_REQUEST, &ex.to_string(), live).await);
     }
     if !remove_tokens.is_empty() || !new_token.is_empty() {
         let mut tokens: Vec<String> = config
@@ -631,7 +646,8 @@ async fn save_config(
             StatusCode::INTERNAL_SERVER_ERROR,
             &ex.to_string(),
             live,
-        ));
+        )
+        .await);
     }
     let after = config.to_raw_values();
     // option names only: the values can hold access tokens
@@ -659,7 +675,7 @@ fn is_optional_option(name: &str) -> bool {
 }
 
 /// A failed save: the message, and a way back to the form.
-fn save_error(
+async fn save_error(
     state: &Arc<AppState>,
     status: StatusCode,
     message: &str,
@@ -667,9 +683,10 @@ fn save_error(
 ) -> (StatusCode, Html<String>) {
     let message = message.to_string();
     let state = state.clone();
+    let running = run_in_progress(&state).await;
     let body = render(move || {
         view! {
-            <Page state=state title="Config".to_string() live=live refresh=None>
+            <Page state=state running=running title="Config".to_string() live=live refresh=None>
                 <section>
                     <h2>"Could not save the configuration"</h2>
                     <p><code>{message}</code></p>
@@ -687,7 +704,8 @@ async fn debug_page(
 ) -> Html<String> {
     page_load(&state, "GET /debug");
     let live = live_updates(&headers);
-    render(move || view! { <DebugPage state=state result=None live=live /> })
+    let running = run_in_progress(&state).await;
+    render(move || view! { <DebugPage state=state running=running result=None live=live /> })
 }
 
 /// Run the debug tab's form, and render the page with the result. The
@@ -707,7 +725,10 @@ async fn debug_post(
         _ => tracing::debug!("POST /debug: succeeded"),
     }
     let live = live_updates(&headers);
-    render(move || view! { <DebugPage state=state result=Some(outcome) live=live /> })
+    let running = run_in_progress(&state).await;
+    render(
+        move || view! { <DebugPage state=state running=running result=Some(outcome) live=live /> },
+    )
 }
 
 /// Run one debug action against the configured server, with the first
@@ -799,7 +820,8 @@ async fn healthz() -> &'static str {
 async fn about(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     page_load(&state, "GET /about");
     let live = live_updates(&headers);
-    render(move || view! { <AboutPage state=state live=live /> })
+    let running = run_in_progress(&state).await;
+    render(move || view! { <AboutPage state=state running=running live=live /> })
 }
 
 /// Where a run-control POST sends the browser: back to the page the button
@@ -821,8 +843,9 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> 
         state.cancel.reset();
         state.pause.resume();
         let started = timeutil::now();
-        // the run is recorded the moment it starts, so the dashboard's
-        // history shows it while it is still going
+        // the run is recorded the moment it starts — the history row is
+        // the one source of run status, so every page's pill flips to
+        // running with the row, not with anything held in memory
         let run_id = match db::start_run(&state.db, &timeutil::fmt_state_ts(started)).await {
             Ok(id) => Some(id),
             Err(ex) => {
@@ -831,11 +854,6 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> 
             }
         };
         tokio::spawn(async move {
-            {
-                let mut ui = state.ui.lock().unwrap();
-                ui.status = RunStatus::Running { since: started };
-            }
-
             let config = state.config.lock().unwrap().clone();
             let cancel = state.cancel.clone();
             let pause = state.pause.clone();
@@ -860,9 +878,6 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> 
                 }
             }
 
-            let mut ui = state.ui.lock().unwrap();
-            ui.status = RunStatus::Idle;
-            drop(ui);
             drop(guard);
         });
     } else {
@@ -875,7 +890,7 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> 
 /// tasks and items, then redirect back to the page it was asked from.
 /// Stopping an idle UI is harmless — the next run clears the flag first.
 async fn stop(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Redirect {
-    let running = matches!(state.ui.lock().unwrap().status, RunStatus::Running { .. });
+    let running = run_in_progress(&state).await.is_some();
     state.cancel.cancel();
     if running {
         tracing::info!("POST /stop: stop requested for the running FediFetcher run");
@@ -889,7 +904,7 @@ async fn stop(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) ->
 /// between tasks and items, then redirect back to the page it was asked
 /// from. Pausing an idle UI is harmless — the next run clears the flag first.
 async fn pause(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Redirect {
-    let running = matches!(state.ui.lock().unwrap().status, RunStatus::Running { .. });
+    let running = run_in_progress(&state).await.is_some();
     state.pause.pause();
     if running {
         tracing::info!("POST /pause: pause requested for the running FediFetcher run");
@@ -1256,6 +1271,10 @@ form.run { margin: 0.25rem 0; }
 #[component]
 fn Page(
     state: Arc<AppState>,
+    /// The started timestamp of the run in progress, from the run
+    /// history's newest row — the one source of run status, so the top
+    /// bar's pill can never disagree with the dashboard's history.
+    running: Option<String>,
     title: String,
     /// Whether live updates are on: the top bar's toggle shows the choice,
     /// and `refresh` decides whether this page reloads itself.
@@ -1290,7 +1309,7 @@ fn Page(
                         <a href="/config">"Config"</a>
                         <a href="/debug">"Debug"</a>
                     </nav>
-                    <RunControls state=state/>
+                    <RunControls state=state running=running/>
                     {live_toggle(live)}
                 </header>
                 <main>{children()}</main>
@@ -1301,21 +1320,15 @@ fn Page(
 
 /// The top bar's run controls: the status pill, and the buttons that
 /// change it — start, pause, resume, stop — so a run can be driven from
-/// any page, not just the dashboard.
+/// any page, not just the dashboard. The pill follows the run history's
+/// newest row; only the paused flag is held in memory, as it is the
+/// signal the running task waits on.
 #[component]
-fn RunControls(state: Arc<AppState>) -> impl IntoView {
-    let (label, class, is_running, is_paused) = {
-        let ui = state.ui.lock().unwrap();
-        match &ui.status {
-            RunStatus::Idle => ("Idle", "ok", false, false),
-            RunStatus::Running { .. } => {
-                if state.pause.is_paused() {
-                    ("Paused", "paused", true, true)
-                } else {
-                    ("Running", "running", true, false)
-                }
-            }
-        }
+fn RunControls(state: Arc<AppState>, running: Option<String>) -> impl IntoView {
+    let (label, class, is_running, is_paused) = match running.as_deref() {
+        Some(_) if state.pause.is_paused() => ("Paused", "paused", true, true),
+        Some(_) => ("Running", "running", true, false),
+        None => ("Idle", "ok", false, false),
     };
     view! {
         <div class="run">
@@ -1363,6 +1376,10 @@ fn live_toggle(live: bool) -> AnyView {
 #[component]
 fn Dashboard(
     state: Arc<AppState>,
+    /// The started timestamp of the run in progress, from the history —
+    /// the one source of run status, so the badge and the history rows
+    /// below it can never disagree.
+    running: Option<String>,
     history: Vec<RunRow>,
     data: State,
     /// Row counts of the database's tables beyond what the state itself
@@ -1371,28 +1388,20 @@ fn Dashboard(
     live: bool,
 ) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
-    let (status_label, status_class, is_running, is_paused) = {
-        let ui = state.ui.lock().unwrap();
-        match &ui.status {
-            RunStatus::Idle => ("Idle".to_string(), "ok".to_string(), false, false),
-            RunStatus::Running { since } => {
-                if state.pause.is_paused() {
-                    (
-                        format!("Paused (running since {})", timeutil::fmt_state_ts(*since)),
-                        "paused".to_string(),
-                        true,
-                        true,
-                    )
-                } else {
-                    (
-                        format!("Running since {}", timeutil::fmt_state_ts(*since)),
-                        "running".to_string(),
-                        true,
-                        false,
-                    )
-                }
-            }
-        }
+    let (status_label, status_class, is_running, is_paused) = match running.as_deref() {
+        Some(started) if state.pause.is_paused() => (
+            format!("Paused (running since {started})"),
+            "paused".to_string(),
+            true,
+            true,
+        ),
+        Some(started) => (
+            format!("Running since {started}"),
+            "running".to_string(),
+            true,
+            false,
+        ),
+        None => ("Idle".to_string(), "ok".to_string(), false, false),
     };
     let tasks = config.enabled_tasks();
     let mut stats = vec![
@@ -1420,14 +1429,13 @@ fn Dashboard(
     // a run still in progress refreshes the page, so its elapsed time ticks
     // and its row flips to finished when it ends — whatever the live-updates
     // toggle says, so pressing start or stop is answered by the page itself
-    let run_going = history.iter().any(|record| record.outcome == "running");
-    let refresh = if run_going {
+    let refresh = if running.is_some() {
         Some(LIVE_REFRESH_SECONDS)
     } else {
         None
     };
     view! {
-        <Page state=state title="Dashboard".to_string() live=live refresh=refresh>
+        <Page state=state running=running title="Dashboard".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Run"</h2>
                 <p>
@@ -1559,7 +1567,13 @@ fn Dashboard(
 /// table in the database except logs and config (those have their own
 /// pages), each sortable by clicking a column heading.
 #[component]
-fn DataPage(state: Arc<AppState>, tabs: Vec<TabLink>, tab: TabView, live: bool) -> impl IntoView {
+fn DataPage(
+    state: Arc<AppState>,
+    running: Option<String>,
+    tabs: Vec<TabLink>,
+    tab: TabView,
+    live: bool,
+) -> impl IntoView {
     let links: Vec<AnyView> = tabs
         .iter()
         .map(|tab| {
@@ -1587,7 +1601,7 @@ fn DataPage(state: Arc<AppState>, tabs: Vec<TabLink>, tab: TabView, live: bool) 
         } => table_tab(name, columns, rows, count, sort, order, action),
     };
     view! {
-        <Page state=state title="Data".to_string() live=live refresh=None>
+        <Page state=state running=running title="Data".to_string() live=live refresh=None>
             <nav class="tabs">{links}</nav>
             {section}
         </Page>
@@ -1847,6 +1861,7 @@ fn fetch_button(action: &TableAction, key: &str, back: &str) -> AnyView {
 #[component]
 fn LogsPage(
     state: Arc<AppState>,
+    running: Option<String>,
     rows: Vec<LogRow>,
     sort: LogSort,
     order: LogOrder,
@@ -1863,7 +1878,7 @@ fn LogsPage(
         String::new()
     };
     view! {
-        <Page state=state title="Logs".to_string() live=live refresh=refresh>
+        <Page state=state running=running title="Logs".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Recent log"</h2>
                 <p class="muted">
@@ -1960,7 +1975,7 @@ fn sort_link(
 }
 
 #[component]
-fn ConfigPage(state: Arc<AppState>, live: bool) -> impl IntoView {
+fn ConfigPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
     let db_path = config
         .state_dir
@@ -2049,7 +2064,7 @@ fn ConfigPage(state: Arc<AppState>, live: bool) -> impl IntoView {
     rows.push(text_row("log_format", &config.log_format));
     rows.push(bool_row("log_page_loads", config.log_page_loads));
     view! {
-        <Page state=state title="Config".to_string() live=live refresh=None>
+        <Page state=state running=running title="Config".to_string() live=live refresh=None>
             <section>
                 <h2>"Edit configuration"</h2>
                 <p class="muted">
@@ -2069,7 +2084,12 @@ fn ConfigPage(state: Arc<AppState>, live: bool) -> impl IntoView {
 }
 
 #[component]
-fn DebugPage(state: Arc<AppState>, result: Option<DebugOutcome>, live: bool) -> impl IntoView {
+fn DebugPage(
+    state: Arc<AppState>,
+    running: Option<String>,
+    result: Option<DebugOutcome>,
+    live: bool,
+) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
     let server = if config.server.is_empty() {
         "not set".to_string()
@@ -2082,7 +2102,7 @@ fn DebugPage(state: Arc<AppState>, result: Option<DebugOutcome>, live: bool) -> 
         .map(|token| masked(token))
         .unwrap_or_else(|| "none".to_string());
     view! {
-        <Page state=state title="Debug".to_string() live=live refresh=None>
+        <Page state=state running=running title="Debug".to_string() live=live refresh=None>
             <section>
                 <h2>"Test connection"</h2>
                 <p class="muted">
@@ -2332,9 +2352,9 @@ fn snippet(html: &str) -> String {
 /// version number links here — there is no alert box to open, the UI being
 /// JavaScript-free by design.
 #[component]
-fn AboutPage(state: Arc<AppState>, live: bool) -> impl IntoView {
+fn AboutPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl IntoView {
     view! {
-        <Page state=state title="About".to_string() live=live refresh=None>
+        <Page state=state running=running title="About".to_string() live=live refresh=None>
             <section>
                 <h2>"About"</h2>
                 <p>

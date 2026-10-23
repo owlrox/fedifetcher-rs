@@ -322,6 +322,61 @@ async fn the_dashboard_shows_a_running_run_with_its_elapsed_time() {
     );
 }
 
+/// The run status is derived from the run history — the database is the
+/// one source — so the top bar's pill and the dashboard's status follow
+/// the history's newest row, and a run starting or finishing between two
+/// reads can no longer leave them disagreeing.
+#[tokio::test]
+async fn the_run_status_comes_from_the_run_history() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, db) = spawn_ui_with(config).await;
+
+    // no runs yet: idle, in the top bar and in the Run section
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("<span class=\"badge ok\">Idle</span>"),
+        "idle, in the top bar and the Run section: {body}"
+    );
+
+    // a run recorded as started but not finished, as one in progress is:
+    // the pill follows the history row on every page, and the dashboard's
+    // Run section follows it too
+    let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
+    let id = fedifetcher::db::start_run(&db, &started).await.unwrap();
+    for page in ["/", "/logs"] {
+        let (status, body) = get(&format!("{base}{page}")).await;
+        assert_eq!(status, 200, "{page}");
+        assert!(
+            body.contains("<span class=\"badge running\">Running</span>"),
+            "{page}: the pill follows the history row: {body}"
+        );
+        assert!(!body.contains(">Idle</span>"), "{page}: no stale idle pill");
+    }
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(&format!(
+            "<span class=\"badge running\">Running since {started}</span>"
+        )),
+        "the Run section follows the history row: {body}"
+    );
+
+    // the row finishes: the pill and the Run section go back to idle,
+    // from the same read
+    fedifetcher::db::finish_run(&db, id, &started, "ok", "done")
+        .await
+        .unwrap();
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("<span class=\"badge ok\">Idle</span>"),
+        "the pill and the Run section are idle again: {body}"
+    );
+    assert!(!body.contains(">Running</span>"), "no stale running pill");
+}
+
 #[tokio::test]
 async fn the_logs_page_renders_lines_from_the_database() {
     let dir = common::tmp_dir();
