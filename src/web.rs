@@ -34,6 +34,19 @@ use crate::VERSION;
 /// The most runs remembered for the dashboard's history.
 const HISTORY_CAPACITY: usize = 50;
 
+/// The database tables counted in the dashboard's State section, beyond
+/// what the state itself remembers: what runs and scans have recorded, as
+/// (table, label) pairs.
+const STATE_TABLE_COUNTS: &[(&str, &str)] = &[
+    ("trigger_posts", "trigger posts"),
+    ("private_posts", "private posts"),
+    ("opted_out_accounts", "opted-out accounts"),
+    ("known_context_posts", "known context posts"),
+    ("robots_cache", "robots.txt cache"),
+    ("logs", "log lines"),
+    ("runs", "runs recorded"),
+];
+
 /// The most log lines shown on /logs.
 const LOG_LINES_SHOWN: usize = 200;
 
@@ -128,6 +141,7 @@ pub fn app(config: Config, db: SqlitePool) -> Router {
         .route("/logs/clear", post(clear_logs))
         .route("/config", get(config_page).post(save_config))
         .route("/debug", get(debug_page).post(debug_post))
+        .route("/about", get(about))
         .route("/healthz", get(healthz))
         .with_state(state)
 }
@@ -158,9 +172,20 @@ async fn dashboard(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMa
             State::default()
         }
     };
+    let mut counts = Vec::with_capacity(STATE_TABLE_COUNTS.len());
+    for (table, label) in STATE_TABLE_COUNTS {
+        let count = match db::table_count(&state.db, table).await {
+            Ok(count) => count,
+            Err(ex) => {
+                tracing::warn!("Could not count the {table} table: {ex}");
+                0
+            }
+        };
+        counts.push((label.to_string(), count));
+    }
     let live = live_updates(&headers);
     render(move || {
-        view! { <Dashboard state=state history=history data=data live=live /> }
+        view! { <Dashboard state=state history=history data=data counts=counts live=live /> }
     })
 }
 
@@ -414,7 +439,7 @@ async fn data(
     };
 
     let live = live_updates(&headers);
-    render(move || view! { <DataPage tabs=tabs tab=tab live=live /> })
+    render(move || view! { <DataPage state=state tabs=tabs tab=tab live=live /> })
 }
 
 /// The data page was /hosts once, before the page was renamed; old links
@@ -455,7 +480,7 @@ async fn logs(
             Vec::new()
         }
     };
-    render(move || view! { <LogsPage rows=rows sort=sort order=order live=live /> })
+    render(move || view! { <LogsPage state=state rows=rows sort=sort order=order live=live /> })
 }
 
 /// The /live query string: whether live updates are on.
@@ -578,7 +603,12 @@ async fn save_config(
     let before = config.to_raw_values();
     if let Err(ex) = config.apply_values(&values) {
         tracing::warn!("POST /config: not saved: {ex}");
-        return Err(save_error(StatusCode::BAD_REQUEST, &ex.to_string(), live));
+        return Err(save_error(
+            &state,
+            StatusCode::BAD_REQUEST,
+            &ex.to_string(),
+            live,
+        ));
     }
     if !remove_tokens.is_empty() || !new_token.is_empty() {
         let mut tokens: Vec<String> = config
@@ -597,6 +627,7 @@ async fn save_config(
     if let Err(ex) = db::save_config(&state.db, &config.to_raw_values()).await {
         tracing::warn!("POST /config: not saved: {ex}");
         return Err(save_error(
+            &state,
             StatusCode::INTERNAL_SERVER_ERROR,
             &ex.to_string(),
             live,
@@ -628,11 +659,17 @@ fn is_optional_option(name: &str) -> bool {
 }
 
 /// A failed save: the message, and a way back to the form.
-fn save_error(status: StatusCode, message: &str, live: bool) -> (StatusCode, Html<String>) {
+fn save_error(
+    state: &Arc<AppState>,
+    status: StatusCode,
+    message: &str,
+    live: bool,
+) -> (StatusCode, Html<String>) {
     let message = message.to_string();
+    let state = state.clone();
     let body = render(move || {
         view! {
-            <Page title="Config".to_string() live=live refresh=None>
+            <Page state=state title="Config".to_string() live=live refresh=None>
                 <section>
                     <h2>"Could not save the configuration"</h2>
                     <p><code>{message}</code></p>
@@ -756,11 +793,29 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Trigger a run in the background, then redirect back to the dashboard.
+/// The about page, the top bar's version number links to: what this is, and
+/// the license it is under. There is no alert box to open — the UI is
+/// JavaScript-free by design — so the "about" is a page of its own.
+async fn about(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+    page_load(&state, "GET /about");
+    let live = live_updates(&headers);
+    render(move || view! { <AboutPage state=state live=live /> })
+}
+
+/// Where a run-control POST sends the browser: back to the page the button
+/// was pressed on, or to the dashboard when there is no referer. The
+/// redirect is the page load that shows what the button did.
+fn back_to_referer(headers: &HeaderMap) -> Redirect {
+    let back = referer_path(headers).unwrap_or_else(|| "/".to_string());
+    Redirect::to(&back)
+}
+
+/// Trigger a run in the background, then redirect back to the page it was
+/// triggered from.
 ///
 /// The redirect is what makes this work without JavaScript: the POST answers
 /// 303 See Other, and the browser follows it with a GET.
-async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
+async fn run(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Redirect {
     if let Ok(guard) = state.run_guard.clone().try_lock_owned() {
         tracing::info!("POST /run: run triggered from the web UI");
         state.cancel.reset();
@@ -813,13 +868,13 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     } else {
         tracing::debug!("POST /run: a run is already in progress; trigger ignored");
     }
-    Redirect::to("/")
+    back_to_referer(&headers)
 }
 
 /// Ask the running FediFetcher to stop: set the token the run checks between
-/// tasks and items, then redirect back to the dashboard. Stopping an idle UI
-/// is harmless — the next run clears the flag first.
-async fn stop(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
+/// tasks and items, then redirect back to the page it was asked from.
+/// Stopping an idle UI is harmless — the next run clears the flag first.
+async fn stop(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Redirect {
     let running = matches!(state.ui.lock().unwrap().status, RunStatus::Running { .. });
     state.cancel.cancel();
     if running {
@@ -827,13 +882,13 @@ async fn stop(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     } else {
         tracing::debug!("POST /stop: no run in progress; nothing to stop");
     }
-    Redirect::to("/")
+    back_to_referer(&headers)
 }
 
 /// Ask the running FediFetcher to pause: set the flag the run waits on
-/// between tasks and items, then redirect back to the dashboard. Pausing an
-/// idle UI is harmless — the next run clears the flag first.
-async fn pause(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
+/// between tasks and items, then redirect back to the page it was asked
+/// from. Pausing an idle UI is harmless — the next run clears the flag first.
+async fn pause(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Redirect {
     let running = matches!(state.ui.lock().unwrap().status, RunStatus::Running { .. });
     state.pause.pause();
     if running {
@@ -841,12 +896,13 @@ async fn pause(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     } else {
         tracing::debug!("POST /pause: no run in progress; nothing to pause");
     }
-    Redirect::to("/")
+    back_to_referer(&headers)
 }
 
 /// Let a paused run continue: clear the flag the run waits on, then
-/// redirect back to the dashboard. Resuming an unpaused UI is harmless.
-async fn resume(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
+/// redirect back to the page it was asked from. Resuming an unpaused UI is
+/// harmless.
+async fn resume(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Redirect {
     let paused = state.pause.is_paused();
     state.pause.resume();
     if paused {
@@ -854,7 +910,7 @@ async fn resume(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     } else {
         tracing::debug!("POST /resume: no run is paused; nothing to resume");
     }
-    Redirect::to("/")
+    back_to_referer(&headers)
 }
 
 /// A manual fetch from the data page: one post's context, one account's
@@ -901,25 +957,70 @@ async fn manual_fetch(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -
     Redirect::to(&back)
 }
 
-/// Run one manual fetch: load the state, do the work, write the state back.
-/// The lock file keeps it from overlapping a run in another process, the
-/// same as a run's own lock.
+/// Run one manual fetch: record it in the run history like a run, do the
+/// work, record how it ended. The lock file keeps it from overlapping a
+/// run in another process, the same as a run's own lock.
 async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str, force: bool) {
+    let started = timeutil::now();
+    // the fetch is recorded the moment it starts, so the dashboard's
+    // history shows it while it is still going
+    let run_id = match db::start_run(&state.db, &timeutil::fmt_state_ts(started)).await {
+        Ok(id) => Some(id),
+        Err(ex) => {
+            tracing::warn!("Could not record the fetch's start in the database: {ex}");
+            None
+        }
+    };
+    let (outcome, message) = do_fetch(state, kind, key, set, force).await;
+    let finished = timeutil::now();
+    if let Some(id) = run_id {
+        if let Err(ex) = db::finish_run(
+            &state.db,
+            id,
+            &timeutil::fmt_state_ts(finished),
+            &outcome,
+            &message,
+        )
+        .await
+        {
+            tracing::warn!("Could not record the fetch's end in the database: {ex}");
+        }
+    }
+}
+
+/// Do one manual fetch — load the state, do the work, write the state back —
+/// and say how it ended: the outcome label and the message the run history
+/// records. The message always says the fetch was a manual one, so the
+/// history tells it apart from a scheduled run.
+async fn do_fetch(
+    state: &Arc<AppState>,
+    kind: &str,
+    key: &str,
+    set: &str,
+    force: bool,
+) -> (String, String) {
+    let what = format!("Manual fetch: {kind} {key}");
     let config = state.config.lock().unwrap().clone();
     if config.server.is_empty() {
         tracing::warn!("POST /fetch: no server is configured; nothing was fetched");
-        return;
+        return (
+            "error".to_string(),
+            format!("{what} (no server is configured)"),
+        );
     }
     let Some(token) = config.access_tokens.first() else {
         tracing::warn!("POST /fetch: no access token is configured; nothing was fetched");
-        return;
+        return (
+            "error".to_string(),
+            format!("{what} (no access token is configured)"),
+        );
     };
     let token = token.clone();
     let _lock = match lock(&config) {
         Ok(lock) => lock,
         Err(ex) => {
             tracing::warn!("POST /fetch: not fetching: {ex}");
-            return;
+            return ("error".to_string(), format!("{what} ({ex})"));
         }
     };
     let http = HttpClient::new(config.clone(), state.db.clone());
@@ -929,7 +1030,10 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str, forc
         Ok(session) => session,
         Err(ex) => {
             tracing::error!("POST /fetch: could not load the state: {ex}");
-            return;
+            return (
+                "error".to_string(),
+                format!("{what} (could not load the state: {ex})"),
+            );
         }
     };
     // a manual fetch is its own thing, with its own signals: it never
@@ -958,7 +1062,12 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str, forc
     }
     if let Err(ex) = session.finish().await {
         tracing::error!("POST /fetch: could not write the state to the database: {ex}");
+        return (
+            "error".to_string(),
+            format!("{what} (could not write the state: {ex})"),
+        );
     }
+    ("ok".to_string(), what)
 }
 
 /// Render a view to a full HTML document. SSR only: the result is static
@@ -1105,7 +1214,10 @@ header h1 a { color: inherit; text-decoration: none; }
 .version { color: #888; font-weight: normal; }
 nav { display: flex; gap: 1rem; }
 nav a { color: #06c; }
-header a.live { margin-left: auto; color: #06c; border: 1px solid #06c55; border-radius: 0.4rem; padding: 0.1rem 0.6rem; text-decoration: none; white-space: nowrap; }
+header .run { display: flex; gap: 0.5rem; align-items: center; margin-left: auto; }
+header .run form { margin: 0; }
+header .run button { font-size: 0.8rem; padding: 0.1rem 0.6rem; }
+header a.live { color: #06c; border: 1px solid #06c55; border-radius: 0.4rem; padding: 0.1rem 0.6rem; text-decoration: none; white-space: nowrap; }
 nav.tabs { gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #8884; margin-bottom: 1.5rem; }
 nav.tabs a { color: #06c; text-decoration: none; padding-bottom: 0.25rem; }
 nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
@@ -1143,6 +1255,7 @@ form.run { margin: 0.25rem 0; }
 
 #[component]
 fn Page(
+    state: Arc<AppState>,
     title: String,
     /// Whether live updates are on: the top bar's toggle shows the choice,
     /// and `refresh` decides whether this page reloads itself.
@@ -1168,7 +1281,7 @@ fn Page(
                 <header>
                     <h1>
                         <a href="/">"FediFetcher-rs"</a>
-                        <span class="version">"v"{VERSION}</span>
+                        <a class="version" href="/about" title="About FediFetcher-rs">"v"{VERSION}</a>
                     </h1>
                     <nav>
                         <a href="/">"Dashboard"</a>
@@ -1177,11 +1290,60 @@ fn Page(
                         <a href="/config">"Config"</a>
                         <a href="/debug">"Debug"</a>
                     </nav>
+                    <RunControls state=state/>
                     {live_toggle(live)}
                 </header>
                 <main>{children()}</main>
             </body>
         </html>
+    }
+}
+
+/// The top bar's run controls: the status pill, and the buttons that
+/// change it — start, pause, resume, stop — so a run can be driven from
+/// any page, not just the dashboard.
+#[component]
+fn RunControls(state: Arc<AppState>) -> impl IntoView {
+    let (label, class, is_running, is_paused) = {
+        let ui = state.ui.lock().unwrap();
+        match &ui.status {
+            RunStatus::Idle => ("Idle", "ok", false, false),
+            RunStatus::Running { .. } => {
+                if state.pause.is_paused() {
+                    ("Paused", "paused", true, true)
+                } else {
+                    ("Running", "running", true, false)
+                }
+            }
+        }
+    };
+    view! {
+        <div class="run">
+            <span class=format!("badge {class}")>{label}</span>
+            {if is_running {
+                let (action, text, title) = if is_paused {
+                    ("/resume", "Resume", "Continue the paused FediFetcher")
+                } else {
+                    ("/pause", "Pause", "Pause the running FediFetcher; resume it later")
+                };
+                view! {
+                    <>
+                        <form method="post" action={action}>
+                            <button type="submit" title={title}>{text}</button>
+                        </form>
+                        <form method="post" action="/stop">
+                            <button type="submit" title="Stop the running FediFetcher">"Stop"</button>
+                        </form>
+                    </>
+                }.into_any()
+            } else {
+                view! {
+                    <form method="post" action="/run">
+                        <button type="submit" title="Start a FediFetcher run now">"Start"</button>
+                    </form>
+                }.into_any()
+            }}
+        </div>
     }
 }
 
@@ -1199,7 +1361,15 @@ fn live_toggle(live: bool) -> AnyView {
 }
 
 #[component]
-fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State, live: bool) -> impl IntoView {
+fn Dashboard(
+    state: Arc<AppState>,
+    history: Vec<RunRow>,
+    data: State,
+    /// Row counts of the database's tables beyond what the state itself
+    /// remembers, as (label, count) pairs.
+    counts: Vec<(String, i64)>,
+    live: bool,
+) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
     let (status_label, status_class, is_running, is_paused) = {
         let ui = state.ui.lock().unwrap();
@@ -1225,37 +1395,39 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State, live: bool
         }
     };
     let tasks = config.enabled_tasks();
-    let stats = vec![
-        ("seen urls".to_string(), data.seen_urls().len()),
+    let mut stats = vec![
+        ("seen urls".to_string(), data.seen_urls().len() as i64),
         (
             "known followings".to_string(),
-            data.known_followings().len(),
+            data.known_followings().len() as i64,
         ),
         (
             "recently checked users".to_string(),
-            data.recently_checked_users().len(),
+            data.recently_checked_users().len() as i64,
         ),
-        ("seen hosts".to_string(), data.seen_hosts().len()),
+        ("seen hosts".to_string(), data.seen_hosts().len() as i64),
         (
             "recently checked contexts".to_string(),
-            data.recently_checked_context().len(),
+            data.recently_checked_context().len() as i64,
         ),
         (
             "replied-toot lookups".to_string(),
-            data.replied_toot_server_ids().len(),
+            data.replied_toot_server_ids().len() as i64,
         ),
     ];
+    stats.extend(counts);
 
     // a run still in progress refreshes the page, so its elapsed time ticks
-    // and its row flips to finished when it ends — while live updates are on
+    // and its row flips to finished when it ends — whatever the live-updates
+    // toggle says, so pressing start or stop is answered by the page itself
     let run_going = history.iter().any(|record| record.outcome == "running");
-    let refresh = if live && run_going {
+    let refresh = if run_going {
         Some(LIVE_REFRESH_SECONDS)
     } else {
         None
     };
     view! {
-        <Page title="Dashboard".to_string() live=live refresh=refresh>
+        <Page state=state title="Dashboard".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Run"</h2>
                 <p>
@@ -1387,7 +1559,7 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State, live: bool
 /// table in the database except logs and config (those have their own
 /// pages), each sortable by clicking a column heading.
 #[component]
-fn DataPage(tabs: Vec<TabLink>, tab: TabView, live: bool) -> impl IntoView {
+fn DataPage(state: Arc<AppState>, tabs: Vec<TabLink>, tab: TabView, live: bool) -> impl IntoView {
     let links: Vec<AnyView> = tabs
         .iter()
         .map(|tab| {
@@ -1415,7 +1587,7 @@ fn DataPage(tabs: Vec<TabLink>, tab: TabView, live: bool) -> impl IntoView {
         } => table_tab(name, columns, rows, count, sort, order, action),
     };
     view! {
-        <Page title="Data".to_string() live=live refresh=None>
+        <Page state=state title="Data".to_string() live=live refresh=None>
             <nav class="tabs">{links}</nav>
             {section}
         </Page>
@@ -1673,7 +1845,13 @@ fn fetch_button(action: &TableAction, key: &str, back: &str) -> AnyView {
 }
 
 #[component]
-fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder, live: bool) -> impl IntoView {
+fn LogsPage(
+    state: Arc<AppState>,
+    rows: Vec<LogRow>,
+    sort: LogSort,
+    order: LogOrder,
+    live: bool,
+) -> impl IntoView {
     let refresh = if live {
         Some(LIVE_REFRESH_SECONDS)
     } else {
@@ -1685,7 +1863,7 @@ fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder, live: bool) -> im
         String::new()
     };
     view! {
-        <Page title="Logs".to_string() live=live refresh=refresh>
+        <Page state=state title="Logs".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Recent log"</h2>
                 <p class="muted">
@@ -1871,7 +2049,7 @@ fn ConfigPage(state: Arc<AppState>, live: bool) -> impl IntoView {
     rows.push(text_row("log_format", &config.log_format));
     rows.push(bool_row("log_page_loads", config.log_page_loads));
     view! {
-        <Page title="Config".to_string() live=live refresh=None>
+        <Page state=state title="Config".to_string() live=live refresh=None>
             <section>
                 <h2>"Edit configuration"</h2>
                 <p class="muted">
@@ -1904,7 +2082,7 @@ fn DebugPage(state: Arc<AppState>, result: Option<DebugOutcome>, live: bool) -> 
         .map(|token| masked(token))
         .unwrap_or_else(|| "none".to_string());
     view! {
-        <Page title="Debug".to_string() live=live refresh=None>
+        <Page state=state title="Debug".to_string() live=live refresh=None>
             <section>
                 <h2>"Test connection"</h2>
                 <p class="muted">
@@ -2147,6 +2325,44 @@ fn snippet(html: &str) -> String {
         truncated
     } else {
         collapsed
+    }
+}
+
+/// The about page: what this is, and the license it is under. The top bar's
+/// version number links here — there is no alert box to open, the UI being
+/// JavaScript-free by design.
+#[component]
+fn AboutPage(state: Arc<AppState>, live: bool) -> impl IntoView {
+    view! {
+        <Page state=state title="About".to_string() live=live refresh=None>
+            <section>
+                <h2>"About"</h2>
+                <p>
+                    "FediFetcher-rs v" {VERSION} " — pulls missing posts and profiles into your Mastodon instance: the context of what your users reply to, boost, bookmark, favorite, list, and get notified about, fetched from the servers that host it."
+                </p>
+                <p class="muted">
+                    "A Rust port of the Python FediFetcher, with a server-rendered web UI that needs no JavaScript."
+                </p>
+            </section>
+            <section>
+                <h2>"License"</h2>
+                <p>
+                    "FediFetcher-rs is free software: you can redistribute it and/or modify it under the terms of the "
+                    <a href="https://www.gnu.org/licenses/gpl-3.0.html">"GNU General Public License"</a>
+                    " as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version."
+                </p>
+                <p>
+                    "It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. The full license text ships as "
+                    <code>"LICENSE"</code>
+                    " in the source distribution."
+                </p>
+                <p class="muted">
+                    "The original FediFetcher is Copyright (C) Michael Thomas and is MIT-licensed (github.com/nanos/FediFetcher); this port keeps its notice in "
+                    <code>"NOTICE.md"</code>
+                    "."
+                </p>
+            </section>
+        </Page>
     }
 }
 

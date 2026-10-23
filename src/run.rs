@@ -181,9 +181,9 @@ impl Context<'_> {
 ///
 /// The state is written back even when a task fails part way through, and the
 /// lock is released either way. A run whose `cancel` was set finishes early
-/// and reports "Stopped."; a paused run holds at its checkpoints until it is
-/// resumed or stopped. Posts found private are recorded in `db`, so later
-/// runs skip them without asking again.
+/// and reports how long it ran before stopping; a paused run holds at its
+/// checkpoints until it is resumed or stopped. Posts found private are
+/// recorded in `db`, so later runs skip them without asking again.
 pub async fn run_once(
     config: Config,
     cancel: CancelToken,
@@ -234,7 +234,10 @@ pub async fn run_once(
     drop(lock);
 
     if cancel.is_canceled() {
-        let message = "Stopped.".to_string();
+        let message = format!(
+            "Stopped after {}.",
+            timeutil::fmt_timedelta(notifier.elapsed())
+        );
         notifier.done(&message).await;
         info!("{message}");
         return Ok(message);

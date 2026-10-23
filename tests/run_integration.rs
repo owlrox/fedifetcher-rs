@@ -179,7 +179,8 @@ async fn a_canceled_run_stops_before_doing_anything() {
         .await
         .expect("a stopped run is not a failure");
 
-    assert_eq!(message, "Stopped.");
+    assert!(message.starts_with("Stopped after "), "{message}");
+    assert!(message.ends_with('.'), "{message}");
     let tables = fedifetcher::db::list_tables(&db).await.unwrap();
     assert!(
         tables.contains(&"seen_urls".to_string()),
@@ -268,5 +269,6 @@ async fn a_stop_lands_while_the_run_is_paused() {
         .await
         .unwrap()
         .expect("a stopped run is not a failure");
-    assert_eq!(message, "Stopped.");
+    assert!(message.starts_with("Stopped after "), "{message}");
+    assert!(message.ends_with('.'), "{message}");
 }

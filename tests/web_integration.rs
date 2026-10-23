@@ -844,19 +844,20 @@ async fn the_stop_button_stops_a_running_run() {
     assert_eq!(resp.status().as_u16(), 303);
     assert_eq!(resp.headers().get("Location").unwrap(), "/");
 
-    // the run finishes early, and the history records that it was stopped
+    // the run finishes early, and the history records that it was stopped,
+    // along with how long it ran before stopping
     let mut body = String::new();
     for _ in 0..100 {
         let (_, page) = get(&format!("{base}/")).await;
-        if page.contains("Stopped.") {
+        if page.contains("Stopped after ") {
             body = page;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(
-        body.contains("Stopped."),
-        "the run should report being stopped"
+        body.contains("Stopped after "),
+        "the run should report being stopped, with its elapsed time"
     );
     assert!(
         body.contains(">stopped<"),
@@ -1241,16 +1242,31 @@ async fn the_logs_page_refreshes_itself_unless_paused() {
     );
 }
 
-/// A paused dashboard does not refresh itself, even with a run in
-/// progress: the top bar's toggle pauses every page.
+/// A dashboard refreshes itself while a run is in progress, even with
+/// live updates paused: the run's elapsed time must tick and its row
+/// must flip to finished without the operator watching. With no run in
+/// progress, the top bar's toggle still governs the dashboard.
 #[tokio::test]
-async fn a_paused_dashboard_does_not_refresh_while_a_run_is_in_progress() {
+async fn the_dashboard_refreshes_while_a_run_is_in_progress_even_when_paused() {
     let dir = common::tmp_dir();
-    let base = spawn_ui(&dir).await;
+    let config = common::test_config(&dir, "example.social");
+    let (base, db) = spawn_ui_with(config).await;
+
+    // no run in progress: a paused dashboard does not refresh
+    let resp = client()
+        .get(format!("{base}/"))
+        .header("Cookie", "ff_live=0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("http-equiv=\"refresh\""),
+        "paused and idle: no auto-refresh"
+    );
 
     // a run recorded as started but not finished, as one in progress is
-    let config = common::test_config(&dir, "example.social");
-    let db = fedifetcher::db::open(&config).await.unwrap();
     let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
     fedifetcher::db::start_run(&db, &started).await.unwrap();
 
@@ -1263,8 +1279,8 @@ async fn a_paused_dashboard_does_not_refresh_while_a_run_is_in_progress() {
     assert_eq!(resp.status().as_u16(), 200);
     let body = resp.text().await.unwrap();
     assert!(
-        !body.contains("http-equiv=\"refresh\""),
-        "paused: no auto-refresh, even while a run is in progress"
+        body.contains("http-equiv=\"refresh\""),
+        "a run in progress refreshes the dashboard, even when paused"
     );
     assert!(
         body.contains("href=\"/live?on=1\"") && body.contains(">Resume live updates</a>"),
@@ -1471,5 +1487,242 @@ async fn posting_fetch_validates_its_fields() {
         let (status, location) = post_fetch(&base, form).await;
         assert_eq!(status, 303, "{form}");
         assert_eq!(location.as_deref(), Some("/"), "{form}");
+    }
+}
+
+/// A manual fetch is recorded in the run history like a run, and its
+/// message says it was a manual fetch — not a scheduled run's "Processing
+/// finished".
+#[tokio::test]
+async fn a_manual_fetch_is_recorded_in_the_run_history() {
+    let dir = common::tmp_dir();
+    // a server that is not there, so the fetch fails fast instead of
+    // reaching out
+    let mut config = common::test_config(&dir, "127.0.0.1:9");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let (base, db) = spawn_ui_with(config).await;
+
+    let (status, location) = post_fetch(
+        &base,
+        "kind=url&key=https%3A%2F%2Fremote.example%2F%40a%2F1&back=%2F",
+    )
+    .await;
+    assert_eq!(status, 303, "the POST must redirect");
+    assert_eq!(location.as_deref(), Some("/"));
+
+    // the fetch runs in the background; its record lands when it ends
+    let mut runs = Vec::new();
+    for _ in 0..100 {
+        runs = fedifetcher::db::recent_runs(&db, 10).await.unwrap();
+        if runs.iter().any(|run| run.message.contains("Manual fetch")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(runs.len(), 1, "the fetch should be the only run recorded");
+    assert_eq!(runs[0].outcome, "ok");
+    assert_eq!(
+        runs[0].message, "Manual fetch: url https://remote.example/@a/1",
+        "the message says it was a manual fetch, and of what"
+    );
+
+    // and the dashboard's history shows it
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Manual fetch: url https://remote.example/@a/1"),
+        "the dashboard shows the manual fetch: {body}"
+    );
+}
+
+/// The about page, which the top bar's version number links to: what
+/// this is, and the license it is under. There is no alert box to open —
+/// the UI is JavaScript-free by design — so the "about" is a page.
+#[tokio::test]
+async fn the_about_page_explains_what_this_is_and_its_license() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, body) = get(&format!("{base}/about")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(fedifetcher::VERSION),
+        "the page names the version being run"
+    );
+    assert!(
+        body.contains("GNU General Public License"),
+        "the page names the license"
+    );
+    assert!(
+        body.contains("https://www.gnu.org/licenses/gpl-3.0.html"),
+        "the page links the license text"
+    );
+    assert!(
+        body.contains("WITHOUT ANY WARRANTY"),
+        "the page carries the warranty disclaimer"
+    );
+    assert!(
+        body.contains("Michael Thomas") && body.contains("MIT"),
+        "the page keeps the original's notice"
+    );
+
+    // the top bar's version number links here
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("class=\"version\"") && body.contains("href=\"/about\""),
+        "the version number links to the about page: {body}"
+    );
+}
+
+/// The top bar carries the run controls — the status pill, and the start
+/// button — on every page, so a run can be driven from anywhere.
+#[tokio::test]
+async fn the_top_bar_carries_the_run_controls_on_every_page() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    for page in ["/", "/data", "/logs", "/config", "/debug", "/about"] {
+        let (status, body) = get(&format!("{base}{page}")).await;
+        assert_eq!(status, 200, "{page}");
+        assert!(
+            body.contains("class=\"run\""),
+            "{page}: the run controls are in the top bar"
+        );
+        assert!(
+            body.contains(">Idle</span>"),
+            "{page}: the status pill is in the top bar"
+        );
+        assert!(
+            body.contains("action=\"/run\"") && body.contains(">Start</button>"),
+            "{page}: the start button is in the top bar"
+        );
+    }
+}
+
+/// The run-control buttons redirect back to the page they were pressed
+/// on, so pressing start or stop is answered by the page itself; with no
+/// page to go back to, they land on the dashboard.
+#[tokio::test]
+async fn run_control_posts_redirect_back_to_the_page_they_were_pressed_on() {
+    let dir = common::tmp_dir();
+    // a server that is not there, so the run a /run starts fails fast
+    let mut config = common::test_config(&dir, "127.0.0.1:9");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let (base, _) = spawn_ui_with(config).await;
+
+    for action in ["run", "stop", "pause", "resume"] {
+        let resp = client()
+            .post(format!("{base}/{action}"))
+            .header("Referer", format!("{base}/logs?sort=level&dir=asc"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 303, "/{action}");
+        assert_eq!(
+            resp.headers().get("Location").unwrap(),
+            "/logs?sort=level&dir=asc",
+            "/{action} goes back to the page it was pressed on"
+        );
+    }
+
+    // with no page to go back to, they land on the dashboard
+    for action in ["stop", "pause", "resume"] {
+        let resp = client()
+            .post(format!("{base}/{action}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 303, "/{action}");
+        assert_eq!(resp.headers().get("Location").unwrap(), "/", "/{action}");
+    }
+}
+
+/// The dashboard's State section counts the database's tables as well as
+/// what the state itself remembers, so the numbers answer "what has the
+/// database recorded" at a glance.
+#[tokio::test]
+async fn the_dashboard_counts_the_databases_tables() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let pool = fedifetcher::db::open(&config).await.unwrap();
+
+    let post = |uri: &str| fedifetcher::db::TriggerPost {
+        uri: uri.to_string(),
+        url: uri.to_string(),
+        acct: Some("a@remote.example".to_string()),
+        author_url: None,
+        replies_count: Some(2),
+        created_at: None,
+        in_reply_to_id: None,
+        in_reply_to_account_id: None,
+        is_public: true,
+        is_boost: false,
+        mentions: None,
+        source: "home timeline".to_string(),
+    };
+    fedifetcher::db::record_trigger_posts(
+        &pool,
+        &[
+            post("https://remote.example/@a/1"),
+            post("https://remote.example/@a/2"),
+        ],
+        1000,
+    )
+    .await
+    .unwrap();
+    fedifetcher::db::mark_private_post(&pool, "https://remote.example/@a/1")
+        .await
+        .unwrap();
+    fedifetcher::db::mark_opted_out_account(&pool, "bot@remote.example", "it is not indexable")
+        .await
+        .unwrap();
+    fedifetcher::db::record_known_context_posts(
+        &pool,
+        &[
+            "https://remote.example/@a/3".to_string(),
+            "https://remote.example/@a/4".to_string(),
+            "https://remote.example/@a/5".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    fedifetcher::db::robots_store(&pool, "https://remote.example/robots.txt", "User-agent: *")
+        .await
+        .unwrap();
+    let log = |message: &str| fedifetcher::db::LogRow {
+        ts: "2026-10-22 16:05:07 -05:00".to_string(),
+        level: "INFO".to_string(),
+        target: "fedifetcher::test".to_string(),
+        message: message.to_string(),
+    };
+    fedifetcher::db::insert_log(&pool, &log("first line"))
+        .await
+        .unwrap();
+    fedifetcher::db::insert_log(&pool, &log("second line"))
+        .await
+        .unwrap();
+    let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
+    let id = fedifetcher::db::start_run(&pool, &started).await.unwrap();
+    fedifetcher::db::finish_run(&pool, id, &started, "ok", "a run")
+        .await
+        .unwrap();
+
+    let base = spawn_ui(&dir).await;
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    for (label, count) in [
+        ("trigger posts", "2"),
+        ("private posts", "1"),
+        ("opted-out accounts", "1"),
+        ("known context posts", "3"),
+        ("robots.txt cache", "1"),
+        ("log lines", "2"),
+        ("runs recorded", "1"),
+    ] {
+        assert!(
+            body.contains(&format!("<td>{label}</td><td>{count}</td>")),
+            "the State section counts {label}: {body}"
+        );
     }
 }
