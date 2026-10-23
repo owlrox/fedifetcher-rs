@@ -519,14 +519,31 @@ async fn seed_db(dir: &std::path::Path) {
     fedifetcher::db::insert_log(&pool, &log("INFO", "second line"))
         .await
         .unwrap();
+    let run = |started: &str, finished: &str, outcome: &str, message: &str| fedifetcher::db::RunRow {
+        started: started.to_string(),
+        finished: finished.to_string(),
+        outcome: outcome.to_string(),
+        message: message.to_string(),
+    };
     fedifetcher::db::insert_run(
         &pool,
-        &fedifetcher::db::RunRow {
-            started: "2026-10-22 16:05:07.000001-05:00".to_string(),
-            finished: "2026-10-22 16:05:08.000001-05:00".to_string(),
-            outcome: "ok".to_string(),
-            message: "Processing finished in 0:00:01".to_string(),
-        },
+        &run(
+            "2026-10-22 16:05:07.000001-05:00",
+            "2026-10-22 16:05:08.000001-05:00",
+            "error",
+            "first run",
+        ),
+    )
+    .await
+    .unwrap();
+    fedifetcher::db::insert_run(
+        &pool,
+        &run(
+            "2026-10-22 16:05:09.000001-05:00",
+            "2026-10-22 16:05:10.000001-05:00",
+            "ok",
+            "second run",
+        ),
     )
     .await
     .unwrap();
@@ -553,57 +570,61 @@ async fn the_data_page_drills_into_the_databases_tables() {
 
     let position = |body: &str, needle: &str| body.find(needle).unwrap();
 
-    // every table in the database is a sub-tab, with its row count
+    // every table but logs and config is a sub-tab, with its row count;
+    // those two tables have pages of their own
     let (status, body) = get(&format!("{base}/hosts")).await;
     assert_eq!(status, 200);
-    for tab in ["hosts", "logs", "opted_out_accounts", "private_posts", "runs"] {
+    for tab in ["hosts", "opted_out_accounts", "private_posts", "runs", "seen_urls"] {
         assert!(
             body.contains(&format!("href=\"/hosts?tab={tab}\"")),
             "the {tab} sub-tab is linked"
         );
     }
-    assert!(body.contains("(2)"), "the logs tab shows its row count");
+    for gone in ["logs", "config"] {
+        assert!(
+            !body.contains(&format!("href=\"/hosts?tab={gone}\"")),
+            "the {gone} table has its own page, not a sub-tab"
+        );
+    }
+    assert!(body.contains("(2)"), "a sub-tab shows its row count");
     // the hosts tab is the default
     assert!(body.contains("Seen hosts"));
     assert!(body.contains("alpha.example"));
 
     // a table tab shows the table's rows, newest first by default
-    let (status, body) = get(&format!("{base}/hosts?tab=logs")).await;
+    let (status, body) = get(&format!("{base}/hosts?tab=runs")).await;
     assert_eq!(status, 200);
-    assert!(body.contains("first line"));
-    assert!(body.contains("second line"));
+    assert!(body.contains("first run"));
+    assert!(body.contains("second run"));
     assert!(
-        position(&body, "second line") < position(&body, "first line"),
+        position(&body, "second run") < position(&body, "first run"),
         "the newest row comes first by default"
     );
     assert!(
-        body.contains("/hosts?tab=logs&amp;sort=level&amp;dir=asc"),
+        body.contains("/hosts?tab=runs&amp;sort=outcome&amp;dir=asc"),
         "a column heading links to that sort"
     );
 
-    // sorted by a column, ascending: ERROR before INFO
-    let (_, body) = get(&format!("{base}/hosts?tab=logs&sort=level&dir=asc")).await;
+    // sorted by a column, ascending: error before ok
+    let (_, body) = get(&format!("{base}/hosts?tab=runs&sort=outcome&dir=asc")).await;
     assert!(
-        position(&body, "first line") < position(&body, "second line"),
-        "level ascending is ERROR, INFO"
+        position(&body, "first run") < position(&body, "second run"),
+        "outcome ascending is error, ok"
     );
     // and descending flips it
-    let (_, body) = get(&format!("{base}/hosts?tab=logs&sort=level&dir=desc")).await;
+    let (_, body) = get(&format!("{base}/hosts?tab=runs&sort=outcome&dir=desc")).await;
     assert!(
-        position(&body, "second line") < position(&body, "first line"),
-        "level descending is INFO, ERROR"
+        position(&body, "second run") < position(&body, "first run"),
+        "outcome descending is ok, error"
     );
     // an unknown column falls back to the default sort, newest first
-    let (_, body) = get(&format!("{base}/hosts?tab=logs&sort=nonsense")).await;
+    let (_, body) = get(&format!("{base}/hosts?tab=runs&sort=nonsense")).await;
     assert!(
-        position(&body, "second line") < position(&body, "first line"),
+        position(&body, "second run") < position(&body, "first run"),
         "an unknown column falls back to the newest first"
     );
 
     // the other tables show their rows too
-    let (status, body) = get(&format!("{base}/hosts?tab=runs")).await;
-    assert_eq!(status, 200);
-    assert!(body.contains("Processing finished in 0:00:01"));
     let (status, body) = get(&format!("{base}/hosts?tab=private_posts")).await;
     assert_eq!(status, 200);
     assert!(body.contains("https://remote.example/@a/1"));
@@ -612,10 +633,16 @@ async fn the_data_page_drills_into_the_databases_tables() {
     assert!(body.contains("bot@remote.example"));
     assert!(body.contains("it is not indexable"));
 
-    // an unknown tab falls back to the hosts tab
-    let (status, body) = get(&format!("{base}/hosts?tab=nonsense")).await;
-    assert_eq!(status, 200);
-    assert!(body.contains("Seen hosts"));
+    // an unknown tab falls back to the hosts tab, and so do the tables
+    // with pages of their own
+    for tab in ["nonsense", "logs", "config"] {
+        let (status, body) = get(&format!("{base}/hosts?tab={tab}")).await;
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("Seen hosts"),
+            "{tab} falls back to the hosts tab"
+        );
+    }
 }
 
 #[tokio::test]

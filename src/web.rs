@@ -196,8 +196,9 @@ enum TabView {
 }
 
 /// The /hosts page, now the data page: sub-tabs for the hosts FediFetcher
-/// has seen and for every table in the database. The tab query string names
-/// "hosts" or a table; anything else falls back to the hosts tab.
+/// has seen and for every table in the database, except logs and config,
+/// which have pages of their own. The tab query string names "hosts" or a
+/// table; anything else falls back to the hosts tab.
 async fn data(
     AxumState(state): AxumState<Arc<AppState>>,
     Query(query): Query<DataQuery>,
@@ -219,6 +220,12 @@ async fn data(
             Vec::new()
         }
     };
+    // the logs and config tables are shown on their own pages (/logs,
+    // /config); the data page's tabs are for everything else
+    let tables: Vec<String> = tables
+        .into_iter()
+        .filter(|name| name != "logs" && name != "config")
+        .collect();
     let mut table_counts: Vec<(String, i64)> = Vec::with_capacity(tables.len());
     for name in &tables {
         let count = db::table_count(&state.db, name).await.unwrap_or(0);
@@ -962,7 +969,8 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl In
 }
 
 /// The data page: sub-tabs for the hosts FediFetcher has seen and for every
-/// table in the database, each sortable by clicking a column heading.
+/// table in the database except logs and config (those have their own
+/// pages), each sortable by clicking a column heading.
 #[component]
 fn DataPage(tabs: Vec<TabLink>, tab: TabView) -> impl IntoView {
     let links: Vec<AnyView> = tabs
