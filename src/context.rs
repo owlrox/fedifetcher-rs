@@ -19,18 +19,28 @@ use crate::store::{RepliedToot, State};
 /// fetched, so it is recorded in the database the first time it is seen —
 /// and only then logged — and recognised without another word afterwards.
 /// A post recorded by an earlier run is skipped outright, whatever this
-/// run's copy of it says.
+/// run's copy of it says. Both skips are silent at the default log level;
+/// at DEBUG each one leaves a line.
 pub async fn toot_context_can_be_fetched(toot: &Post, db: &SqlitePool) -> bool {
     if !toot.is_public {
         match mark_private_post(db, &toot.uri).await {
             Ok(true) => debug!("Cannot fetch context of private toot {}", toot.uri),
-            Ok(false) => {}
+            Ok(false) => {
+                debug!("Skipping private toot {}: already recorded as private", toot.uri)
+            }
             Err(ex) => warn!("Could not record private toot {}: {ex}", toot.uri),
         }
         return false;
     }
     match is_private_post(db, &toot.uri).await {
-        Ok(known_private) => !known_private,
+        Ok(true) => {
+            debug!(
+                "Skipping private toot {}: recorded as private by an earlier run",
+                toot.uri
+            );
+            false
+        }
+        Ok(false) => true,
         Err(ex) => {
             warn!("Could not check the private toots for {}: {ex}", toot.uri);
             true

@@ -1,12 +1,13 @@
 //! Fetching the posts of accounts we do not follow yet.
 
 use sqlx::SqlitePool;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
 use crate::config::Config;
 use crate::context::{add_context_urls, get_all_known_context_urls, toot_context_can_be_fetched};
+use crate::db::mark_opted_out_account;
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::CancelToken;
@@ -64,10 +65,26 @@ pub async fn get_user_posts(
     http: &HttpClient,
     config: &Config,
     state: &mut State,
+    db: &SqlitePool,
 ) -> Option<Vec<Post>> {
     if config.respect_user_opt_out {
         if let Some(reason) = opt_out_reason(user) {
-            info!("Skipping {}: the account has opted out ({reason})", user.acct);
+            // the skip costs no requests — it happens before any server is
+            // contacted — but the account is recorded so the log line fires
+            // the first time only; the account is still re-checked each run,
+            // so one that later opts in is fetched after all
+            let first_seen = match mark_opted_out_account(db, &user.acct, reason).await {
+                Ok(first_seen) => first_seen,
+                Err(ex) => {
+                    warn!("Could not record opted-out account {}: {ex}", user.acct);
+                    true
+                }
+            };
+            if first_seen {
+                info!("Skipping {}: the account has opted out ({reason})", user.acct);
+            } else {
+                debug!("Skipping {}: the account has opted out ({reason})", user.acct);
+            }
             return None;
         }
     }
@@ -162,7 +179,7 @@ pub async fn add_user_posts(
         if !state.all_known_users.contains(&user.acct)
             && !user.url.starts_with(&format!("https://{home_server}/"))
         {
-            let posts = get_user_posts(&user, target, &home_server, http, config, state).await;
+            let posts = get_user_posts(&user, target, &home_server, http, config, state, db).await;
 
             if let Some(posts) = posts {
                 let mut count = 0;

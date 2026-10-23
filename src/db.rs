@@ -1,8 +1,9 @@
 //! The SQLite database in the state directory: the log lines, the web UI's
-//! run history, and the posts earlier runs found private. The text files in
-//! the state directory stay the state of record for what FediFetcher has
-//! seen; this is the record of what it did and learned, in one file
-//! (`fedifetcher.db`) that the web UI can query and later runs consult.
+//! run history, and what earlier runs learned — the posts found private and
+//! the accounts found opted out. The text files in the state directory stay
+//! the state of record for what FediFetcher has seen; this is the record of
+//! what it did and learned, in one file (`fedifetcher.db`) that the web UI
+//! can query and later runs consult.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
@@ -78,6 +79,16 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
         "CREATE TABLE IF NOT EXISTS private_posts (
             uri TEXT PRIMARY KEY,
             first_marked TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS opted_out_accounts (
+            acct TEXT PRIMARY KEY,
+            reason TEXT NOT NULL,
+            first_seen TEXT NOT NULL
         )",
     )
     .execute(&pool)
@@ -252,6 +263,31 @@ pub async fn is_private_post(pool: &SqlitePool, uri: &str) -> Result<bool> {
         .await
         .map_err(db_error)?;
     Ok(found.is_some())
+}
+
+/// Record an account as opted out, so later runs recognise the skip without
+/// logging it again. Returns whether this call is the one that recorded it.
+pub async fn mark_opted_out_account(pool: &SqlitePool, acct: &str, reason: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO opted_out_accounts (acct, reason, first_seen) VALUES (?, ?, ?)",
+    )
+    .bind(acct)
+    .bind(reason)
+    .bind(timeutil::fmt_state_ts(timeutil::now()))
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The reason an earlier run recorded for this account's opt-out, if any.
+pub async fn opted_out_account_reason(pool: &SqlitePool, acct: &str) -> Result<Option<String>> {
+    let found = sqlx::query("SELECT reason FROM opted_out_accounts WHERE acct = ? LIMIT 1")
+        .bind(acct)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(found.map(|row| row.get("reason")))
 }
 
 fn db_error(ex: sqlx::Error) -> Error {
@@ -490,6 +526,41 @@ mod tests {
         let pool = open(&config).await.unwrap();
         assert!(
             is_private_post(&pool, "https://remote.example/@a/1").await.unwrap(),
+            "the mark survives a reopen"
+        );
+    }
+
+    #[tokio::test]
+    async fn opted_out_accounts_are_marked_once_and_survive_reopening() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        assert_eq!(
+            opted_out_account_reason(&pool, "bot@remote.example").await.unwrap(),
+            None
+        );
+        assert!(
+            mark_opted_out_account(&pool, "bot@remote.example", "it is not indexable")
+                .await
+                .unwrap(),
+            "the first mark records the account"
+        );
+        assert!(
+            !mark_opted_out_account(&pool, "bot@remote.example", "it is not indexable")
+                .await
+                .unwrap(),
+            "marking again records nothing new"
+        );
+        assert_eq!(
+            opted_out_account_reason(&pool, "bot@remote.example").await.unwrap(),
+            Some("it is not indexable".to_string())
+        );
+        drop(pool);
+
+        let pool = open(&config).await.unwrap();
+        assert_eq!(
+            opted_out_account_reason(&pool, "bot@remote.example").await.unwrap(),
+            Some("it is not indexable".to_string()),
             "the mark survives a reopen"
         );
     }
