@@ -6,3 +6,6 @@
 fedifetcher.db*
 /config.toml
 /config.json
+
+# macOS Finder metadata
+.DS_Store
