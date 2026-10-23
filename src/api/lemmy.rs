@@ -376,11 +376,11 @@ mod tests {
         assert!(to_post(&json!({"ap_id": "https://lemmy.example/post/1"})).is_none());
     }
 
-    #[test]
-    fn paths_read_names() {
+    #[tokio::test]
+    async fn paths_read_names() {
         let api = LemmyApi::new(
             "lemmy.example",
-            HttpClient::new(crate::config::Config::default()),
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
         );
         assert_eq!(
             api.username_from("https://lemmy.example/u/alice"),

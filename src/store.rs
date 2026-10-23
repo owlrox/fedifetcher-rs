@@ -1,28 +1,25 @@
-//! Reading and writing the state directory, and the lock that keeps two runs
-//! from overlapping.
+//! What FediFetcher remembers between runs, kept in the database, and the
+//! lock file that keeps two runs from overlapping.
 //!
-//! The file layout and formats match the Python original: two plain-text
-//! collections (`seen_urls`, `known_followings`), four JSON collections, a
-//! version file, and a lock file recording the process id and start time of
-//! the run holding it.
+//! The state used to live in text files in the state directory; it now lives
+//! in the database's state tables, one table per collection. The lock stays
+//! a file: a lock has to work between processes, and a SQLite write lock
+//! would block the whole database for as long as a run holds it.
 
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 use tracing::{debug, warn};
 
 use crate::config::Config;
-use crate::error::LockedError;
+use crate::db;
+use crate::error::{LockedError, Result};
 use crate::state::{ContextCache, ServerCache, TimestampedSet};
 use crate::timeutil;
 use crate::urls::PostRef;
-
-/// The format the state files are written in; a directory without a version
-/// file predates versioning and is read as version 1.
-pub const STATE_VERSION: u32 = 1;
 
 /// How many entries of the append-only collections to carry over between runs.
 pub const MAX_ENTRIES: usize = 100_000;
@@ -33,23 +30,10 @@ pub const SERVER_FAILURE_MAX_AGE: Duration = Duration::hours(1);
 
 /// A post that was replied to: the URL we followed, and where it landed.
 ///
-/// Serializes as `[url, [server, post_id]]`, the shape the Python original
-/// writes into `replied_toot_server_ids`.
+/// Stored in the `replied_toots` table; a lookup that found nothing is
+/// remembered as a row of NULLs, so it is not asked about again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepliedToot(pub String, pub PostRef);
-
-impl Serialize for RepliedToot {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        (&self.0, &self.1).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for RepliedToot {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (url, post) = <(String, PostRef)>::deserialize(deserializer)?;
-        Ok(RepliedToot(url, post))
-    }
-}
 
 /// Everything FediFetcher remembers between runs, plus this run's scratch
 /// space.
@@ -67,7 +51,7 @@ pub struct State {
     pub parsed_urls: IndexMap<String, Option<PostRef>>,
 }
 
-/// Reads and writes the state directory.
+/// Reads and writes what FediFetcher remembers, in the database.
 pub struct StateStore {
     config: Config,
 }
@@ -77,43 +61,14 @@ impl StateStore {
         StateStore { config }
     }
 
-    pub fn version_file(&self) -> PathBuf {
-        self.config.state_dir.join("state_version")
-    }
-
-    pub fn stored_version(&self) -> u32 {
-        std::fs::read_to_string(self.version_file())
-            .ok()
-            .and_then(|text| text.trim().parse::<u32>().ok())
-            .unwrap_or(1)
-    }
-
-    pub fn load(&self) -> State {
+    /// Load the state, applying the configured expiry: users remembered
+    /// longer ago than `remember_users_for_hours` are forgotten, host info
+    /// older than `remember_hosts_for_days`, and context posts not checked
+    /// in a week. `all_known_users` is rebuilt from the followings and the
+    /// recently checked users.
+    pub async fn load(&self, pool: &SqlitePool) -> Result<State> {
         let config = &self.config;
-        let version = self.stored_version();
-        if version > STATE_VERSION {
-            warn!(
-                "State directory is version {version}, but this FediFetcher understands version {STATE_VERSION}. Reading it anyway."
-            );
-        }
-
-        let mut state = State {
-            seen_urls: TimestampedSet::from_lines(&read_lines(&config.seen_urls_file())),
-            known_followings: TimestampedSet::from_lines(&read_lines(&config.known_followings_file())),
-            recently_checked_users: TimestampedSet::from_json(
-                &read_json(&config.recently_checked_users_file()).unwrap_or(Value::Object(Default::default())),
-            ),
-            seen_hosts: ServerCache::from_json(
-                &read_json(&config.seen_hosts_file()).unwrap_or(Value::Object(Default::default())),
-            ),
-            recently_checked_context: ContextCache::from_json(
-                &read_json(&config.recently_checked_contexts_file()).unwrap_or(Value::Object(Default::default())),
-            ),
-            replied_toot_server_ids: read_json(&config.replied_toot_server_ids_file())
-                .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_default(),
-            ..Default::default()
-        };
+        let mut state = db::load_state(pool).await?;
 
         state
             .recently_checked_users
@@ -132,64 +87,33 @@ impl StateStore {
         for user in state.recently_checked_users.iter().cloned().collect::<Vec<_>>() {
             state.all_known_users.add(&user, None);
         }
-        state
+        Ok(state)
     }
 
-    pub fn save(&self, state: &State) {
-        let config = &self.config;
-        std::fs::create_dir_all(&config.state_dir).ok();
-
-        write(
-            &config.known_followings_file(),
-            &tail_lines(state.known_followings.iter(), MAX_ENTRIES).join("\n"),
-        );
-        write(
-            &config.seen_urls_file(),
-            &tail_lines(state.seen_urls.iter(), MAX_ENTRIES).join("\n"),
-        );
-        let replied: IndexMap<String, Option<RepliedToot>> = state
-            .replied_toot_server_ids
-            .iter()
-            .rev()
-            .take(MAX_ENTRIES)
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        write(
-            &config.replied_toot_server_ids_file(),
-            &serde_json::to_string(&replied).unwrap_or_else(|_| "{}".to_string()),
-        );
-        write(
-            &config.recently_checked_users_file(),
-            &serde_json::to_string(&state.recently_checked_users.to_json()).unwrap_or_else(|_| "{}".to_string()),
-        );
-        write(
-            &config.seen_hosts_file(),
-            &serde_json::to_string(&state.seen_hosts.to_json()).unwrap_or_else(|_| "{}".to_string()),
-        );
-        write(
-            &config.recently_checked_contexts_file(),
-            &serde_json::to_string(&state.recently_checked_context.to_json()).unwrap_or_else(|_| "{}".to_string()),
-        );
-        write(&self.version_file(), &STATE_VERSION.to_string());
+    /// Write the state back, keeping only the newest `MAX_ENTRIES` of the
+    /// append-only collections.
+    pub async fn save(&self, pool: &SqlitePool, state: &State) -> Result<()> {
+        db::save_state(pool, state, MAX_ENTRIES).await
     }
 
-    /// Load state, and write it back even if the run fails part way through.
-    pub fn session(&self) -> Session {
-        Session {
+    /// Load state into a session, to be written back by `Session::finish`.
+    pub async fn session(&self, pool: &SqlitePool) -> Result<Session> {
+        Ok(Session {
             store: StateStore {
                 config: self.config.clone(),
             },
-            state: Some(self.load()),
-        }
+            pool: pool.clone(),
+            state: Some(self.load(pool).await?),
+        })
     }
 }
 
-/// A loaded state that is written back when dropped.
+/// A loaded state, written back by `finish` when the run ends. Dropping a
+/// session without finishing it loses the run's changes; `finish` is called
+/// on every path out of a run, success or failure.
 pub struct Session {
     store: StateStore,
+    pool: SqlitePool,
     state: Option<State>,
 }
 
@@ -197,13 +121,13 @@ impl Session {
     pub fn state(&mut self) -> &mut State {
         self.state.as_mut().expect("session state already taken")
     }
-}
 
-impl Drop for Session {
-    fn drop(&mut self) {
+    /// Write the state back to the database.
+    pub async fn finish(mut self) -> Result<()> {
         if let Some(state) = self.state.take() {
-            self.store.save(&state);
+            self.store.save(&self.pool, &state).await?;
         }
+        Ok(())
     }
 }
 
@@ -249,7 +173,7 @@ fn process_alive(_pid: u32) -> bool {
 /// crashed — is reclaimed on the spot, as is one older than `lock_hours`, and
 /// one too old to name a holder (written by a previous version), so a single
 /// long-running service never has to wait out a lock it left behind.
-pub fn lock(config: &Config) -> Result<LockGuard, LockedError> {
+pub fn lock(config: &Config) -> std::result::Result<LockGuard, LockedError> {
     let path = config.lock_path();
 
     if path.exists() {
@@ -324,27 +248,6 @@ impl Drop for LockGuard {
     }
 }
 
-fn read_lines(path: &PathBuf) -> Vec<String> {
-    std::fs::read_to_string(path)
-        .map(|text| text.lines().map(str::to_string).collect())
-        .unwrap_or_default()
-}
-
-fn read_json(path: &PathBuf) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-fn write(path: &PathBuf, text: &str) {
-    std::fs::write(path, text).ok();
-}
-
-fn tail_lines<'a>(items: impl Iterator<Item = &'a String>, max: usize) -> Vec<&'a str> {
-    let all: Vec<&'a str> = items.map(String::as_str).collect();
-    let start = all.len().saturating_sub(max);
-    all[start..].to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,12 +268,14 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn state_round_trips_through_disk() {
+    #[tokio::test]
+    async fn state_round_trips_through_the_database() {
         let dir = temp_dir();
-        let store = StateStore::new(test_config(&dir));
+        let config = test_config(&dir);
+        let pool = db::open(&config).await.unwrap();
+        let store = StateStore::new(config);
 
-        let mut session = store.session();
+        let mut session = store.session(&pool).await.unwrap();
         let state = session.state();
         state.seen_urls.add("https://remote.example/@a/1", None);
         state.known_followings.add("b@remote.example", None);
@@ -388,23 +293,9 @@ mod tests {
             "mastodonApiSupport": true, "peertubeApiSupport": false,
         }));
         state.recently_checked_context.mark_fetched("uri", timeutil::now());
-        drop(session);
+        session.finish().await.unwrap();
 
-        // the files exist with the expected names
-        for name in [
-            "seen_urls",
-            "known_followings",
-            "recently_checked_users",
-            "seen_hosts",
-            "recent_context",
-            "replied_toot_server_ids",
-            "state_version",
-        ] {
-            assert!(dir.join(name).exists(), "{name} missing");
-        }
-        assert_eq!(std::fs::read_to_string(dir.join("state_version")).unwrap(), "1");
-
-        let loaded = store.load();
+        let loaded = store.load(&pool).await.unwrap();
         assert!(loaded.seen_urls.contains("https://remote.example/@a/1"));
         assert!(loaded.known_followings.contains("b@remote.example"));
         assert!(loaded.recently_checked_users.contains("c@remote.example"));
@@ -425,6 +316,49 @@ mod tests {
         assert!(loaded.all_known_users.contains("b@remote.example"));
         assert!(loaded.all_known_users.contains("c@remote.example"));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn dropping_a_session_without_finishing_loses_the_changes() {
+        let dir = temp_dir();
+        let config = test_config(&dir);
+        let pool = db::open(&config).await.unwrap();
+        let store = StateStore::new(config);
+        {
+            let mut session = store.session(&pool).await.unwrap();
+            session.state().seen_urls.add("https://x.example/1", None);
+            // dropped without finish: the run's changes are lost
+        }
+        let loaded = store.load(&pool).await.unwrap();
+        assert!(loaded.seen_urls.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn load_applies_the_configured_expiry() {
+        let dir = temp_dir();
+        let mut config = test_config(&dir);
+        config.remember_users_for_hours = 24;
+        let pool = db::open(&config).await.unwrap();
+        let old = timeutil::fmt_state_ts(timeutil::now() - Duration::days(10));
+        let fresh = timeutil::fmt_state_ts(timeutil::now());
+        for (acct, first_seen) in [("old@remote.example", &old), ("fresh@remote.example", &fresh)] {
+            sqlx::query("INSERT INTO recently_checked_users (acct, first_seen) VALUES (?, ?)")
+                .bind(acct)
+                .bind(first_seen)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let store = StateStore::new(config);
+        let loaded = store.load(&pool).await.unwrap();
+        assert!(
+            !loaded.recently_checked_users.contains("old@remote.example"),
+            "a user remembered longer ago than remember_users_for_hours is forgotten"
+        );
+        assert!(loaded.recently_checked_users.contains("fresh@remote.example"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -556,17 +490,4 @@ mod tests {
         assert!(parse_lock_content("not a timestamp").is_none());
     }
 
-    #[test]
-    fn session_saves_even_when_dropped_early() {
-        let dir = temp_dir();
-        let store = StateStore::new(test_config(&dir));
-        {
-            let mut session = store.session();
-            session.state().seen_urls.add("https://x.example/1", None);
-            // dropped without any explicit save
-        }
-        let loaded = store.load();
-        assert!(loaded.seen_urls.contains("https://x.example/1"));
-        std::fs::remove_dir_all(&dir).ok();
-    }
 }

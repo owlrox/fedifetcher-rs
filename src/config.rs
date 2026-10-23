@@ -1,9 +1,10 @@
-//! Configuration: one struct, read from defaults, a config file, the
+//! Configuration: one struct, read from defaults, the database, the
 //! environment and the command line, in increasing order of precedence.
 //!
-//! The shapes mirror the Python original: a JSON (or TOML) config file, `ff_*`
-//! environment variables, and command line flags, with every option spelled the
-//! same way in all three places.
+//! The database holds the configuration between runs; the web UI edits it
+//! there. There is no config file: the `ff_*` environment variables and the
+//! command line flags override the stored values, with every option spelled
+//! the same way in all places.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -182,30 +183,6 @@ impl Config {
         self.lock_file.clone().unwrap_or_else(|| self.state_dir.join("lock.lock"))
     }
 
-    pub fn seen_urls_file(&self) -> PathBuf {
-        self.state_dir.join("seen_urls")
-    }
-
-    pub fn replied_toot_server_ids_file(&self) -> PathBuf {
-        self.state_dir.join("replied_toot_server_ids")
-    }
-
-    pub fn known_followings_file(&self) -> PathBuf {
-        self.state_dir.join("known_followings")
-    }
-
-    pub fn recently_checked_users_file(&self) -> PathBuf {
-        self.state_dir.join("recently_checked_users")
-    }
-
-    pub fn seen_hosts_file(&self) -> PathBuf {
-        self.state_dir.join("seen_hosts")
-    }
-
-    pub fn recently_checked_contexts_file(&self) -> PathBuf {
-        self.state_dir.join("recent_context")
-    }
-
     /// Which tasks a run will do, in the order it will do them. An empty
     /// list means the run has nothing to do and will finish immediately.
     pub fn enabled_tasks(&self) -> Vec<&'static str> {
@@ -248,9 +225,9 @@ impl Config {
         Ok(())
     }
 
-    /// The whole effective configuration as raw values, ready to be written
-    /// back to a config file. Options that are unset (`None`) are omitted, so
-    /// a cleared option stays cleared when the file is read back.
+    /// The whole effective configuration as raw values, ready to be stored
+    /// in the database. Options that are unset (`None`) are omitted, so
+    /// a cleared option stays cleared when the config is read back.
     pub fn to_raw_values(&self) -> RawValues {
         let mut values = RawValues::new();
         let mut put = |key: &str, value: Value| {
@@ -322,32 +299,36 @@ impl Config {
 /// The raw, uncoerced values from one source, keyed by option name.
 pub type RawValues = BTreeMap<String, Value>;
 
-/// Build a Config from the command line, environment and config file.
+/// Build a Config from the database, the environment and the command line.
 ///
-/// Later sources win: `file`, then `environ`, then `cli`.
-pub fn build_config(file: RawValues, environ: RawValues, cli: RawValues) -> Result<Config, ConfigError> {
-    build_config_with(file, environ, cli, true)
+/// Later sources win: `stored`, then `environ`, then `cli`.
+pub fn build_config(
+    stored: RawValues,
+    environ: RawValues,
+    cli: RawValues,
+) -> Result<Config, ConfigError> {
+    build_config_with(stored, environ, cli, true)
 }
 
 /// Like `build_config`, but a missing server or access token is not an error:
 /// the web UI starts with an empty configuration, and the values are filled
 /// in through its config page.
 pub fn build_config_lenient(
-    file: RawValues,
+    stored: RawValues,
     environ: RawValues,
     cli: RawValues,
 ) -> Result<Config, ConfigError> {
-    build_config_with(file, environ, cli, false)
+    build_config_with(stored, environ, cli, false)
 }
 
 fn build_config_with(
-    file: RawValues,
+    stored: RawValues,
     environ: RawValues,
     cli: RawValues,
     require_server_and_token: bool,
 ) -> Result<Config, ConfigError> {
     let mut values: RawValues = RawValues::new();
-    for source in [file, environ, cli] {
+    for source in [stored, environ, cli] {
         for (key, value) in source {
             values.insert(key, value);
         }
@@ -373,60 +354,6 @@ fn is_empty_list(value: &Value) -> bool {
         Value::Null => true,
         _ => false,
     }
-}
-
-/// Read a JSON or TOML config file into raw values.
-///
-/// Keys are lowercased and dashes become underscores; the file has always
-/// spelled the token option in the singular.
-pub fn read_config_file(path: &str) -> Result<RawValues, ConfigError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|_| ConfigError(format!("Config file {path} doesn't exist")))?;
-    let value: Value = if path.ends_with(".toml") {
-        let parsed: toml::Value = toml::from_str(&text)
-            .map_err(|ex| ConfigError(format!("Cannot read option in {path}: {ex}")))?;
-        serde_json::to_value(parsed)
-            .map_err(|ex| ConfigError(format!("Cannot read option in {path}: {ex}")))?
-    } else {
-        serde_json::from_str(&text)
-            .map_err(|ex| ConfigError(format!("Cannot read config file {path}: {ex}")))?
-    };
-    let Value::Object(map) = value else {
-        return Err(ConfigError(format!("Config file {path} must contain an object")));
-    };
-    let mut values = RawValues::new();
-    for (key, value) in map {
-        let key = key.to_lowercase().replace('-', "_");
-        let key = if key == "access_token" {
-            "access_tokens".to_string()
-        } else {
-            key
-        };
-        values.insert(key, value);
-    }
-    Ok(values)
-}
-
-/// Write raw values to a config file: TOML, or JSON when the path ends in
-/// `.json`. Unset (`null`) values are omitted.
-pub fn write_config_file(path: &str, values: &RawValues) -> Result<(), ConfigError> {
-    let map: serde_json::Map<String, Value> = values
-        .iter()
-        .filter(|(_, value)| !value.is_null())
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    let text = if path.ends_with(".json") {
-        serde_json::to_string_pretty(&Value::Object(map))
-            .map_err(|ex| ConfigError(format!("Cannot write config file {path}: {ex}")))?
-    } else {
-        toml::to_string(&map)
-            .map_err(|ex| ConfigError(format!("Cannot write config file {path}: {ex}")))?
-    };
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(path, text)
-        .map_err(|ex| ConfigError(format!("Cannot write config file {path}: {ex}")))
 }
 
 /// Read the `ff_*` environment variables into raw values.
@@ -878,35 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn singular_access_token_key_is_accepted() {
-        let raw = read_config_file_bytes(r#"{"server": "x", "access_token": "tok"}"#).unwrap();
-        let config = build_config(raw, RawValues::new(), RawValues::new()).unwrap();
-        assert_eq!(config.access_tokens, vec!["tok".to_string()]);
-    }
-
-    #[test]
-    fn keys_are_lowercased_and_dashes_become_underscores() {
-        let raw = read_config_file_bytes(r#"{"SERVER": "x", "Access-Token": ["t"], "Max-Followers": 3}"#).unwrap();
-        let config = build_config(raw, RawValues::new(), RawValues::new()).unwrap();
-        assert_eq!(config.server, "x");
-        assert_eq!(config.max_followers, 3);
-    }
-
-    #[test]
-    fn toml_config_file_is_accepted() {
-        let dir = std::env::temp_dir().join(format!("ff-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        std::fs::write(&path, "server = \"x\"\naccess-token = \"tok\"\nmax-followers = 4\n").unwrap();
-        let raw = read_config_file(path.to_str().unwrap()).unwrap();
-        let config = build_config(raw, RawValues::new(), RawValues::new()).unwrap();
-        assert_eq!(config.server, "x");
-        assert_eq!(config.access_tokens, vec!["tok".to_string()]);
-        assert_eq!(config.max_followers, 4);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn environ_reads_ff_prefixed_variables() {
         let environ = vec![
             ("FF_SERVER".to_string(), "env.example".to_string()),
@@ -953,67 +851,5 @@ mod tests {
         let config = build_config_lenient(minimal(), RawValues::new(), RawValues::new()).unwrap();
         assert_eq!(config.server, "example.com");
         assert_eq!(config.access_tokens, vec!["token1".to_string()]);
-    }
-
-    #[test]
-    fn config_round_trips_through_a_toml_file() {
-        let dir = std::env::temp_dir().join(format!("ff-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let mut raw = minimal();
-        raw.insert("max_followers".to_string(), json!(7));
-        raw.insert("from_lists".to_string(), json!(true));
-        raw.insert("on_start".to_string(), json!("https://example.com/start"));
-        raw.insert("instance_blocklist".to_string(), json!(["a.example", "b.example"]));
-        let config = build_config(raw, RawValues::new(), RawValues::new()).unwrap();
-        write_config_file(path.to_str().unwrap(), &config.to_raw_values()).unwrap();
-
-        let read_back = read_config_file(path.to_str().unwrap()).unwrap();
-        let reloaded = build_config(read_back, RawValues::new(), RawValues::new()).unwrap();
-        assert_eq!(config.to_raw_values(), reloaded.to_raw_values());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn unset_optional_options_are_omitted_from_the_file() {
-        let dir = std::env::temp_dir().join(format!("ff-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let config = Config::default();
-        write_config_file(path.to_str().unwrap(), &config.to_raw_values()).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("server = \"\""));
-        assert!(text.contains("lock_hours = 24"));
-        assert!(!text.contains("lock_file"));
-        assert!(!text.contains("on_start"));
-        assert!(!text.contains("on_done"));
-        assert!(!text.contains("on_fail"));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn json_config_files_are_written_as_json() {
-        let dir = std::env::temp_dir().join(format!("ff-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.json");
-        let config = build_config(minimal(), RawValues::new(), RawValues::new()).unwrap();
-        write_config_file(path.to_str().unwrap(), &config.to_raw_values()).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with('{'));
-
-        let read_back = read_config_file(path.to_str().unwrap()).unwrap();
-        let reloaded = build_config(read_back, RawValues::new(), RawValues::new()).unwrap();
-        assert_eq!(config.to_raw_values(), reloaded.to_raw_values());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    fn read_config_file_bytes(text: &str) -> Result<RawValues, ConfigError> {
-        let dir = std::env::temp_dir().join(format!("ff-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.json");
-        std::fs::write(&path, text).unwrap();
-        let raw = read_config_file(path.to_str().unwrap());
-        std::fs::remove_dir_all(&dir).ok();
-        raw
     }
 }

@@ -2,35 +2,23 @@
 //! configured otherwise), the instance blocklist, and rate limits.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderValue, LINK};
 use reqwest::Method;
 use serde_json::Value;
-use time::OffsetDateTime;
+use sqlx::SqlitePool;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
+use crate::db;
 use crate::error::{Error, Result};
 use crate::robots::RobotFileParser;
 use crate::timeutil;
 use crate::urls::{netloc_of, scheme_of};
 use crate::VERSION;
-
-const ROBOTS_CACHE_PREFIX: &str = "robots-";
-
-/// The xxh128 of a string, as 32 lowercase hex digits.
-///
-/// XXH128 is XXH3-128, which is what Python's `xxhash.xxh128` computes; the
-/// digest is written high half first, matching both `xxhsum` and Python's
-/// `hexdigest()`, so robots.txt cache files are named identically by both
-/// implementations.
-pub fn xxh128_hex(input: &str) -> String {
-    format!("{:032x}", xxhash_rust::xxh3::xxh3_128(input.as_bytes()))
-}
 
 /// A response with the body already read: FediFetcher never streams.
 pub struct Response {
@@ -106,10 +94,12 @@ pub struct HttpClient {
     robots: Arc<OnceLock<Arc<RobotsCache>>>,
     headers: Option<HeaderMap>,
     ignore_robots: bool,
+    /// The database the robots.txt cache lives in.
+    db: SqlitePool,
 }
 
 impl HttpClient {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, db: SqlitePool) -> Self {
         // a client keeps connections alive between the many requests we make
         // to the same handful of hosts
         HttpClient {
@@ -122,6 +112,7 @@ impl HttpClient {
             robots: Arc::new(OnceLock::new()),
             headers: None,
             ignore_robots: false,
+            db,
         }
     }
 
@@ -150,7 +141,7 @@ impl HttpClient {
         self.robots
             .get_or_init(|| {
                 Arc::new(RobotsCache::new(
-                    self.config.state_dir.clone(),
+                    self.db.clone(),
                     self.config.instance_blocklist.clone(),
                     self.config.respect_robots_txt,
                     self.ignoring_robots(),
@@ -364,9 +355,9 @@ enum RobotsEntry {
     Verdict(bool),
 }
 
-/// Remembers each host's robots.txt, in memory and on disk.
+/// Remembers each host's robots.txt, in memory and in the database.
 pub struct RobotsCache {
-    state_dir: PathBuf,
+    db: SqlitePool,
     blocklist: Vec<String>,
     enabled: bool,
     fetcher: HttpClient,
@@ -374,14 +365,9 @@ pub struct RobotsCache {
 }
 
 impl RobotsCache {
-    fn new(
-        state_dir: PathBuf,
-        blocklist: Vec<String>,
-        enabled: bool,
-        fetcher: HttpClient,
-    ) -> Self {
+    fn new(db: SqlitePool, blocklist: Vec<String>, enabled: bool, fetcher: HttpClient) -> Self {
         RobotsCache {
-            state_dir,
+            db,
             blocklist,
             enabled,
             fetcher,
@@ -389,12 +375,7 @@ impl RobotsCache {
         }
     }
 
-    pub fn cache_path(&self, robots_url: &str) -> PathBuf {
-        self.state_dir
-            .join(format!("{ROBOTS_CACHE_PREFIX}{}.txt", xxh128_hex(robots_url)))
-    }
-
-    fn cached(&self, robots_url: &str) -> Option<RobotsEntry> {
+    async fn cached(&self, robots_url: &str) -> Option<RobotsEntry> {
         if let Some(entry) = self.cache.lock().unwrap().get(robots_url) {
             return Some(match entry {
                 RobotsEntry::Text(text) => RobotsEntry::Text(text.clone()),
@@ -402,22 +383,26 @@ impl RobotsCache {
             });
         }
 
-        let path = self.cache_path(robots_url);
-        if path.exists() {
-            debug!("Getting robots.txt file from cache for {robots_url}.");
-            if let Ok(text) = std::fs::read_to_string(&path) {
+        match db::robots_cached(&self.db, robots_url).await {
+            Ok(Some(text)) => {
+                debug!("Getting robots.txt from the database cache for {robots_url}.");
                 self.cache
                     .lock()
                     .unwrap()
                     .insert(robots_url.to_string(), RobotsEntry::Text(text.clone()));
-                return Some(RobotsEntry::Text(text));
+                Some(RobotsEntry::Text(text))
+            }
+            Ok(None) => None,
+            Err(ex) => {
+                // an unreadable cache is an empty one: fetch the file fresh
+                warn!("Could not read the robots.txt cache for {robots_url}: {ex}");
+                None
             }
         }
-        None
     }
 
     async fn fetch(&self, robots_url: &str) -> RobotsEntry {
-        if let Some(entry) = self.cached(robots_url) {
+        if let Some(entry) = self.cached(robots_url).await {
             return entry;
         }
 
@@ -433,8 +418,9 @@ impl RobotsCache {
             }
             Ok(response) => {
                 let text = response.text;
-                std::fs::create_dir_all(&self.state_dir).ok();
-                std::fs::write(self.cache_path(robots_url), &text).ok();
+                if let Err(ex) = db::robots_store(&self.db, robots_url, &text).await {
+                    warn!("Could not cache the robots.txt for {robots_url}: {ex}");
+                }
                 RobotsEntry::Text(text)
             }
             Err(_) => RobotsEntry::Verdict(true),
@@ -474,38 +460,18 @@ impl RobotsCache {
         }
     }
 
-    /// Delete cached robots.txt files old enough to be worth re-fetching.
-    pub fn discard_stale_files(&self, max_age: time::Duration) -> usize {
+    /// Delete cached robots.txt entries old enough to be worth re-fetching.
+    pub async fn discard_stale(&self, max_age: time::Duration) -> usize {
         if !self.enabled {
             return 0;
         }
-        let Ok(entries) = std::fs::read_dir(&self.state_dir) else {
-            return 0;
-        };
-
-        let cutoff = timeutil::now() - max_age;
-        let mut discarded = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if name.starts_with(ROBOTS_CACHE_PREFIX) && path.is_file() {
-                let Ok(metadata) = entry.metadata() else {
-                    continue;
-                };
-                let Ok(modified) = metadata.modified() else {
-                    continue;
-                };
-                let modified = OffsetDateTime::from(modified);
-                if modified < cutoff {
-                    debug!("Removing cached robots.txt file {}", path.display());
-                    std::fs::remove_file(&path).ok();
-                    discarded += 1;
-                }
+        match db::robots_discard_stale(&self.db, max_age).await {
+            Ok(discarded) => discarded as usize,
+            Err(ex) => {
+                warn!("Could not discard stale robots.txt cache entries: {ex}");
+                0
             }
         }
-        discarded
     }
 }
 
@@ -593,30 +559,6 @@ fn decode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn xxh128_matches_pythons_hexdigest() {
-        // Ground truth from python-xxhash: xxhash.xxh128(data).hexdigest(),
-        // which the Python original uses for its robots.txt cache filenames.
-        // (xxhash.xxh128 is xxh3_128 under another name.)
-        let hundred = "a".repeat(100);
-        let urls = "https://example.com/robots.txt\n".repeat(4);
-        let thousand = "x".repeat(1024);
-        let vectors: &[(&str, &str)] = &[
-            ("", "99aa06d3014798d86001c324468d497f"),
-            ("abc", "06b05ab6733a618578af5f94892f3950"),
-            (
-                "https://mastodon.social/robots.txt",
-                "3b90ad97973ad4c93c3a346a52b68940",
-            ),
-            (hundred.as_str(), "7d09cdccbc6bead248fb02115fe96a8a"),
-            (urls.as_str(), "4053371a0ffe8cb3e5ae10a1aded53f8"),
-            (thousand.as_str(), "445dcf97d7880d62fc56a7ce85b3164a"),
-        ];
-        for (input, expected) in vectors {
-            assert_eq!(&xxh128_hex(input), expected, "input of {} bytes", input.len());
-        }
-    }
 
     #[test]
     fn callback_url_replaces_and_adds_params() {

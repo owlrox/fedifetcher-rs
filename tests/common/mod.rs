@@ -30,6 +30,11 @@ pub fn test_config(dir: &Path, server: &str) -> Config {
     }
 }
 
+/// Open the database in the config's state directory, creating the schema.
+pub async fn test_db(config: &Config) -> sqlx::SqlitePool {
+    fedifetcher::db::open(config).await.unwrap()
+}
+
 /// Captures tracing output, for tests that assert on what gets logged.
 ///
 /// One subscriber is installed globally per test binary; a capturing test

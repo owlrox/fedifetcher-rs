@@ -1,7 +1,7 @@
 //! The command line: run once (the default), or serve the web UI.
 //!
 //! The flags mirror the Python original's argparse setup: every option takes
-//! a value spelled the same way in the config file and the `ff_*` environment,
+//! a value spelled the same way in the database and the `ff_*` environment,
 //! and `--access-token` may be given several times.
 
 use std::process::ExitCode;
@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use serde_json::Value;
 
-use fedifetcher::config::{RawValues, build_config, build_config_lenient, read_config_file, read_environ};
-use fedifetcher::{logging, run, web};
+use fedifetcher::config::{RawValues, build_config, build_config_lenient, read_environ};
+use fedifetcher::{db, logging, run, web};
 
 #[derive(Parser)]
 #[command(
@@ -18,8 +18,9 @@ use fedifetcher::{logging, run, web};
     version,
     about = "Pull missing posts and profiles into your Mastodon instance",
     long_about = "Pull missing posts and profiles into your Mastodon instance.\n\n\
-        With no subcommand, runs once. Configuration comes from a file (-c), the \
-        ff_* environment variables, and the command line, in increasing order of precedence."
+        With no subcommand, runs once. Configuration lives in the database (edited \
+        through the web UI's config page); the ff_* environment variables and the \
+        command line override the stored configuration, in increasing order of precedence."
 )]
 struct Cli {
     #[command(flatten)]
@@ -51,13 +52,9 @@ enum Command {
 
 /// Every configuration option as a command line flag. Values stay as text
 /// here and are coerced by `build_config`, so the command line, the
-/// environment and the config file are all read the same way.
+/// environment and the database are all read the same way.
 #[derive(Args, Clone, Default)]
 struct ConfigArgs {
-    /// Optionally provide a path to a JSON (or TOML) file containing configuration options. If not provided, options must be supplied using command line flags.
-    #[arg(short = 'c', long = "config")]
-    config: Option<String>,
-
     /// Required: The name of your server (e.g. `mstdn.thms.uk`)
     #[arg(long = "server")]
     server: Option<String>,
@@ -193,64 +190,59 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     // a subcommand's flags win over the top level's, as later sources do
-    let (config_file, cli_values, mode) = match cli.command {
+    let (cli_values, mode) = match cli.command {
         Some(Command::Run { config }) => {
-            let (file, raw) = args_to_raw(&config);
-            let top = args_to_raw(&cli.config).1;
-            (file.or(cli.config.config), merge(top, raw), Mode::Run)
+            let raw = args_to_raw(&config);
+            let top = args_to_raw(&cli.config);
+            (merge(top, raw), Mode::Run)
         }
         Some(Command::Serve {
             config,
             bind,
             port,
         }) => {
-            let (file, raw) = args_to_raw(&config);
-            let top = args_to_raw(&cli.config).1;
-            (
-                file.or(cli.config.config),
-                merge(top, raw),
-                Mode::Serve { bind, port },
-            )
+            let raw = args_to_raw(&config);
+            let top = args_to_raw(&cli.config);
+            (merge(top, raw), Mode::Serve { bind, port })
         }
         None => {
-            let (file, raw) = args_to_raw(&cli.config);
-            (file, raw, Mode::Run)
+            let raw = args_to_raw(&cli.config);
+            (raw, Mode::Run)
         }
     };
 
-    // Serving reads and writes one config file: the one named with -c, or
-    // config.toml in the working directory, which the config page creates.
-    let config_file = match (config_file, &mode) {
-        (Some(path), _) => Some(path),
-        (None, Mode::Serve { .. }) => Some("config.toml".to_string()),
-        (None, Mode::Run) => None,
+    let environ = read_environ(&std::env::vars().collect::<Vec<_>>());
+
+    // The database lives in the state directory, so bootstrap a config from
+    // the environment and the command line to find it.
+    let bootstrap =
+        match build_config_lenient(RawValues::new(), environ.clone(), cli_values.clone()) {
+            Ok(config) => config,
+            Err(ex) => return config_error(ex),
+        };
+    let db = match db::open(&bootstrap).await {
+        Ok(db) => db,
+        Err(ex) => {
+            eprintln!("CRITICAL:FediFetcher:{ex}");
+            return ExitCode::from(1);
+        }
     };
 
-    let file_values = match &config_file {
-        Some(path) => match read_config_file(path) {
-            Ok(values) => values,
-            Err(ex) => {
-                // The web UI can start without a config file and create it
-                // from the config page; a run cannot.
-                if matches!(mode, Mode::Serve { .. }) && !std::path::Path::new(path).exists() {
-                    eprintln!(
-                        "WARNING:FediFetcher:Config file {path} doesn't exist yet, starting with defaults"
-                    );
-                    RawValues::new()
-                } else {
-                    return config_error(ex);
-                }
-            }
-        },
-        None => RawValues::new(),
+    // The database holds the configuration; the web UI's config page edits it
+    // there.
+    let stored = match db::load_config(&db).await {
+        Ok(values) => values,
+        Err(ex) => {
+            eprintln!("CRITICAL:FediFetcher:{ex}");
+            return ExitCode::from(1);
+        }
     };
-    let environ = read_environ(&std::env::vars().collect::<Vec<_>>());
 
     // Serving only needs a config the page can edit; running needs a server
     // and an access token.
     let config = match &mode {
-        Mode::Run => build_config(file_values, environ, cli_values),
-        Mode::Serve { .. } => build_config_lenient(file_values, environ, cli_values),
+        Mode::Run => build_config(stored, environ, cli_values),
+        Mode::Serve { .. } => build_config_lenient(stored, environ, cli_values),
     };
     let config = match config {
         Ok(config) => config,
@@ -261,15 +253,12 @@ async fn main() -> ExitCode {
         return config_error(ex);
     }
 
-    // The database in the state directory: every log line is written to it,
-    // and the web UI reads it for the logs page and the run history.
-    let db = match logging::setup_log_db(&config).await {
-        Ok(db) => db,
-        Err(ex) => {
-            eprintln!("CRITICAL:FediFetcher:{ex}");
-            return ExitCode::from(1);
-        }
-    };
+    // Every log line is written to the database, which the web UI reads for
+    // the logs page and the run history.
+    if let Err(ex) = logging::setup_log_db(db.clone()).await {
+        eprintln!("CRITICAL:FediFetcher:{ex}");
+        return ExitCode::from(1);
+    }
 
     match mode {
         Mode::Run => {
@@ -282,8 +271,7 @@ async fn main() -> ExitCode {
             }
         }
         Mode::Serve { bind, port } => {
-            let config_file = config_file.expect("serve mode always has a config file");
-            match web::serve(config, &config_file, &bind, port, db).await {
+            match web::serve(config, &bind, port, db).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(ex) => {
                     eprintln!("ERROR:FediFetcher:{ex}");
@@ -301,7 +289,7 @@ fn config_error(ex: fedifetcher::error::ConfigError) -> ExitCode {
 }
 
 /// The raw values of one set of command line flags: only what was given.
-fn args_to_raw(args: &ConfigArgs) -> (Option<String>, RawValues) {
+fn args_to_raw(args: &ConfigArgs) -> RawValues {
     let mut raw = RawValues::new();
     let mut put = |key: &str, value: &Option<String>| {
         if let Some(value) = value {
@@ -349,7 +337,7 @@ fn args_to_raw(args: &ConfigArgs) -> (Option<String>, RawValues) {
             ),
         );
     }
-    (args.config.clone(), raw)
+    raw
 }
 
 /// `over`'s values win, key by key.

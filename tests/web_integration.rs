@@ -14,19 +14,20 @@ const TOKEN: &str = "smoke-secret-token-123";
 async fn spawn_ui(dir: &std::path::Path) -> String {
     let mut config = common::test_config(dir, "example.social");
     config.access_tokens = vec![TOKEN.to_string()];
-    spawn_ui_with(config, dir.join("config.toml")).await
+    spawn_ui_with(config).await.0
 }
 
-/// Start the web UI with the given config and config file.
-async fn spawn_ui_with(config: fedifetcher::config::Config, config_file: std::path::PathBuf) -> String {
+/// Start the web UI with the given config: its base URL, and the database
+/// the UI reads and writes.
+async fn spawn_ui_with(config: fedifetcher::config::Config) -> (String, sqlx::SqlitePool) {
     let db = fedifetcher::db::open(&config).await.unwrap();
-    let app = web::app(config, config_file, db);
+    let app = web::app(config, db.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.ok();
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), db)
 }
 
 /// A client that does not follow redirects, so 303s can be seen.
@@ -76,9 +77,9 @@ async fn post_debug(base: &str, form: &str) -> (u16, String) {
     (status, body)
 }
 
-/// Read the saved config file back into a Config.
-fn saved_config(path: &std::path::Path) -> fedifetcher::config::Config {
-    let raw = fedifetcher::config::read_config_file(path.to_str().unwrap()).unwrap();
+/// Read the saved configuration back from the database into a Config.
+async fn saved_config(pool: &sqlx::SqlitePool) -> fedifetcher::config::Config {
+    let raw = fedifetcher::db::load_config(pool).await.unwrap();
     fedifetcher::config::build_config(
         raw,
         fedifetcher::config::RawValues::new(),
@@ -388,9 +389,17 @@ async fn posting_clear_log_empties_the_database() {
     assert!(body.contains("No log entries yet."));
 }
 
-/// Write a seen_hosts state file with the given entries, as a run would.
-fn seed_hosts(dir: &std::path::Path, hosts: serde_json::Value) {
-    std::fs::write(dir.join("seen_hosts"), hosts.to_string()).unwrap();
+/// Seed the seen_hosts table with the given entries, as a run would.
+async fn seed_hosts(dir: &std::path::Path, hosts: serde_json::Value) {
+    let config = common::test_config(dir, "example.social");
+    let pool = fedifetcher::db::open(&config).await.unwrap();
+    let mut state = fedifetcher::store::State::default();
+    for (host, info) in hosts.as_object().unwrap() {
+        state.seen_hosts.add(host, info.clone());
+    }
+    fedifetcher::db::save_state(&pool, &state, fedifetcher::store::MAX_ENTRIES)
+        .await
+        .unwrap();
 }
 
 /// A seen_hosts entry that survives loading: the PeerTube marker expire()
@@ -425,7 +434,8 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
             "beta.example": host_entry("Akkoma", "3.13.0", &["mastodon"], 1),
             "gamma.example": host_entry("Pleroma", "4.1.0", &[], 2),
         }),
-    );
+    )
+    .await;
     let base = spawn_ui(&dir).await;
 
     let position = |body: &str, host: &str| body.find(host).unwrap();
@@ -536,7 +546,8 @@ async fn the_data_page_drills_into_the_databases_tables() {
         serde_json::json!({
             "alpha.example": host_entry("Mastodon", "4.2.0", &["mastodon"], 3),
         }),
-    );
+    )
+    .await;
     seed_db(&dir).await;
     let base = spawn_ui(&dir).await;
 
@@ -636,7 +647,7 @@ async fn the_stop_button_stops_a_running_run() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.on_start = Some(format!("{}/start", server.base_url()));
-    let base = spawn_ui_with(config, dir.join("config.toml")).await;
+    let (base, _) = spawn_ui_with(config).await;
 
     let resp = client().post(format!("{base}/run")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 303);
@@ -675,12 +686,11 @@ async fn the_stop_button_stops_a_running_run() {
 }
 
 #[tokio::test]
-async fn saving_the_config_page_writes_the_toml_file() {
+async fn saving_the_config_page_writes_the_database() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "");
     config.access_tokens = Vec::new();
-    let config_file = dir.join("config.toml");
-    let base = spawn_ui_with(config, config_file.clone()).await;
+    let (base, pool) = spawn_ui_with(config).await;
 
     let (status, location, _) = post_config(
         &base,
@@ -690,7 +700,7 @@ async fn saving_the_config_page_writes_the_toml_file() {
     assert_eq!(status, 303, "the POST must redirect");
     assert_eq!(location.as_deref(), Some("/config"));
 
-    let saved = saved_config(&config_file);
+    let saved = saved_config(&pool).await;
     assert_eq!(saved.server, "example.social");
     assert_eq!(saved.access_tokens, vec![TOKEN.to_string()]);
     assert_eq!(saved.max_followers, 5);
@@ -715,27 +725,30 @@ async fn removing_a_token_via_the_config_page() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.access_tokens = vec!["first-token-aaaa".to_string(), "second-token-bbbb".to_string()];
-    let config_file = dir.join("config.toml");
-    let base = spawn_ui_with(config, config_file.clone()).await;
+    let (base, pool) = spawn_ui_with(config).await;
 
     let (status, _, _) = post_config(&base, "remove_access_token=0").await;
     assert_eq!(status, 303);
 
-    let saved = saved_config(&config_file);
+    let saved = saved_config(&pool).await;
     assert_eq!(saved.access_tokens, vec!["second-token-bbbb".to_string()]);
 }
 
 #[tokio::test]
 async fn invalid_values_are_rejected_and_not_saved() {
     let dir = common::tmp_dir();
-    let config_file = dir.join("config.toml");
-    let base = spawn_ui(&dir).await;
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let (base, pool) = spawn_ui_with(config).await;
 
     let (status, _, body) = post_config(&base, "http_timeout=soon").await;
     assert_eq!(status, 400);
     assert!(body.contains("http_timeout"), "the error names the option");
 
-    assert!(!config_file.exists(), "a failed save must not write the file");
+    assert!(
+        fedifetcher::db::load_config(&pool).await.unwrap().is_empty(),
+        "a failed save must not write the config"
+    );
     let (_, body) = get(&format!("{base}/config")).await;
     assert!(!body.contains("soon"), "the config must be unchanged");
 }
@@ -761,7 +774,7 @@ async fn debug_actions_need_a_server_configured() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "");
     config.access_tokens = Vec::new();
-    let base = spawn_ui_with(config, dir.join("config.toml")).await;
+    let (base, _) = spawn_ui_with(config).await;
 
     let (status, body) = post_debug(&base, "action=connect").await;
     assert_eq!(status, 200);
@@ -774,7 +787,7 @@ async fn debug_actions_need_a_token_configured() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.access_tokens = Vec::new();
-    let base = spawn_ui_with(config, dir.join("config.toml")).await;
+    let (base, _) = spawn_ui_with(config).await;
 
     let (status, body) = post_debug(&base, "action=connect").await;
     assert_eq!(status, 200);

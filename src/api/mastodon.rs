@@ -832,8 +832,8 @@ mod tests {
         assert!(to_user(&json!({"acct": "a"})).is_none());
     }
 
-    #[test]
-    fn post_id_from_reads_the_mastodon_shapes() {
+    #[tokio::test]
+    async fn post_id_from_reads_the_mastodon_shapes() {
         let api = MastodonApi::new("example.com", dummy_http());
         assert_eq!(
             api.username_from("https://example.com/@alice"),
@@ -874,10 +874,13 @@ mod tests {
 
     fn dummy_http() -> HttpClient {
         use crate::config::Config;
-        HttpClient::new(Config {
-            server: "home.example".to_string(),
-            access_tokens: vec!["t".to_string()],
-            ..Default::default()
-        })
+        HttpClient::new(
+            Config {
+                server: "home.example".to_string(),
+                access_tokens: vec!["t".to_string()],
+                ..Default::default()
+            },
+            crate::db::memory_pool(),
+        )
     }
 }

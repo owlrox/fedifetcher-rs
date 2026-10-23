@@ -83,14 +83,13 @@ pub fn setup_logging(config: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Open the log database and start the task that writes to it. Every line
-/// the DbLayer sees is sent to that task, the only writer, so lines reach
-/// the database in order. Returns the pool, for the web UI to query.
-pub async fn setup_log_db(config: &Config) -> crate::error::Result<SqlitePool> {
-    let pool = db::open(config).await?;
+/// Start the task that writes log lines to the database. Every line the
+/// DbLayer sees is sent to that task, the only writer, so lines reach the
+/// database in order.
+pub async fn setup_log_db(pool: SqlitePool) -> crate::error::Result<()> {
     let (tx, mut rx) = unbounded_channel::<LogRow>();
     *LOG_TX.lock().unwrap() = Some(tx);
-    let writer_pool = pool.clone();
+    let writer_pool = pool;
     let handle = tokio::spawn(async move {
         let mut received = 0i64;
         while let Some(row) = rx.recv().await {
@@ -106,7 +105,7 @@ pub async fn setup_log_db(config: &Config) -> crate::error::Result<SqlitePool> {
         }
     });
     *LOG_WRITER.lock().unwrap() = Some(handle);
-    Ok(pool)
+    Ok(())
 }
 
 /// Stop the log database's writer, waiting for the lines already received

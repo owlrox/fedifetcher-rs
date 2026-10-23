@@ -56,7 +56,7 @@ async fn a_private_post_is_recorded_and_never_touched() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "home.example");
     let db = db::open(&config).await.unwrap();
-    let http = HttpClient::new(config);
+    let http = HttpClient::new(config, db.clone());
     let mut state = State::default();
 
     let toot = post("10", false);
@@ -84,7 +84,7 @@ async fn a_post_marked_private_is_skipped_on_later_runs() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "home.example");
     let db = db::open(&config).await.unwrap();
-    let http = HttpClient::new(config);
+    let http = HttpClient::new(config, db.clone());
     let mut state = State::default();
 
     let toot = post("10", true);
@@ -113,7 +113,7 @@ async fn a_public_post_is_still_resolved() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "home.example");
     let db = db::open(&config).await.unwrap();
-    let http = HttpClient::new(config);
+    let http = HttpClient::new(config, db.clone());
     let mut state = State::default();
 
     let toot = post("10", true);
@@ -137,7 +137,7 @@ async fn the_summary_line_says_why_nothing_was_found() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "home.example");
     let db = db::open(&config).await.unwrap();
-    let http = HttpClient::new(config);
+    let http = HttpClient::new(config, db.clone());
     let mut state = State::default();
 
     let logs = common::LogCapture::new();

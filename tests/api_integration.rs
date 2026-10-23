@@ -26,11 +26,17 @@ fn server_info(software: &str) -> ServerInfo {
 }
 
 fn http(dir: &std::path::Path) -> HttpClient {
-    HttpClient::new(common::test_config(dir, "example.social"))
+    // these tests need no network, so the database is never queried; a lazy
+    // in-memory pool stands in for the real one
+    let config = common::test_config(dir, "example.social");
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_lazy("sqlite::memory:")
+        .unwrap();
+    HttpClient::new(config, db)
 }
 
-#[test]
-fn a_client_is_chosen_by_what_the_server_speaks() {
+#[tokio::test]
+async fn a_client_is_chosen_by_what_the_server_speaks() {
     let dir = common::tmp_dir();
     let http = http(&dir);
     assert!(matches!(
@@ -51,15 +57,15 @@ fn a_client_is_chosen_by_what_the_server_speaks() {
     ));
 }
 
-#[test]
-fn a_server_we_cannot_talk_to_gets_no_client() {
+#[tokio::test]
+async fn a_server_we_cannot_talk_to_gets_no_client() {
     let dir = common::tmp_dir();
     let http = http(&dir);
     assert!(client_for(&server_info("something-new"), &http).is_none());
 }
 
-#[test]
-fn mastodon_wins_when_a_server_claims_more_than_one_api() {
+#[tokio::test]
+async fn mastodon_wins_when_a_server_claims_more_than_one_api() {
     let dir = common::tmp_dir();
     let http = http(&dir);
     let info = ServerInfo {

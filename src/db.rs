@@ -1,16 +1,20 @@
-//! The SQLite database in the state directory: the log lines, the web UI's
-//! run history, and what earlier runs learned — the posts found private and
-//! the accounts found opted out. The text files in the state directory stay
-//! the state of record for what FediFetcher has seen; this is the record of
-//! what it did and learned, in one file (`fedifetcher.db`) that the web UI
-//! can query and later runs consult.
+//! The SQLite database in the state directory: the configuration, the log
+//! lines, the web UI's run history, what FediFetcher remembers between runs
+//! (the posts and accounts it has seen, and the hosts it has learned
+//! about), and what earlier runs learned — the posts found private and the
+//! accounts found opted out. One file (`fedifetcher.db`) that the web UI can
+//! query and later runs consult.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
+use serde_json::Value;
 
-use crate::config::Config;
+use crate::config::{Config, RawValues};
 use crate::error::{Error, Result};
+use crate::state::TimestampedSet;
+use crate::store::{RepliedToot, State};
 use crate::timeutil;
+use crate::urls::PostRef;
 
 /// One log line, in the pieces the web UI's /logs page needs to render it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,7 +108,121 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
     .execute(&pool)
     .await
     .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS seen_urls (
+            uri TEXT PRIMARY KEY,
+            first_seen TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS known_followings (
+            acct TEXT PRIMARY KEY,
+            first_seen TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS recently_checked_users (
+            acct TEXT PRIMARY KEY,
+            first_seen TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS seen_hosts (
+            host TEXT PRIMARY KEY,
+            info TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS context_cache (
+            uri TEXT PRIMARY KEY,
+            last_seen TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS replied_toots (
+            url TEXT PRIMARY KEY,
+            remote_url TEXT,
+            server TEXT,
+            post_id TEXT
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS robots_cache (
+            url TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            fetched_at TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(db_error)?;
     Ok(pool)
+}
+
+/// The stored configuration as raw values: the database's whole `config`
+/// table. An empty table reads as an empty set.
+pub async fn load_config(pool: &SqlitePool) -> Result<RawValues> {
+    let rows = sqlx::query("SELECT key, value FROM config ORDER BY rowid")
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
+    let mut values = RawValues::new();
+    for row in rows {
+        let key: String = row.get("key");
+        let text: String = row.get("value");
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|ex| Error(format!("Cannot read the stored option {key}: {ex}")))?;
+        values.insert(key, value);
+    }
+    Ok(values)
+}
+
+/// Replace the stored configuration: options absent from `values` are
+/// cleared, so an unset option stays unset when the config is read back.
+pub async fn save_config(pool: &SqlitePool, values: &RawValues) -> Result<()> {
+    let mut tx = pool.begin().await.map_err(db_error)?;
+    sqlx::query("DELETE FROM config")
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    for (key, value) in values {
+        sqlx::query("INSERT INTO config (key, value) VALUES (?, ?)")
+            .bind(key)
+            .bind(value.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+    }
+    tx.commit().await.map_err(db_error)?;
+    Ok(())
 }
 
 /// Add one log line.
@@ -425,6 +543,234 @@ pub async fn record_known_context_posts(
         previous.push(last_seen);
     }
     Ok(previous)
+}
+
+/// The whole remembered state, read back from the database. Expiry and the
+/// derived collections are applied by the caller (`StateStore::load`).
+pub async fn load_state(pool: &SqlitePool) -> Result<State> {
+    let mut state = State::default();
+
+    state.seen_urls = load_timestamped_set(pool, "seen_urls", "uri").await?;
+    state.known_followings = load_timestamped_set(pool, "known_followings", "acct").await?;
+    state.recently_checked_users =
+        load_timestamped_set(pool, "recently_checked_users", "acct").await?;
+
+    let rows = sqlx::query("SELECT host, info FROM seen_hosts ORDER BY rowid")
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
+    for row in rows {
+        let host: String = row.get("host");
+        let info: String = row.get("info");
+        // an entry that does not parse is skipped, as a malformed state file
+        // line was
+        if let Ok(value) = serde_json::from_str::<Value>(&info) {
+            state.seen_hosts.add(&host, value);
+        }
+    }
+
+    let rows = sqlx::query("SELECT uri, last_seen, created_at FROM context_cache ORDER BY rowid")
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
+    for row in rows {
+        let uri: String = row.get("uri");
+        let last_seen = timeutil::parse(&row.get::<String, _>("last_seen"));
+        let created_at = timeutil::parse(&row.get::<String, _>("created_at"));
+        if let (Some(last_seen), Some(created_at)) = (last_seen, created_at) {
+            state.recently_checked_context.record(&uri, last_seen, created_at);
+        }
+    }
+
+    let rows = sqlx::query("SELECT url, remote_url, server, post_id FROM replied_toots ORDER BY rowid")
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
+    for row in rows {
+        let url: String = row.get("url");
+        let replied = match (
+            row.get::<Option<String>, _>("remote_url"),
+            row.get::<Option<String>, _>("server"),
+            row.get::<Option<String>, _>("post_id"),
+        ) {
+            (Some(remote_url), Some(server), Some(post_id)) => {
+                Some(RepliedToot(remote_url, PostRef::new(server, post_id)))
+            }
+            // all-NULL columns remember a lookup that found nothing
+            _ => None,
+        };
+        state.replied_toot_server_ids.insert(url, replied);
+    }
+
+    Ok(state)
+}
+
+/// Write the whole remembered state back, replacing what was there. The
+/// append-only collections keep only their newest `max_entries` items.
+pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) -> Result<()> {
+    let mut tx = pool.begin().await.map_err(db_error)?;
+
+    save_timestamped_set(&mut tx, "seen_urls", "uri", &state.seen_urls, max_entries).await?;
+    save_timestamped_set(
+        &mut tx,
+        "known_followings",
+        "acct",
+        &state.known_followings,
+        max_entries,
+    )
+    .await?;
+    save_timestamped_set(
+        &mut tx,
+        "recently_checked_users",
+        "acct",
+        &state.recently_checked_users,
+        max_entries,
+    )
+    .await?;
+
+    sqlx::query("DELETE FROM seen_hosts")
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    for (host, info) in state.seen_hosts.iter() {
+        sqlx::query("INSERT INTO seen_hosts (host, info) VALUES (?, ?)")
+            .bind(host)
+            .bind(info.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+    }
+
+    sqlx::query("DELETE FROM context_cache")
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    for (uri, entry) in state.recently_checked_context.entries() {
+        sqlx::query("INSERT INTO context_cache (uri, last_seen, created_at) VALUES (?, ?, ?)")
+            .bind(uri)
+            .bind(timeutil::fmt_state_ts(entry.last_seen))
+            .bind(timeutil::fmt_state_ts(entry.created_at))
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+    }
+
+    sqlx::query("DELETE FROM replied_toots")
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    let replied: Vec<_> = state.replied_toot_server_ids.iter().collect();
+    let start = replied.len().saturating_sub(max_entries);
+    for (url, toot) in &replied[start..] {
+        let (remote_url, server, post_id) = match toot {
+            Some(RepliedToot(remote_url, post_ref)) => (
+                Some(remote_url.clone()),
+                Some(post_ref.0.clone()),
+                Some(post_ref.1.clone()),
+            ),
+            None => (None, None, None),
+        };
+        sqlx::query("INSERT INTO replied_toots (url, remote_url, server, post_id) VALUES (?, ?, ?, ?)")
+            .bind(*url)
+            .bind(remote_url)
+            .bind(server)
+            .bind(post_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+    }
+
+    tx.commit().await.map_err(db_error)?;
+    Ok(())
+}
+
+/// One timestamped-set table, in insertion order. Timestamps are the
+/// Python `str(datetime)` shape, the way the state files wrote them.
+async fn load_timestamped_set(
+    pool: &SqlitePool,
+    table: &str,
+    key_column: &str,
+) -> Result<TimestampedSet> {
+    let sql = format!("SELECT {key_column}, first_seen FROM {table} ORDER BY rowid");
+    let rows = sqlx::query(&sql).fetch_all(pool).await.map_err(db_error)?;
+    let mut set = TimestampedSet::new();
+    for row in rows {
+        let item: String = row.get(key_column);
+        let first_seen: String = row.get("first_seen");
+        set.add(&item, timeutil::parse(&first_seen));
+    }
+    Ok(set)
+}
+
+/// Replace one timestamped-set table with the set's newest `max_entries`
+/// items, in the set's order.
+async fn save_timestamped_set(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &str,
+    key_column: &str,
+    set: &TimestampedSet,
+    max_entries: usize,
+) -> Result<()> {
+    let delete = format!("DELETE FROM {table}");
+    sqlx::query(&delete).execute(&mut **tx).await.map_err(db_error)?;
+    let entries: Vec<_> = set.entries().collect();
+    let start = entries.len().saturating_sub(max_entries);
+    let insert = format!("INSERT INTO {table} ({key_column}, first_seen) VALUES (?, ?)");
+    for (item, when) in &entries[start..] {
+        sqlx::query(&insert)
+            .bind(*item)
+            .bind(timeutil::fmt_state_ts(*when))
+            .execute(&mut **tx)
+            .await
+            .map_err(db_error)?;
+    }
+    Ok(())
+}
+
+/// A cached robots.txt, by the URL it was fetched from.
+pub async fn robots_cached(pool: &SqlitePool, url: &str) -> Result<Option<String>> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT text FROM robots_cache WHERE url = ?")
+        .bind(url)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(row.map(|(text,)| text))
+}
+
+/// Remember a fetched robots.txt, replacing any earlier copy.
+pub async fn robots_store(pool: &SqlitePool, url: &str, text: &str) -> Result<()> {
+    let fetched_at = timeutil::fmt_state_ts(timeutil::now());
+    sqlx::query(
+        "INSERT INTO robots_cache (url, text, fetched_at) VALUES (?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET text = excluded.text, fetched_at = excluded.fetched_at",
+    )
+    .bind(url)
+    .bind(text)
+    .bind(&fetched_at)
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
+    Ok(())
+}
+
+/// Delete cached robots.txt entries older than `max_age`; how many went.
+pub async fn robots_discard_stale(pool: &SqlitePool, max_age: time::Duration) -> Result<u64> {
+    let cutoff = timeutil::fmt_state_ts(timeutil::now() - max_age);
+    let result = sqlx::query("DELETE FROM robots_cache WHERE fetched_at < ?")
+        .bind(&cutoff)
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(result.rows_affected())
+}
+
+/// A pool that connects on first use to a throwaway in-memory database, for
+/// tests that build clients but never query them.
+#[cfg(test)]
+pub fn memory_pool() -> SqlitePool {
+    SqlitePoolOptions::new()
+        .connect_lazy("sqlite::memory:")
+        .unwrap()
 }
 
 fn db_error(ex: sqlx::Error) -> Error {
@@ -890,5 +1236,138 @@ mod tests {
         assert!(table_count(&pool, "").await.is_err());
         // and the table survives
         assert!(table_count(&pool, "logs").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn config_round_trips_through_the_database() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        assert!(load_config(&pool).await.unwrap().is_empty());
+
+        let mut values = RawValues::new();
+        values.insert("server".to_string(), Value::String("example.social".to_string()));
+        values.insert(
+            "access_tokens".to_string(),
+            Value::Array(vec![Value::String("tok".to_string())]),
+        );
+        values.insert("max_followers".to_string(), Value::from(5));
+        values.insert("from_lists".to_string(), Value::Bool(true));
+        save_config(&pool, &values).await.unwrap();
+        assert_eq!(load_config(&pool).await.unwrap(), values);
+
+        // saving again replaces: options absent from the new set are cleared
+        let mut cleared = RawValues::new();
+        cleared.insert("server".to_string(), Value::String("other.example".to_string()));
+        save_config(&pool, &cleared).await.unwrap();
+        assert_eq!(load_config(&pool).await.unwrap(), cleared);
+    }
+
+    #[tokio::test]
+    async fn state_round_trips_through_the_database() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let mut state = State::default();
+        state.seen_urls.add("https://remote.example/@a/1", None);
+        state.known_followings.add("b@remote.example", None);
+        state.recently_checked_users.add("c@remote.example", None);
+        state.seen_hosts.add(
+            "remote.example",
+            serde_json::json!({
+                "software": "mastodon", "version": "4.3",
+                "last_checked": timeutil::fmt_state_ts(timeutil::now()),
+                "mastodonApiSupport": true, "peertubeApiSupport": false,
+            }),
+        );
+        state.recently_checked_context.mark_fetched("uri", timeutil::now());
+        state.replied_toot_server_ids.insert(
+            "https://home.example/@b/2".to_string(),
+            Some(RepliedToot(
+                "https://remote.example/@a/1".to_string(),
+                PostRef::new("remote.example", "1"),
+            )),
+        );
+        state.replied_toot_server_ids.insert("https://home.example/@b/3".to_string(), None);
+        save_state(&pool, &state, 100).await.unwrap();
+
+        let loaded = load_state(&pool).await.unwrap();
+        assert!(loaded.seen_urls.contains("https://remote.example/@a/1"));
+        assert!(loaded.known_followings.contains("b@remote.example"));
+        assert!(loaded.recently_checked_users.contains("c@remote.example"));
+        assert!(loaded.seen_hosts.contains("remote.example"));
+        assert!(loaded.recently_checked_context.contains("uri"));
+        assert_eq!(
+            loaded.replied_toot_server_ids.get("https://home.example/@b/2"),
+            Some(&Some(RepliedToot(
+                "https://remote.example/@a/1".to_string(),
+                PostRef::new("remote.example", "1")
+            )))
+        );
+        assert_eq!(
+            loaded.replied_toot_server_ids.get("https://home.example/@b/3"),
+            Some(&None),
+            "a failed lookup is remembered as a NULL row"
+        );
+        // timestamps survive the round trip
+        assert_eq!(
+            loaded.seen_urls.get("https://remote.example/@a/1"),
+            state.seen_urls.get("https://remote.example/@a/1")
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_state_keeps_only_the_newest_entries() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let mut state = State::default();
+        for n in 0..5 {
+            state.seen_urls.add(&format!("https://remote.example/{n}"), None);
+        }
+        save_state(&pool, &state, 3).await.unwrap();
+
+        let loaded = load_state(&pool).await.unwrap();
+        assert_eq!(loaded.seen_urls.len(), 3);
+        assert!(!loaded.seen_urls.contains("https://remote.example/0"));
+        assert!(!loaded.seen_urls.contains("https://remote.example/1"));
+        assert!(loaded.seen_urls.contains("https://remote.example/4"));
+    }
+
+    #[tokio::test]
+    async fn robots_cache_round_trips_and_discards_stale_entries() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        assert_eq!(robots_cached(&pool, "https://a.example/robots.txt").await.unwrap(), None);
+        robots_store(&pool, "https://a.example/robots.txt", "allow").await.unwrap();
+        robots_store(&pool, "https://b.example/robots.txt", "allow").await.unwrap();
+        assert_eq!(
+            robots_cached(&pool, "https://a.example/robots.txt").await.unwrap(),
+            Some("allow".to_string())
+        );
+
+        // storing again replaces the earlier copy
+        robots_store(&pool, "https://a.example/robots.txt", "deny").await.unwrap();
+        assert_eq!(
+            robots_cached(&pool, "https://a.example/robots.txt").await.unwrap(),
+            Some("deny".to_string())
+        );
+
+        // an entry older than the cutoff is discarded
+        let old = timeutil::fmt_state_ts(timeutil::now() - time::Duration::days(2));
+        sqlx::query("UPDATE robots_cache SET fetched_at = ? WHERE url = ?")
+            .bind(&old)
+            .bind("https://a.example/robots.txt")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(robots_discard_stale(&pool, time::Duration::days(1)).await.unwrap(), 1);
+        assert_eq!(robots_cached(&pool, "https://a.example/robots.txt").await.unwrap(), None);
+        assert_eq!(
+            robots_cached(&pool, "https://b.example/robots.txt").await.unwrap(),
+            Some("allow".to_string()),
+            "a fresh entry is kept"
+        );
     }
 }

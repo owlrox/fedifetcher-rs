@@ -1,4 +1,8 @@
 /target
 
-# Local config holding the real access token — never commit it.
+# The database holds the real access token — never commit it, including its
+# WAL side files. A config file left over from earlier versions is no longer
+# read, but may still hold a token.
+fedifetcher.db*
 /config.toml
+/config.json

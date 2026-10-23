@@ -230,7 +230,7 @@ mod tests {
     fn api() -> PeerTubeApi {
         PeerTubeApi::new(
             "peertube.example",
-            HttpClient::new(crate::config::Config::default()),
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
         )
     }
 
@@ -271,8 +271,8 @@ mod tests {
         assert!(to_post(&json!({"url": "https://peertube.example/w/abc"})).is_none());
     }
 
-    #[test]
-    fn paths_read_names() {
+    #[tokio::test]
+    async fn paths_read_names() {
         let api = api();
         assert_eq!(
             api.username_from("https://peertube.example/accounts/alice"),
@@ -293,8 +293,8 @@ mod tests {
         assert_eq!(api.username_from("https://peertube.example/other"), None);
     }
 
-    #[test]
-    fn post_id_reads_watch_and_w_urls() {
+    #[tokio::test]
+    async fn post_id_reads_watch_and_w_urls() {
         let api = api();
         assert_eq!(
             api.post_id_from("https://peertube.example/videos/watch/abc"),

@@ -6,8 +6,8 @@ mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fedifetcher::http::{HttpClient, xxh128_hex};
-use fedifetcher::{timeutil, VERSION};
+use fedifetcher::http::HttpClient;
+use fedifetcher::{db, timeutil, VERSION};
 use httpmock::prelude::*;
 use httpmock::{Method, Mock};
 
@@ -25,22 +25,25 @@ async fn allow_all_robots(server: &MockServer) -> Mock<'_> {
         .await
 }
 
-#[test]
-fn user_agent_names_the_configured_server() {
+#[tokio::test]
+async fn user_agent_names_the_configured_server() {
     let dir = common::tmp_dir();
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
     assert_eq!(
         client.user_agent(),
         format!("FediFetcher/{VERSION}; +example.social (https://go.thms.uk/ff)")
     );
 }
 
-#[test]
-fn user_agent_can_hide_the_server() {
+#[tokio::test]
+async fn user_agent_can_hide_the_server() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.hide_server_in_user_agent = true;
-    let client = HttpClient::new(config);
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
     assert_eq!(
         client.user_agent(),
         format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")
@@ -51,7 +54,9 @@ fn user_agent_can_hide_the_server() {
 async fn get_sends_our_user_agent() {
     let server = MockServer::start_async().await;
     let dir = common::tmp_dir();
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
     let api = server
         .mock_async(|when, then| {
             when.method(Method::GET)
@@ -75,7 +80,8 @@ async fn a_failed_request_names_the_cause() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.respect_robots_txt = false;
-    let client = HttpClient::new(config);
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     // port 1 on localhost refuses connections: no server and no network
     // needed to produce a transport error
@@ -109,7 +115,9 @@ async fn requests_the_robots_file_forbids_are_refused() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let err = client
         .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
@@ -139,7 +147,8 @@ async fn robots_is_not_consulted_when_disabled_in_the_config() {
         .await;
     let mut config = common::test_config(&dir, "example.social");
     config.respect_robots_txt = false;
-    let client = HttpClient::new(config);
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let resp = client
         .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
@@ -167,7 +176,9 @@ async fn a_client_ignoring_robots_is_not_checked() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social")).ignoring_robots();
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db).ignoring_robots();
 
     let resp = client
         .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
@@ -192,7 +203,8 @@ async fn blocklisted_hosts_are_never_contacted() {
     let netloc = server.base_url().trim_start_matches("http://").to_string();
     let mut config = common::test_config(&dir, "example.social");
     config.instance_blocklist = vec![netloc];
-    let client = HttpClient::new(config);
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let err = client
         .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
@@ -219,7 +231,9 @@ async fn a_host_blocked_by_robots_txt_is_logged_as_such() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
@@ -259,7 +273,8 @@ async fn a_blocklisted_host_is_logged_as_such() {
     let netloc = server.base_url().trim_start_matches("http://").to_string();
     let mut config = common::test_config(&dir, "example.social");
     config.instance_blocklist = vec![netloc.clone()];
-    let client = HttpClient::new(config);
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
@@ -310,7 +325,9 @@ async fn rate_limited_requests_are_retried_after_the_reset() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let resp = client
         .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
@@ -344,7 +361,9 @@ async fn rate_limited_requests_back_off_without_a_reset_header() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let resp = client
         .get(&format!("{}/api", server.base_url()), None, 5, 0.01)
@@ -366,7 +385,9 @@ async fn rate_limiting_gives_up_eventually() {
             then.status(429);
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let err = client
         .get(&format!("{}/api", server.base_url()), None, 2, 0.01)
@@ -392,7 +413,9 @@ async fn robots_is_read_from_the_network_once_then_remembered() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
     let url = format!("{}/api", server.base_url());
 
     client.get(&url, None, 5, 0.5).await.ok().expect("first get");
@@ -403,7 +426,7 @@ async fn robots_is_read_from_the_network_once_then_remembered() {
 }
 
 #[tokio::test]
-async fn robots_is_cached_on_disk_between_clients() {
+async fn robots_is_cached_in_the_database_between_clients() {
     let server = MockServer::start_async().await;
     let dir = common::tmp_dir();
     let robots = allow_all_robots(&server).await;
@@ -415,12 +438,14 @@ async fn robots_is_cached_on_disk_between_clients() {
         .await;
     let url = format!("{}/api", server.base_url());
     let robots_url = format!("{}/robots.txt", server.base_url());
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
 
-    let first = HttpClient::new(common::test_config(&dir, "example.social"));
+    let first = HttpClient::new(config.clone(), db.clone());
     first.get(&url, None, 5, 0.5).await.ok().expect("first client");
     assert_eq!(robots.hits(), 1);
 
-    let second = HttpClient::new(common::test_config(&dir, "example.social"));
+    let second = HttpClient::new(config, db.clone());
     second.get(&url, None, 5, 0.5).await.ok().expect("second client");
     assert_eq!(
         robots.hits(),
@@ -429,11 +454,10 @@ async fn robots_is_cached_on_disk_between_clients() {
     );
     assert_eq!(api.hits(), 2);
 
-    // the cache file is named the way the Python original names it
-    let cache_file = dir.join(format!("robots-{}.txt", xxh128_hex(&robots_url)));
     assert_eq!(
-        std::fs::read_to_string(&cache_file).expect("cache file should exist"),
-        ALLOW_ALL
+        db::robots_cached(&db, &robots_url).await.unwrap(),
+        Some(ALLOW_ALL.to_string()),
+        "the cache row holds the fetched text"
     );
 }
 
@@ -453,7 +477,9 @@ async fn a_refused_robots_file_denies_everything() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let err = client
         .get(&format!("{}/api", server.base_url()), None, 5, 0.5)
@@ -468,7 +494,9 @@ async fn a_refused_robots_file_denies_everything() {
 #[tokio::test]
 async fn an_unreachable_robots_file_allows_everything() {
     let dir = common::tmp_dir();
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     // port 9 (discard) is closed: nothing answers there
     let allowed = client
@@ -481,31 +509,41 @@ async fn an_unreachable_robots_file_allows_everything() {
 }
 
 #[tokio::test]
-async fn stale_robots_files_are_discarded() {
+async fn stale_robots_entries_are_discarded() {
     let dir = common::tmp_dir();
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
-    let robots = client.robots();
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let robots = HttpClient::new(config, db.clone()).robots();
 
-    let stale = robots.cache_path("https://old.example/robots.txt");
-    let fresh = robots.cache_path("https://new.example/robots.txt");
-    std::fs::write(&stale, ALLOW_ALL).unwrap();
-    std::fs::write(&fresh, ALLOW_ALL).unwrap();
-    let unrelated = dir.join("seen_urls");
-    std::fs::write(&unrelated, "").unwrap();
+    db::robots_store(&db, "https://old.example/robots.txt", ALLOW_ALL)
+        .await
+        .unwrap();
+    db::robots_store(&db, "https://new.example/robots.txt", ALLOW_ALL)
+        .await
+        .unwrap();
 
-    let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
-    for path in [&stale, &unrelated] {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .unwrap();
-        file.set_modified(two_days_ago).unwrap();
-    }
+    // age one entry beyond the cache's lifetime
+    let two_days_ago = timeutil::fmt_state_ts(timeutil::now() - time::Duration::days(2));
+    sqlx::query("UPDATE robots_cache SET fetched_at = ? WHERE url = ?")
+        .bind(&two_days_ago)
+        .bind("https://old.example/robots.txt")
+        .execute(&db)
+        .await
+        .unwrap();
 
-    assert_eq!(robots.discard_stale_files(time::Duration::days(1)), 1);
-    assert!(!stale.exists());
-    assert!(fresh.exists());
-    assert!(unrelated.exists(), "unrelated files are left alone");
+    assert_eq!(robots.discard_stale(time::Duration::days(1)).await, 1);
+    assert_eq!(
+        db::robots_cached(&db, "https://old.example/robots.txt")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        db::robots_cached(&db, "https://new.example/robots.txt")
+            .await
+            .unwrap(),
+        Some(ALLOW_ALL.to_string())
+    );
 }
 
 #[tokio::test]
@@ -519,7 +557,9 @@ async fn get_redirect_url_returns_the_url_when_it_does_not_redirect() {
             then.status(200);
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
     let url = format!("{}/objects/1", server.base_url());
 
     assert_eq!(
@@ -540,7 +580,9 @@ async fn get_redirect_url_follows_a_302() {
             then.status(302).header("Location", "/notice/123");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     assert_eq!(
         client
@@ -563,7 +605,9 @@ async fn get_redirect_url_gives_up_on_other_statuses() {
             then.status(500);
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     assert_eq!(
         client
@@ -586,7 +630,8 @@ async fn get_redirect_url_honours_the_blocklist() {
     let netloc = server.base_url().trim_start_matches("http://").to_string();
     let mut config = common::test_config(&dir, "example.social");
     config.instance_blocklist = vec![netloc];
-    let client = HttpClient::new(config);
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     assert_eq!(
         client
@@ -613,7 +658,9 @@ async fn get_redirect_url_honours_robots() {
             then.status(200);
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     assert_eq!(
         client
@@ -643,7 +690,9 @@ async fn authenticated_clients_send_their_token_and_skip_robots() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let resp = client
         .authenticated("secret")
@@ -684,7 +733,9 @@ async fn the_original_client_is_unaffected_by_deriving_one() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     client
         .authenticated("secret")
@@ -716,7 +767,9 @@ async fn post_sends_the_body_as_json_and_the_client_headers() {
             then.status(200).body("{}");
         })
         .await;
-    let client = HttpClient::new(common::test_config(&dir, "example.social"));
+    let config = common::test_config(&dir, "example.social");
+    let db = common::test_db(&config).await;
+    let client = HttpClient::new(config, db);
 
     let resp = client
         .authenticated("secret")

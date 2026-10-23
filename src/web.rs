@@ -1,10 +1,9 @@
 //! A server-rendered web UI: dashboard, run trigger, a data page (the hosts
 //! FediFetcher has seen, and every table in the database), logs, and an
-//! editable config page that writes back to the config file. No JavaScript
+//! editable config page that saves to the database. No JavaScript
 //! anywhere — every page is HTML from leptos SSR, and the only interactivity
 //! is a form POST that redirects back.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
@@ -21,7 +20,7 @@ use time::OffsetDateTime;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::api::mastodon::masked;
-use crate::config::{Config, RawValues, is_known_option, option_description, write_config_file};
+use crate::config::{Config, RawValues, is_known_option, option_description};
 use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::http::HttpClient;
@@ -42,10 +41,8 @@ const TABLE_ROWS_SHOWN: i64 = 500;
 struct AppState {
     /// The effective config; replaced when the config page saves.
     config: Mutex<Config>,
-    /// Where the config page writes; TOML, or JSON when it ends in .json.
-    config_file: PathBuf,
-    /// The database the log lines and run history are written to, and the
-    /// posts found private are recorded in.
+    /// The database everything is stored in: the configuration, the state,
+    /// the log lines, the run history.
     db: SqlitePool,
     ui: Mutex<UiState>,
     /// Held for the duration of a web-triggered run, so two clicks cannot
@@ -65,21 +62,15 @@ enum RunStatus {
     Running { since: OffsetDateTime },
 }
 
-/// Serve the web UI until the process is stopped. The config page writes
-/// back to `config_file`.
-pub async fn serve(
-    config: Config,
-    config_file: &str,
-    bind: &str,
-    port: u16,
-    db: SqlitePool,
-) -> std::io::Result<()> {
-    let app = app(config, PathBuf::from(config_file), db);
+/// Serve the web UI until the process is stopped. The config page saves to
+/// the database.
+pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std::io::Result<()> {
+    let app = app(config, db);
 
     let addr: std::net::SocketAddr = format!("{bind}:{port}")
         .parse()
         .map_err(|ex| std::io::Error::new(std::io::ErrorKind::InvalidInput, ex))?;
-    tracing::info!("FediFetcher v{VERSION} web UI listening on http://{addr} (config: {config_file})");
+    tracing::info!("FediFetcher v{VERSION} web UI listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
 }
@@ -87,10 +78,9 @@ pub async fn serve(
 /// Build the web UI's router: the dashboard, the run trigger, the data page
 /// (hosts and the database's tables), logs, the editable config page, the
 /// debug page, and the health check.
-pub fn app(config: Config, config_file: PathBuf, db: SqlitePool) -> Router {
+pub fn app(config: Config, db: SqlitePool) -> Router {
     let state = Arc::new(AppState {
         config: Mutex::new(config),
-        config_file,
         db,
         ui: Mutex::new(UiState {
             status: RunStatus::Idle,
@@ -121,7 +111,15 @@ async fn dashboard(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
             Vec::new()
         }
     };
-    render(move || view! { <Dashboard state=state history=history /> })
+    let config = state.config.lock().unwrap().clone();
+    let data = match StateStore::new(config).load(&state.db).await {
+        Ok(data) => data,
+        Err(ex) => {
+            tracing::warn!("Could not load the state: {ex}");
+            State::default()
+        }
+    };
+    render(move || view! { <Dashboard state=state history=history data=data /> })
 }
 
 /// Which column of the hosts table the /hosts page sorts by.
@@ -178,7 +176,7 @@ struct TabLink {
     active: bool,
 }
 
-/// What the data page is showing: the hosts from the state files, or one
+/// What the data page is showing: the hosts FediFetcher has seen, or one
 /// table of the database.
 #[derive(Clone)]
 enum TabView {
@@ -205,7 +203,14 @@ async fn data(
     Query(query): Query<DataQuery>,
 ) -> Html<String> {
     tracing::debug!("GET /hosts");
-    let state_data = StateStore::new(state.config.lock().unwrap().clone()).load();
+    let config = state.config.lock().unwrap().clone();
+    let state_data = match StateStore::new(config).load(&state.db).await {
+        Ok(data) => data,
+        Err(ex) => {
+            tracing::warn!("Could not load the state: {ex}");
+            State::default()
+        }
+    };
 
     let tables = match db::list_tables(&state.db).await {
         Ok(tables) => tables,
@@ -350,7 +355,7 @@ async fn config_page(AxumState(state): AxumState<Arc<AppState>>) -> Html<String>
 }
 
 /// Save the config page's form: apply the fields to the effective config,
-/// write it back to the config file, and redirect to the page.
+/// write it back to the database, and redirect to the page.
 ///
 /// The redirect is what makes this work without JavaScript: the POST answers
 /// 303 See Other, and the browser follows it with a GET.
@@ -411,8 +416,7 @@ async fn save_config(
         config.access_tokens = tokens;
     }
 
-    let config_file = state.config_file.to_string_lossy().into_owned();
-    if let Err(ex) = write_config_file(&config_file, &config.to_raw_values()) {
+    if let Err(ex) = db::save_config(&state.db, &config.to_raw_values()).await {
         tracing::warn!("POST /config: not saved: {ex}");
         return Err(save_error(StatusCode::INTERNAL_SERVER_ERROR, &ex.to_string()));
     }
@@ -423,7 +427,7 @@ async fn save_config(
         .filter(|key| before.get(*key) != after.get(*key))
         .cloned()
         .collect();
-    tracing::info!("Configuration saved to {config_file}");
+    tracing::info!("Configuration saved to the database");
     tracing::debug!(
         "POST /config: changed options: {}",
         if changed.is_empty() {
@@ -509,7 +513,7 @@ async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> Debug
     };
     let token = token.clone();
     let base = format!("https://{}", config.server);
-    let http = HttpClient::new(config);
+    let http = HttpClient::new(config, state.db.clone());
     match action.as_str() {
         "connect" => match debug::test_connection(&base, &token, &http).await {
             Ok((instance, account)) => DebugOutcome::Connected { instance, account },
@@ -826,9 +830,8 @@ fn Page(title: String, children: Children) -> impl IntoView {
 }
 
 #[component]
-fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>) -> impl IntoView {
+fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
-    let data = StateStore::new(config.clone()).load();
     let (status_label, status_class, is_running) = {
         let ui = state.ui.lock().unwrap();
         match &ui.status {
@@ -1265,7 +1268,7 @@ fn sort_link(
 #[component]
 fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
-    let config_file = state.config_file.display().to_string();
+    let db_path = config.state_dir.join("fedifetcher.db").display().to_string();
     let optional = |value: &Option<String>| value.clone().unwrap_or_default();
     let mut rows: Vec<AnyView> = Vec::new();
     rows.push(text_row("server", &config.server));
@@ -1308,7 +1311,7 @@ fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
             <section>
                 <h2>"Edit configuration"</h2>
                 <p class="muted">
-                    "Saved to " <code>{config_file}</code>
+                    "Saved to " <code>{db_path}</code>
                     ". Runs use the saved values; log level and format apply on restart."
                 </p>
                 <p class="muted">"Hover a field for what it does."</p>

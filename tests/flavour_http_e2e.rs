@@ -20,8 +20,10 @@ fn host(server: &MockServer) -> String {
     server.base_url().strip_prefix("http://").unwrap().to_string()
 }
 
-fn http(dir: &std::path::Path) -> HttpClient {
-    HttpClient::new(common::test_config(dir, "home.example"))
+async fn http(dir: &std::path::Path) -> HttpClient {
+    let config = common::test_config(dir, "home.example");
+    let db = common::test_db(&config).await;
+    HttpClient::new(config, db)
 }
 
 /// Serve an allow-everything robots.txt, so a test can get on with the part
@@ -41,7 +43,7 @@ async fn the_mastodon_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     allow_all_robots(&server).await;
-    let api = MastodonApi::with_scheme(&host, "http", http(&dir));
+    let api = MastodonApi::with_scheme(&host, "http", http(&dir).await);
 
     server
         .mock_async(|when, then| {
@@ -148,7 +150,7 @@ async fn the_misskey_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     allow_all_robots(&server).await;
-    let api = MisskeyApi::with_scheme(&host, "http", http(&dir));
+    let api = MisskeyApi::with_scheme(&host, "http", http(&dir).await);
 
     server
         .mock_async(|when, then| {
@@ -230,7 +232,7 @@ async fn the_lemmy_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     allow_all_robots(&server).await;
-    let api = LemmyApi::with_scheme(&host, "http", http(&dir));
+    let api = LemmyApi::with_scheme(&host, "http", http(&dir).await);
 
     server
         .mock_async(|when, then| {
@@ -306,7 +308,7 @@ async fn the_peertube_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     allow_all_robots(&server).await;
-    let api = PeerTubeApi::with_scheme(&host, "http", http(&dir));
+    let api = PeerTubeApi::with_scheme(&host, "http", http(&dir).await);
 
     server
         .mock_async(|when, then| {
@@ -364,7 +366,7 @@ async fn the_home_server_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     // the home server client is authenticated, so it ignores robots.txt
-    let home = HomeServer::with_scheme(&host, "http", "secret-token", http(&dir));
+    let home = HomeServer::with_scheme(&host, "http", "secret-token", http(&dir).await);
 
     let status = |id: &str, user: &str, hour: &str| {
         serde_json::json!({

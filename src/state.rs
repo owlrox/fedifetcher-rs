@@ -1,10 +1,11 @@
-//! What FediFetcher remembers between runs.
+//! What FediFetcher remembers between runs, in memory.
 //!
-//! The serialized shapes match the Python original exactly, so a state
-//! directory can be shared between the two implementations.
+//! The database in the state directory is what persists between runs (see
+//! `db::load_state` and `db::save_state`); these are the shapes a run works
+//! with.
 
 use indexmap::IndexMap;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 
 use crate::timeutil;
@@ -21,15 +22,6 @@ pub struct TimestampedSet {
 impl TimestampedSet {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// A set of plain lines, each stamped with the current time.
-    pub fn from_lines(lines: &[String]) -> Self {
-        let mut set = TimestampedSet::new();
-        for line in lines {
-            set.add(line, None);
-        }
-        set
     }
 
     pub fn add(&mut self, item: &str, when: Option<OffsetDateTime>) {
@@ -58,6 +50,11 @@ impl TimestampedSet {
         self.map.keys()
     }
 
+    /// Every item with the time it was first added, in insertion order.
+    pub fn entries(&self) -> impl Iterator<Item = (&String, OffsetDateTime)> {
+        self.map.iter().map(|(item, when)| (item, *when))
+    }
+
     pub fn update<I: IntoIterator<Item = String>>(&mut self, items: I) {
         for item in items {
             self.add(&item, None);
@@ -70,28 +67,6 @@ impl TimestampedSet {
         let before = self.map.len();
         self.map.retain(|_, when| now - *when <= age);
         before - self.map.len()
-    }
-
-    /// `{item: timestamp}`, the shape the Python original writes.
-    pub fn to_json(&self) -> Value {
-        let mut map = Map::new();
-        for (item, when) in &self.map {
-            map.insert(item.clone(), Value::String(timeutil::fmt_state_ts(*when)));
-        }
-        Value::Object(map)
-    }
-
-    pub fn from_json(value: &Value) -> Self {
-        let mut set = TimestampedSet::new();
-        if let Value::Object(map) = value {
-            for (item, when) in map {
-                let Some(when) = when.as_str().and_then(timeutil::parse) else {
-                    continue;
-                };
-                set.add(item, Some(when));
-            }
-        }
-        set
     }
 }
 
@@ -164,24 +139,6 @@ impl ServerCache {
         });
         before - self.map.len()
     }
-
-    pub fn to_json(&self) -> Value {
-        let mut map = Map::new();
-        for (host, info) in &self.map {
-            map.insert(host.clone(), info.clone());
-        }
-        Value::Object(map)
-    }
-
-    pub fn from_json(value: &Value) -> Self {
-        let mut cache = ServerCache::new();
-        if let Value::Object(map) = value {
-            for (host, info) in map {
-                cache.add(host, info.clone());
-            }
-        }
-        cache
-    }
 }
 
 /// When we last fetched the replies to a post, and when the post was made.
@@ -230,10 +187,16 @@ impl ContextCache {
     }
 
     pub fn mark_fetched(&mut self, uri: &str, created_at: OffsetDateTime) {
+        self.record(uri, timeutil::now(), created_at);
+    }
+
+    /// Record a fetch with the times it actually happened — the load path
+    /// knows both timestamps.
+    pub fn record(&mut self, uri: &str, last_seen: OffsetDateTime, created_at: OffsetDateTime) {
         self.entries.insert(
             uri.to_string(),
             ContextEntry {
-                last_seen: timeutil::now(),
+                last_seen,
                 created_at,
             },
         );
@@ -259,45 +222,9 @@ impl ContextCache {
         self.entries.is_empty()
     }
 
-    /// `{uri: {"lastSeen": ..., "created_at": ...}}`, as the Python original
-    /// writes it (note the camelCase key).
-    pub fn to_json(&self) -> Value {
-        let mut map = Map::new();
-        for (uri, entry) in &self.entries {
-            let mut inner = Map::new();
-            inner.insert(
-                "lastSeen".to_string(),
-                Value::String(timeutil::fmt_state_ts(entry.last_seen)),
-            );
-            inner.insert(
-                "created_at".to_string(),
-                Value::String(timeutil::fmt_state_ts(entry.created_at)),
-            );
-            map.insert(uri.clone(), Value::Object(inner));
-        }
-        Value::Object(map)
-    }
-
-    pub fn from_json(value: &Value) -> Self {
-        let mut cache = ContextCache::new();
-        if let Value::Object(map) = value {
-            for (uri, entry) in map {
-                let (Some(last_seen), Some(created_at)) = (
-                    entry.get("lastSeen").and_then(Value::as_str).and_then(timeutil::parse),
-                    entry.get("created_at").and_then(Value::as_str).and_then(timeutil::parse),
-                ) else {
-                    continue;
-                };
-                cache.entries.insert(
-                    uri.clone(),
-                    ContextEntry {
-                        last_seen,
-                        created_at,
-                    },
-                );
-            }
-        }
-        cache
+    /// Every entry, in insertion order.
+    pub fn entries(&self) -> impl Iterator<Item = (&String, ContextEntry)> {
+        self.entries.iter().map(|(uri, entry)| (uri, *entry))
     }
 }
 
@@ -330,22 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn timestamped_set_json_round_trips() {
-        let mut set = TimestampedSet::new();
-        set.add("acct1", Some(datetime!(2026-10-22 01:23:45.123456 UTC)));
-        set.add("acct2", Some(datetime!(2026-10-22 02:00:00 UTC)));
-        let json = set.to_json();
-        let back = TimestampedSet::from_json(&json);
-        assert_eq!(back.get("acct1"), Some(datetime!(2026-10-22 01:23:45.123456 UTC)));
-        assert_eq!(back.get("acct2"), Some(datetime!(2026-10-22 02:00:00 UTC)));
-        // the serialized shape is an object of item -> timestamp string
-        assert_eq!(
-            json["acct1"],
-            Value::String(timeutil::fmt_state_ts(datetime!(2026-10-22 01:23:45.123456 UTC)))
-        );
-    }
-
-    #[test]
     fn context_cache_fetch_policy() {
         let mut cache = ContextCache::new();
         let created = timeutil::now() - Duration::minutes(30);
@@ -370,18 +281,6 @@ mod tests {
         assert!(!cache.should_fetch("uri3", created));
         cache.entries.get_mut("uri3").unwrap().last_seen = timeutil::now() - Duration::hours(2);
         assert!(cache.should_fetch("uri3", created));
-    }
-
-    #[test]
-    fn context_cache_json_round_trips() {
-        let mut cache = ContextCache::new();
-        cache.mark_fetched("uri", datetime!(2026-10-22 01:23:45 UTC));
-        let json = cache.to_json();
-        assert!(json["uri"].get("lastSeen").is_some());
-        assert!(json["uri"].get("created_at").is_some());
-        let back = ContextCache::from_json(&json);
-        assert_eq!(back.len(), 1);
-        assert!(back.contains("uri"));
     }
 
     #[test]

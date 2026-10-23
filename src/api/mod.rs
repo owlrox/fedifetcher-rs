@@ -188,11 +188,14 @@ mod tests {
     use crate::servers::failed_lookup_state;
 
     fn dummy_http() -> HttpClient {
-        HttpClient::new(Config {
-            server: "home.example".to_string(),
-            access_tokens: vec!["t".to_string()],
-            ..Default::default()
-        })
+        HttpClient::new(
+            Config {
+                server: "home.example".to_string(),
+                access_tokens: vec!["t".to_string()],
+                ..Default::default()
+            },
+            crate::db::memory_pool(),
+        )
     }
 
     #[tokio::test]

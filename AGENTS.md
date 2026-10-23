@@ -19,6 +19,9 @@ and never commit a change without its bump.
 
 ## Secrets
 
-`config.toml` in the repo root holds the real access token. It is listed
-in `.gitignore` and must never be committed. Before committing, check
-`git status --porcelain` for it, and never run `git add -A`.
+The database (`fedifetcher.db` in the state directory) holds the real
+access token. It and its WAL side files are listed in `.gitignore` and must
+never be committed. A `config.toml` or `config.json` left over from earlier
+versions is no longer read, but may still hold a token, so those stay
+ignored too. Before committing, check `git status --porcelain` for them,
+and never run `git add -A`.

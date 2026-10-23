@@ -9,9 +9,11 @@ use httpmock::prelude::*;
 use httpmock::Method;
 use serde_json::json;
 
-fn client(dir: &std::path::Path) -> HttpClient {
+async fn client(dir: &std::path::Path) -> HttpClient {
     // the paging code is not about robots.txt; leave it out of the way
-    HttpClient::new(common::test_config(dir, "example.social")).ignoring_robots()
+    let config = common::test_config(dir, "example.social");
+    let db = common::test_db(&config).await;
+    HttpClient::new(config, db).ignoring_robots()
 }
 
 #[tokio::test]
@@ -49,7 +51,7 @@ async fn follows_link_headers_until_the_server_runs_out() {
             then.status(200).json_body(json!([{"id": "0"}]));
         })
         .await;
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let items = get_paginated(
         &format!("{}/api/v1/timelines/home", server.base_url()),
@@ -96,7 +98,7 @@ async fn stops_once_it_has_the_count_it_wanted() {
             then.status(200).json_body(json!([{"id": "0"}, {"id": "-1"}]));
         })
         .await;
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let items = get_paginated(
         &format!("{}/api/v1/timelines/home", server.base_url()),
@@ -149,7 +151,7 @@ async fn an_empty_page_ends_the_search() {
             then.status(200).json_body(json!([]));
         })
         .await;
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let items = get_paginated(
         &format!("{}/api/v1/timelines/home", server.base_url()),
@@ -185,7 +187,7 @@ async fn stops_when_there_is_no_next_link() {
             then.status(200).json_body(json!([{"id": "0"}]));
         })
         .await;
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let items = get_paginated(
         &format!("{}/api/v1/timelines/home", server.base_url()),
@@ -214,7 +216,7 @@ async fn an_error_status_is_reported() {
             then.status(500);
         })
         .await;
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let err = get_paginated(
         &format!("{}/api/v1/timelines/home", server.base_url()),

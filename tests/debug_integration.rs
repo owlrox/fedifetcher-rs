@@ -10,8 +10,10 @@ use httpmock::prelude::*;
 use httpmock::Method;
 use serde_json::json;
 
-fn client(dir: &std::path::Path) -> HttpClient {
-    HttpClient::new(common::test_config(dir, "example.social"))
+async fn client(dir: &std::path::Path) -> HttpClient {
+    let config = common::test_config(dir, "example.social");
+    let db = common::test_db(&config).await;
+    HttpClient::new(config, db)
 }
 
 #[tokio::test]
@@ -35,7 +37,7 @@ async fn the_connection_test_reports_instance_and_account() {
         })
         .await;
     let dir = common::tmp_dir();
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let (info, account) = test_connection(&server.base_url(), "sekret-token", &http)
         .await
@@ -59,7 +61,7 @@ async fn a_rejected_token_is_reported_with_a_masked_hint() {
         })
         .await;
     let dir = common::tmp_dir();
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let err = verify_credentials(&server.base_url(), "sekret-token", &http)
         .await
@@ -93,7 +95,7 @@ async fn a_user_lookup_returns_the_account() {
         })
         .await;
     let dir = common::tmp_dir();
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let account =
         lookup_account(&server.base_url(), "@someone@example.social", "sekret-token", &http)
@@ -115,7 +117,7 @@ async fn a_missing_user_is_reported() {
         })
         .await;
     let dir = common::tmp_dir();
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let err = lookup_account(&server.base_url(), "ghost", "sekret-token", &http)
         .await
@@ -149,7 +151,7 @@ async fn posts_are_fetched_for_the_looked_up_user() {
         })
         .await;
     let dir = common::tmp_dir();
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let (account, posts) = account_posts(&server.base_url(), "someone", 2, "sekret-token", &http)
         .await
@@ -171,7 +173,7 @@ async fn a_failed_lookup_stops_a_post_fetch() {
         })
         .await;
     let dir = common::tmp_dir();
-    let http = client(&dir);
+    let http = client(&dir).await;
 
     let err = account_posts(&server.base_url(), "ghost", 5, "sekret-token", &http)
         .await

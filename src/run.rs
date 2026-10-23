@@ -126,7 +126,7 @@ pub async fn run_once(config: Config, cancel: CancelToken, db: &SqlitePool) -> R
         warn!("respect_user_opt_out is disabled: accounts that have opted out will still be backfilled");
     }
 
-    let http = HttpClient::new(config.clone());
+    let http = HttpClient::new(config.clone(), db.clone());
     let notifier = Notifier::new(config.clone(), http.clone(), Uuid::new_v4());
     let store = StateStore::new(config.clone());
 
@@ -141,15 +141,24 @@ pub async fn run_once(config: Config, cancel: CancelToken, db: &SqlitePool) -> R
             return Err(ex.into());
         }
     };
-    let mut session = store.session();
+    let mut session = match store.session(db).await {
+        Ok(session) => session,
+        Err(ex) => {
+            error!("{ex}");
+            notifier.failed(&ex.to_string()).await;
+            return Err(ex);
+        }
+    };
 
-    // Delete any old robots.txt files so we can re-download them
-    http.robots().discard_stale_files(ROBOTS_MAX_AGE);
+    // Delete any old robots.txt entries so we can re-download them
+    http.robots().discard_stale(ROBOTS_MAX_AGE).await;
 
     let result = run_tasks(&config, &http, &mut session, &cancel, db).await;
 
-    // the session saves the state on drop, failures included
-    drop(session);
+    // the session writes the state back, failures included
+    if let Err(ex) = session.finish().await {
+        error!("Could not write the state to the database: {ex}");
+    }
     drop(lock);
 
     if cancel.is_cancelled() {
@@ -218,10 +227,10 @@ async fn run_tasks(
 mod tests {
     use super::*;
 
-    #[test]
-    fn notifier_reports_elapsed_milliseconds() {
+    #[tokio::test]
+    async fn notifier_reports_elapsed_milliseconds() {
         let config = Config::default();
-        let http = HttpClient::new(config.clone());
+        let http = HttpClient::new(config.clone(), crate::db::memory_pool());
         let notifier = Notifier::new(config, http, Uuid::new_v4());
         assert!(notifier.elapsed_ms() >= 0);
     }

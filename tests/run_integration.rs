@@ -1,4 +1,4 @@
-//! Whole runs: the lock, the state on disk, and the lifecycle callbacks.
+//! Whole runs: the lock, the state in the database, and the lifecycle callbacks.
 
 mod common;
 
@@ -22,7 +22,11 @@ async fn a_run_with_nothing_enabled_still_succeeds() {
         message.starts_with("Processing finished in "),
         "{message}"
     );
-    assert!(dir.join("seen_urls").exists(), "state should be written");
+    let tables = fedifetcher::db::list_tables(&db).await.unwrap();
+    assert!(
+        tables.contains(&"seen_urls".to_string()),
+        "state should be written"
+    );
     assert!(
         !dir.join("lock.lock").exists(),
         "the lock should be released"
@@ -190,7 +194,11 @@ async fn a_cancelled_run_stops_before_doing_anything() {
         .expect("a stopped run is not a failure");
 
     assert_eq!(message, "Stopped.");
-    assert!(dir.join("seen_urls").exists(), "state should be written");
+    let tables = fedifetcher::db::list_tables(&db).await.unwrap();
+    assert!(
+        tables.contains(&"seen_urls".to_string()),
+        "state should be written"
+    );
     assert!(
         !dir.join("lock.lock").exists(),
         "the lock should be released"

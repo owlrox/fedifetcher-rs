@@ -15,7 +15,8 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
     let server = MockServer::start_async().await;
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
-    let client = HttpClient::new(config.clone());
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
 
     // the first things a fetch would ask for, if the skip did not happen
@@ -34,7 +35,6 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
 
     let mut user = User::new("bot", format!("{}/@bot", server.base_url()));
     user.note = "beep boop, nobot".to_string();
-    let db = fedifetcher::db::open(&config).await.unwrap();
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
@@ -71,14 +71,14 @@ async fn an_account_that_opted_out_is_fetched_when_the_rule_is_off() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.respect_user_opt_out = false;
-    let client = HttpClient::new(config.clone());
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
 
     // A local user: no fetching happens either way, but with the rule off
     // the opt-out check is skipped and the account is recorded as checked.
     let mut user = User::new("bot", "https://example.social/@bot");
     user.note = "beep boop, nobot".to_string();
-    let db = fedifetcher::db::open(&config).await.unwrap();
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
@@ -116,7 +116,7 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
     let db = fedifetcher::db::open(&config).await.unwrap();
-    let client = HttpClient::new(config.clone());
+    let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
 
     // the first things a fetch would ask for, if the skip did not happen

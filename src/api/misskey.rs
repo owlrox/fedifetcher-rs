@@ -342,11 +342,11 @@ mod tests {
         assert!(to_post(&json!({"id": "1"}), "https://misskey.example").is_none());
     }
 
-    #[test]
-    fn paths_read_names() {
+    #[tokio::test]
+    async fn paths_read_names() {
         let api = MisskeyApi::new(
             "misskey.example",
-            HttpClient::new(crate::config::Config::default()),
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
         );
         assert_eq!(
             api.username_from("https://misskey.example/@alice"),
