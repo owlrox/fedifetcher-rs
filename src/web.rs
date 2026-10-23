@@ -1,4 +1,5 @@
-//! A server-rendered web UI: dashboard, run trigger, hosts, logs and an
+//! A server-rendered web UI: dashboard, run trigger, a data page (the hosts
+//! FediFetcher has seen, and every table in the database), logs, and an
 //! editable config page that writes back to the config file. No JavaScript
 //! anywhere — every page is HTML from leptos SSR, and the only interactivity
 //! is a form POST that redirects back.
@@ -25,7 +26,7 @@ use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::http::HttpClient;
 use crate::run::{CancelToken, run_once};
-use crate::store::StateStore;
+use crate::store::{State, StateStore};
 use crate::timeutil;
 use crate::VERSION;
 
@@ -34,6 +35,9 @@ const HISTORY_CAPACITY: usize = 50;
 
 /// The most log lines shown on /logs.
 const LOG_LINES_SHOWN: usize = 200;
+
+/// The most rows of one database table a data page sub-tab shows.
+const TABLE_ROWS_SHOWN: i64 = 500;
 
 struct AppState {
     /// The effective config; replaced when the config page saves.
@@ -80,8 +84,9 @@ pub async fn serve(
     axum::serve(listener, app).await
 }
 
-/// Build the web UI's router: the dashboard, the run trigger, hosts, logs,
-/// the editable config page, the debug page, and the health check.
+/// Build the web UI's router: the dashboard, the run trigger, the data page
+/// (hosts and the database's tables), logs, the editable config page, the
+/// debug page, and the health check.
 pub fn app(config: Config, config_file: PathBuf, db: SqlitePool) -> Router {
     let state = Arc::new(AppState {
         config: Mutex::new(config),
@@ -98,7 +103,7 @@ pub fn app(config: Config, config_file: PathBuf, db: SqlitePool) -> Router {
         .route("/", get(dashboard))
         .route("/run", post(run))
         .route("/stop", post(stop))
-        .route("/hosts", get(hosts))
+        .route("/hosts", get(data))
         .route("/logs", get(logs))
         .route("/logs/clear", post(clear_logs))
         .route("/config", get(config_page).post(save_config))
@@ -153,25 +158,152 @@ impl HostSort {
     }
 }
 
-/// The /hosts page's query string: which column to sort by, and which way.
-/// Unknown values fall back to the defaults, hosts alphabetically.
+/// The data page's query string: which sub-tab to show, which column to
+/// sort by, and which way. Unknown values fall back to the defaults: the
+/// hosts tab, hosts alphabetically.
 #[derive(serde::Deserialize)]
-struct HostsQuery {
+struct DataQuery {
+    tab: Option<String>,
     sort: Option<String>,
     dir: Option<String>,
 }
 
-async fn hosts(
+/// One sub-tab of the data page: its label, its link, and how many rows it
+/// holds.
+#[derive(Clone)]
+struct TabLink {
+    label: String,
+    href: String,
+    count: i64,
+    active: bool,
+}
+
+/// What the data page is showing: the hosts from the state files, or one
+/// table of the database.
+#[derive(Clone)]
+enum TabView {
+    Hosts {
+        rows: Vec<(String, String, String, String, String)>,
+        sort: HostSort,
+        order: LogOrder,
+    },
+    Table {
+        name: String,
+        columns: Vec<String>,
+        rows: Vec<Vec<Option<String>>>,
+        count: i64,
+        sort: String,
+        order: LogOrder,
+    },
+}
+
+/// The /hosts page, now the data page: sub-tabs for the hosts FediFetcher
+/// has seen and for every table in the database. The tab query string names
+/// "hosts" or a table; anything else falls back to the hosts tab.
+async fn data(
     AxumState(state): AxumState<Arc<AppState>>,
-    Query(query): Query<HostsQuery>,
+    Query(query): Query<DataQuery>,
 ) -> Html<String> {
     tracing::debug!("GET /hosts");
-    let sort = HostSort::parse(query.sort.as_deref());
-    let order = match query.dir.as_deref() {
-        Some("desc") => LogOrder::Desc,
-        _ => LogOrder::Asc,
+    let state_data = StateStore::new(state.config.lock().unwrap().clone()).load();
+
+    let tables = match db::list_tables(&state.db).await {
+        Ok(tables) => tables,
+        Err(ex) => {
+            tracing::warn!("Could not list the database's tables: {ex}");
+            Vec::new()
+        }
     };
-    render(move || view! { <HostsPage state=state sort=sort order=order /> })
+    let mut table_counts: Vec<(String, i64)> = Vec::with_capacity(tables.len());
+    for name in &tables {
+        let count = db::table_count(&state.db, name).await.unwrap_or(0);
+        table_counts.push((name.clone(), count));
+    }
+
+    let requested = query.tab.as_deref().unwrap_or("hosts");
+    let table = match requested {
+        "hosts" => None,
+        name if table_counts.iter().any(|(table, _)| table == name) => Some(name.to_string()),
+        _ => None,
+    };
+
+    let mut tabs = Vec::with_capacity(table_counts.len() + 1);
+    tabs.push(TabLink {
+        label: "Hosts".to_string(),
+        href: "/hosts?tab=hosts".to_string(),
+        count: state_data.seen_hosts.len() as i64,
+        active: table.is_none(),
+    });
+    for (name, count) in &table_counts {
+        tabs.push(TabLink {
+            label: name.clone(),
+            href: format!("/hosts?tab={name}"),
+            count: *count,
+            active: table.as_deref() == Some(name.as_str()),
+        });
+    }
+
+    let tab = match &table {
+        None => {
+            let sort = HostSort::parse(query.sort.as_deref());
+            let order = match query.dir.as_deref() {
+                Some("desc") => LogOrder::Desc,
+                _ => LogOrder::Asc,
+            };
+            TabView::Hosts {
+                rows: hosts_table(&state_data, sort, order),
+                sort,
+                order,
+            }
+        }
+        Some(name) => {
+            let columns = db::table_columns(&state.db, name).await.unwrap_or_default();
+            // the default sort: a table with an id column shows the newest
+            // rows first; anything else sorts by its first column
+            let (default_column, default_order) = if columns.iter().any(|col| col == "id") {
+                ("id".to_string(), LogOrder::Desc)
+            } else {
+                (columns.first().cloned().unwrap_or_default(), LogOrder::Asc)
+            };
+            let sort_given = query
+                .sort
+                .as_deref()
+                .filter(|sort| columns.iter().any(|col| col.as_str() == *sort));
+            let sort = sort_given.map(str::to_string).unwrap_or(default_column);
+            let order = match query.dir.as_deref() {
+                Some("asc") => LogOrder::Asc,
+                Some("desc") => LogOrder::Desc,
+                // a column the query asked for sorts ascending; the default
+                // column sorts the table's default way
+                None if sort_given.is_some() => LogOrder::Asc,
+                _ => default_order,
+            };
+            let count = table_counts
+                .iter()
+                .find(|(table, _)| table == name)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+            let rows = match db::table_rows(&state.db, name, &columns, &sort, order, TABLE_ROWS_SHOWN)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(ex) => {
+                    tracing::warn!("Could not read the {name} table: {ex}");
+                    Vec::new()
+                }
+            };
+            TabView::Table {
+                name: name.clone(),
+                columns,
+                rows,
+                count,
+                sort,
+                order,
+            }
+        }
+    };
+
+    render(move || view! { <DataPage tabs=tabs tab=tab /> })
 }
 
 /// The /logs page's query string: which column to sort by, and which way.
@@ -632,11 +764,14 @@ header h1 a { color: inherit; text-decoration: none; }
 .version { color: #888; font-weight: normal; }
 nav { display: flex; gap: 1rem; }
 nav a { color: #06c; }
+nav.tabs { gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #8884; margin-bottom: 1.5rem; }
+nav.tabs a { color: #06c; text-decoration: none; padding-bottom: 0.25rem; }
+nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
 main { padding: 1rem 1.5rem; max-width: 64rem; }
 section { margin-bottom: 1.75rem; }
 h2 { font-size: 1rem; }
 table { border-collapse: collapse; width: 100%; }
-th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; }
+th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; overflow-wrap: break-word; }
 th { font-weight: 600; }
 code, pre { font-family: ui-monospace, monospace; font-size: 0.85em; }
 pre { background: #8881; padding: 0.75rem; overflow-x: auto; }
@@ -678,7 +813,7 @@ fn Page(title: String, children: Children) -> impl IntoView {
                     </h1>
                     <nav>
                         <a href="/">"Dashboard"</a>
-                        <a href="/hosts">"Hosts"</a>
+                        <a href="/hosts">"Data"</a>
                         <a href="/logs">"Logs"</a>
                         <a href="/config">"Config"</a>
                         <a href="/debug">"Debug"</a>
@@ -823,9 +958,50 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>) -> impl IntoView {
     }
 }
 
+/// The data page: sub-tabs for the hosts FediFetcher has seen and for every
+/// table in the database, each sortable by clicking a column heading.
 #[component]
-fn HostsPage(state: Arc<AppState>, sort: HostSort, order: LogOrder) -> impl IntoView {
-    let data = StateStore::new(state.config.lock().unwrap().clone()).load();
+fn DataPage(tabs: Vec<TabLink>, tab: TabView) -> impl IntoView {
+    let links: Vec<AnyView> = tabs
+        .iter()
+        .map(|tab| {
+            let class = if tab.active { "tab active" } else { "tab" };
+            view! {
+                <a class={class} href={tab.href.clone()}>
+                    {tab.label.clone()}
+                    " "
+                    <span class="muted">{format!("({})", tab.count)}</span>
+                </a>
+            }
+            .into_any()
+        })
+        .collect();
+    let section = match tab {
+        TabView::Hosts { rows, sort, order } => hosts_tab(rows, sort, order),
+        TabView::Table {
+            name,
+            columns,
+            rows,
+            count,
+            sort,
+            order,
+        } => table_tab(name, columns, rows, count, sort, order),
+    };
+    view! {
+        <Page title="Data".to_string()>
+            <nav class="tabs">{links}</nav>
+            {section}
+        </Page>
+    }
+}
+
+/// The hosts tab's rows — (host, software, version, apis, last checked) —
+/// sorted as the query string asks, hosts alphabetically as the tie order.
+fn hosts_table(
+    data: &State,
+    sort: HostSort,
+    order: LogOrder,
+) -> Vec<(String, String, String, String, String)> {
     let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
     for (host, info) in data.seen_hosts.iter() {
         let text = |key: &str| {
@@ -870,50 +1046,121 @@ fn HostsPage(state: Arc<AppState>, sort: HostSort, order: LogOrder) -> impl Into
     if order == LogOrder::Desc {
         rows.reverse();
     }
+    rows
+}
 
+/// The hosts sub-tab: every server FediFetcher has contacted, and what it
+/// found, sortable by clicking a column heading.
+fn hosts_tab(
+    rows: Vec<(String, String, String, String, String)>,
+    sort: HostSort,
+    order: LogOrder,
+) -> AnyView {
     view! {
-        <Page title="Hosts".to_string()>
-            <section>
-                <h2>"Seen hosts"</h2>
-                <p class="muted">
-                    "Every server FediFetcher has contacted, and what it found. Click a column heading to sort by it; click it again to flip the direction."
-                </p>
-                {if rows.is_empty() {
-                    view! { <p class="muted">"No hosts seen yet."</p> }.into_any()
-                } else {
-                    view! {
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>{sort_link("Host", HostSort::Host.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
-                                    <th>{sort_link("Software", HostSort::Software.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
-                                    <th>{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
-                                    <th>{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
-                                    <th>{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/hosts", LogOrder::Asc)}</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rows
-                                    .into_iter()
-                                    .map(|(host, software, version, apis, last_checked)| {
-                                        view! {
-                                            <tr>
-                                                <td><code>{host}</code></td>
-                                                <td>{software}</td>
-                                                <td>{version}</td>
-                                                <td>{apis}</td>
-                                                <td>{last_checked}</td>
-                                            </tr>
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()}
-                            </tbody>
-                        </table>
-                    }.into_any()
-                }}
-            </section>
-        </Page>
+        <section>
+            <h2>"Seen hosts"</h2>
+            <p class="muted">
+                "Every server FediFetcher has contacted, and what it found. Click a column heading to sort by it; click it again to flip the direction."
+            </p>
+            {if rows.is_empty() {
+                view! { <p class="muted">"No hosts seen yet."</p> }.into_any()
+            } else {
+                view! {
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>{sort_link("Host", HostSort::Host.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("Software", HostSort::Software.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows
+                                .into_iter()
+                                .map(|(host, software, version, apis, last_checked)| {
+                                    view! {
+                                        <tr>
+                                            <td><code>{host}</code></td>
+                                            <td>{software}</td>
+                                            <td>{version}</td>
+                                            <td>{apis}</td>
+                                            <td>{last_checked}</td>
+                                        </tr>
+                                    }
+                                })
+                                .collect::<Vec<_>>()}
+                        </tbody>
+                    </table>
+                }
+                .into_any()
+            }}
+        </section>
     }
+    .into_any()
+}
+
+/// A database table sub-tab: the table's rows as text, sortable by clicking
+/// a column heading. At most TABLE_ROWS_SHOWN rows are shown.
+fn table_tab(
+    name: String,
+    columns: Vec<String>,
+    rows: Vec<Vec<Option<String>>>,
+    count: i64,
+    sort: String,
+    order: LogOrder,
+) -> AnyView {
+    let base = format!("/hosts?tab={name}");
+    let shown = rows.len() as i64;
+    let summary = if count > shown {
+        format!("Showing {shown} of {count} rows.")
+    } else {
+        format!("{count} row(s).")
+    };
+    view! {
+        <section>
+            <h2>{name.clone()}</h2>
+            <p class="muted">
+                "Table " <code>{name.clone()}</code> " in the database. " {summary}
+                " Click a column heading to sort by it; click it again to flip the direction."
+            </p>
+            {if rows.is_empty() {
+                view! { <p class="muted">"No rows yet."</p> }.into_any()
+            } else {
+                let header: Vec<AnyView> = columns
+                    .iter()
+                    .map(|column| {
+                        view! {
+                            <th>{sort_link(column, column, &sort, order, &base, LogOrder::Asc)}</th>
+                        }
+                        .into_any()
+                    })
+                    .collect();
+                let body: Vec<AnyView> = rows
+                    .into_iter()
+                    .map(|row| {
+                        let cells: Vec<AnyView> = row
+                            .into_iter()
+                            .map(|cell| match cell {
+                                Some(value) => view! { <td>{value}</td> }.into_any(),
+                                None => view! { <td><span class="muted">"NULL"</span></td> }.into_any(),
+                            })
+                            .collect();
+                        view! { <tr>{cells}</tr> }.into_any()
+                    })
+                    .collect();
+                view! {
+                    <table>
+                        <thead><tr>{header}</tr></thead>
+                        <tbody>{body}</tbody>
+                    </table>
+                }
+                .into_any()
+            }}
+        </section>
+    }
+    .into_any()
 }
 
 #[component]
@@ -979,13 +1226,15 @@ fn level_pill(level: &str) -> AnyView {
 
 /// A column heading that links to the same page sorted by that column.
 /// Clicking the column that is already sorted flips the direction; clicking
-/// a new column sorts it the page's default way (`fresh`).
+/// a new column sorts it the page's default way (`fresh`). `base` is the
+/// page's URL with any query parameters the sort link must keep, such as
+/// the data page's sub-tab.
 fn sort_link(
     label: &str,
     column: &str,
     current: &str,
     order: LogOrder,
-    page: &str,
+    base: &str,
     fresh: LogOrder,
 ) -> AnyView {
     let dir = if current == column {
@@ -999,7 +1248,8 @@ fn sort_link(
             LogOrder::Asc => "asc",
         }
     };
-    let href = format!("{page}?sort={column}&dir={dir}");
+    let separator = if base.contains('?') { "&" } else { "?" };
+    let href = format!("{base}{separator}sort={column}&dir={dir}");
     let label = label.to_string();
     let shown = if current == column {
         match order {

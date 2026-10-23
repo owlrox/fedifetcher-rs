@@ -241,6 +241,101 @@ pub async fn recent_runs(pool: &SqlitePool, max: usize) -> Result<Vec<RunRow>> {
         .collect())
 }
 
+/// The tables in the database, for the data page's sub-tabs. SQLite's
+/// internal tables (`sqlite_sequence` and friends) are left out.
+pub async fn list_tables(pool: &SqlitePool) -> Result<Vec<String>> {
+    let rows = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_error)?;
+    Ok(rows.iter().map(|row| row.get::<String, _>("name")).collect())
+}
+
+/// One table's columns, in declaration order, for the data page's table
+/// view.
+pub async fn table_columns(pool: &SqlitePool, table: &str) -> Result<Vec<String>> {
+    let sql = format!("PRAGMA table_info({})", quote_ident(table)?);
+    let rows = sqlx::query(&sql).fetch_all(pool).await.map_err(db_error)?;
+    Ok(rows.iter().map(|row| row.get::<String, _>("name")).collect())
+}
+
+/// How many rows a table has.
+pub async fn table_count(pool: &SqlitePool, table: &str) -> Result<i64> {
+    let sql = format!("SELECT COUNT(*) FROM {}", quote_ident(table)?);
+    let count: i64 = sqlx::query_scalar(&sql)
+        .fetch_one(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(count)
+}
+
+/// The first `max` rows of a table, sorted by the `sort` column, every value
+/// as text (`None` for SQL NULL). `columns` and `sort` must be real names
+/// from `table_columns`; anything else is rejected rather than interpolated.
+pub async fn table_rows(
+    pool: &SqlitePool,
+    table: &str,
+    columns: &[String],
+    sort: &str,
+    order: LogOrder,
+    max: i64,
+) -> Result<Vec<Vec<Option<String>>>> {
+    if columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !columns.iter().any(|column| column == sort) {
+        return Err(Error(format!("{sort:?} is not a column of {table:?}")));
+    }
+    let table_q = quote_ident(table)?;
+    let select: Vec<String> = columns
+        .iter()
+        .map(|column| {
+            let column_q = quote_ident(column)?;
+            Ok(format!("CAST({table_q}.{column_q} AS TEXT) AS {column_q}"))
+        })
+        .collect::<Result<_>>()?;
+    let sort_q = quote_ident(sort)?;
+    let direction = match order {
+        LogOrder::Asc => "ASC",
+        LogOrder::Desc => "DESC",
+    };
+    // ordering by the qualified column keeps the sort on the column's real
+    // type, not on the text the select casts it to
+    let sql = format!(
+        "SELECT {} FROM {table_q} ORDER BY {table_q}.{sort_q} {direction} LIMIT ?",
+        select.join(", ")
+    );
+    let rows = sqlx::query(&sql)
+        .bind(max)
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            columns
+                .iter()
+                .map(|column| row.try_get::<Option<String>, _>(column.as_str()).unwrap_or(None))
+                .collect()
+        })
+        .collect())
+}
+
+/// Quote a name for interpolation into SQL, rejecting anything that is not
+/// a plain identifier. The data page passes names read back from the
+/// database itself; this is the guard that keeps the query strings it
+/// accepts from reaching the SQL.
+fn quote_ident(name: &str) -> Result<String> {
+    let safe = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if safe {
+        Ok(format!("\"{name}\""))
+    } else {
+        Err(Error(format!("{name:?} is not a table or column name")))
+    }
+}
+
 /// Record a post as private — one whose context can never be fetched — so
 /// later runs skip it without resolving its URL again. Returns whether this
 /// call is the one that recorded it.
@@ -578,5 +673,120 @@ mod tests {
             .unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].message, "remember me");
+    }
+
+    #[tokio::test]
+    async fn the_data_page_lists_tables_columns_and_counts() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let tables = list_tables(&pool).await.unwrap();
+        for expected in ["logs", "opted_out_accounts", "private_posts", "runs"] {
+            assert!(tables.contains(&expected.to_string()), "{expected} listed");
+        }
+        assert!(
+            !tables.iter().any(|name| name.starts_with("sqlite_")),
+            "internal tables are left out"
+        );
+
+        let columns = table_columns(&pool, "logs").await.unwrap();
+        assert_eq!(columns, ["id", "ts", "level", "target", "message"]);
+
+        assert_eq!(table_count(&pool, "logs").await.unwrap(), 0);
+        insert_log(&pool, &log_row("hello")).await.unwrap();
+        assert_eq!(table_count(&pool, "logs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn table_rows_returns_text_sorted_by_the_asked_column() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        let columns = table_columns(&pool, "logs").await.unwrap();
+
+        let mut error = log_row("an error");
+        error.level = "ERROR".to_string();
+        let mut info = log_row("an info");
+        info.level = "INFO".to_string();
+        insert_log(&pool, &error).await.unwrap();
+        insert_log(&pool, &info).await.unwrap();
+
+        // every value comes back as text, newest first by default of the ask
+        let rows = table_rows(&pool, "logs", &columns, "id", LogOrder::Desc, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].as_deref(), Some("2"), "the id is text");
+        assert_eq!(rows[0][4].as_deref(), Some("an info"));
+        assert_eq!(rows[1][4].as_deref(), Some("an error"));
+
+        // sorted by level, ascending: ERROR before INFO
+        let rows = table_rows(&pool, "logs", &columns, "level", LogOrder::Asc, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows[0][4].as_deref(), Some("an error"));
+        assert_eq!(rows[1][4].as_deref(), Some("an info"));
+
+        // the limit applies after sorting
+        let rows = table_rows(&pool, "logs", &columns, "level", LogOrder::Asc, 1)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][4].as_deref(), Some("an error"));
+    }
+
+    #[tokio::test]
+    async fn table_rows_renders_null_as_none_and_integers_as_text() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        sqlx::query("CREATE TABLE scratch (name TEXT, note TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scratch (name, note) VALUES ('x', NULL), ('y', 'text'), ('z', 42)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let columns = table_columns(&pool, "scratch").await.unwrap();
+        assert_eq!(columns, ["name", "note"]);
+        let rows = table_rows(&pool, "scratch", &columns, "name", LogOrder::Asc, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows[0], [Some("x".to_string()), None], "SQL NULL is None");
+        assert_eq!(
+            rows[1],
+            [Some("y".to_string()), Some("text".to_string())]
+        );
+        assert_eq!(rows[2][1].as_deref(), Some("42"), "integers are text");
+    }
+
+    #[tokio::test]
+    async fn table_rows_rejects_names_that_are_not_identifiers() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        let columns = table_columns(&pool, "logs").await.unwrap();
+
+        assert!(
+            table_rows(&pool, "logs; DROP TABLE logs", &columns, "id", LogOrder::Asc, 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            table_rows(&pool, "logs", &columns, "id; DROP TABLE logs", LogOrder::Asc, 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            table_rows(&pool, "logs", &columns, "not_a_column", LogOrder::Asc, 10)
+                .await
+                .is_err(),
+            "a sort column must be a real column"
+        );
+        assert!(
+            table_columns(&pool, "logs\"; DROP TABLE logs").await.is_err()
+        );
+        assert!(table_count(&pool, "").await.is_err());
+        // and the table survives
+        assert!(table_count(&pool, "logs").await.is_ok());
     }
 }

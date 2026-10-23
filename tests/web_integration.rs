@@ -443,7 +443,7 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
         "the APIs column lists the supported APIs"
     );
     assert!(
-        body.contains("/hosts?sort=software&amp;dir=asc"),
+        body.contains("/hosts?tab=hosts&amp;sort=software&amp;dir=asc"),
         "a new column sorts the page's default way"
     );
 
@@ -456,7 +456,7 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
     );
     assert!(body.contains("(asc)"), "the sorted column shows its direction");
     assert!(
-        body.contains("/hosts?sort=software&amp;dir=desc"),
+        body.contains("/hosts?tab=hosts&amp;sort=software&amp;dir=desc"),
         "clicking the sorted column flips the direction"
     );
 
@@ -491,6 +491,120 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
             && position(&body, "beta.example") < position(&body, "gamma.example"),
         "an unknown sort falls back to the host column"
     );
+}
+
+/// Seed the database with rows in every table, as runs would.
+async fn seed_db(dir: &std::path::Path) {
+    let config = common::test_config(dir, "example.social");
+    let pool = fedifetcher::db::open(&config).await.unwrap();
+    let log = |level: &str, message: &str| fedifetcher::db::LogRow {
+        ts: "2026-10-22 16:05:07 -05:00".to_string(),
+        level: level.to_string(),
+        target: "fedifetcher::test".to_string(),
+        message: message.to_string(),
+    };
+    fedifetcher::db::insert_log(&pool, &log("ERROR", "first line"))
+        .await
+        .unwrap();
+    fedifetcher::db::insert_log(&pool, &log("INFO", "second line"))
+        .await
+        .unwrap();
+    fedifetcher::db::insert_run(
+        &pool,
+        &fedifetcher::db::RunRow {
+            started: "2026-10-22 16:05:07.000001-05:00".to_string(),
+            finished: "2026-10-22 16:05:08.000001-05:00".to_string(),
+            outcome: "ok".to_string(),
+            message: "Processing finished in 0:00:01".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    fedifetcher::db::mark_private_post(&pool, "https://remote.example/@a/1")
+        .await
+        .unwrap();
+    fedifetcher::db::mark_opted_out_account(&pool, "bot@remote.example", "it is not indexable")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_data_page_drills_into_the_databases_tables() {
+    let dir = common::tmp_dir();
+    seed_hosts(
+        &dir,
+        serde_json::json!({
+            "alpha.example": host_entry("Mastodon", "4.2.0", &["mastodon"], 3),
+        }),
+    );
+    seed_db(&dir).await;
+    let base = spawn_ui(&dir).await;
+
+    let position = |body: &str, needle: &str| body.find(needle).unwrap();
+
+    // every table in the database is a sub-tab, with its row count
+    let (status, body) = get(&format!("{base}/hosts")).await;
+    assert_eq!(status, 200);
+    for tab in ["hosts", "logs", "opted_out_accounts", "private_posts", "runs"] {
+        assert!(
+            body.contains(&format!("href=\"/hosts?tab={tab}\"")),
+            "the {tab} sub-tab is linked"
+        );
+    }
+    assert!(body.contains("(2)"), "the logs tab shows its row count");
+    // the hosts tab is the default
+    assert!(body.contains("Seen hosts"));
+    assert!(body.contains("alpha.example"));
+
+    // a table tab shows the table's rows, newest first by default
+    let (status, body) = get(&format!("{base}/hosts?tab=logs")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("first line"));
+    assert!(body.contains("second line"));
+    assert!(
+        position(&body, "second line") < position(&body, "first line"),
+        "the newest row comes first by default"
+    );
+    assert!(
+        body.contains("/hosts?tab=logs&amp;sort=level&amp;dir=asc"),
+        "a column heading links to that sort"
+    );
+
+    // sorted by a column, ascending: ERROR before INFO
+    let (_, body) = get(&format!("{base}/hosts?tab=logs&sort=level&dir=asc")).await;
+    assert!(
+        position(&body, "first line") < position(&body, "second line"),
+        "level ascending is ERROR, INFO"
+    );
+    // and descending flips it
+    let (_, body) = get(&format!("{base}/hosts?tab=logs&sort=level&dir=desc")).await;
+    assert!(
+        position(&body, "second line") < position(&body, "first line"),
+        "level descending is INFO, ERROR"
+    );
+    // an unknown column falls back to the default sort, newest first
+    let (_, body) = get(&format!("{base}/hosts?tab=logs&sort=nonsense")).await;
+    assert!(
+        position(&body, "second line") < position(&body, "first line"),
+        "an unknown column falls back to the newest first"
+    );
+
+    // the other tables show their rows too
+    let (status, body) = get(&format!("{base}/hosts?tab=runs")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Processing finished in 0:00:01"));
+    let (status, body) = get(&format!("{base}/hosts?tab=private_posts")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("https://remote.example/@a/1"));
+    let (status, body) = get(&format!("{base}/hosts?tab=opted_out_accounts")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("bot@remote.example"));
+    assert!(body.contains("it is not indexable"));
+
+    // an unknown tab falls back to the hosts tab
+    let (status, body) = get(&format!("{base}/hosts?tab=nonsense")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Seen hosts"));
 }
 
 #[tokio::test]
