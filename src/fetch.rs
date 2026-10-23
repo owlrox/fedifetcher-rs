@@ -6,7 +6,7 @@
 use tracing::{error, info, warn};
 
 use crate::api::mastodon::HomeServer;
-use crate::backfill::{add_user_posts, UserSet};
+use crate::backfill::{add_user_posts, Force, UserSet};
 use crate::context::{add_context_urls, known_context_urls};
 use crate::db;
 use crate::http::HttpClient;
@@ -82,8 +82,15 @@ pub async fn force_post_context(ctx: &mut Context<'_>, uri: &str) {
 }
 
 /// Backfill one account's posts now, even when it is already known. `acct`
-/// is `name@host`; a local account has nothing to backfill.
-pub async fn force_user_posts(ctx: &mut Context<'_>, acct: &str, target: UserSet) {
+/// is `name@host`; a local account has nothing to backfill. With
+/// `force_opt_out`, an account recorded as opted out is fetched anyway —
+/// the data page's button on the opted_out_accounts table passes that.
+pub async fn force_user_posts(
+    ctx: &mut Context<'_>,
+    acct: &str,
+    target: UserSet,
+    force_opt_out: bool,
+) {
     info!("Manual fetch: backfill posts for {acct}");
 
     let Some((name, host)) = acct.split_once('@') else {
@@ -95,9 +102,12 @@ pub async fn force_user_posts(ctx: &mut Context<'_>, acct: &str, target: UserSet
         return;
     }
     match db::opted_out_account_reason(ctx.db, acct).await {
-        Ok(Some(reason)) => {
+        Ok(Some(reason)) if !force_opt_out => {
             info!("Manual fetch: not backfilling {acct}: the account has opted out ({reason})");
             return;
+        }
+        Ok(Some(reason)) => {
+            info!("Manual fetch: backfilling {acct} anyway: the account has opted out ({reason})");
         }
         Ok(None) => {}
         Err(ex) => warn!("Manual fetch: could not check the opted-out accounts for {acct}: {ex}"),
@@ -110,7 +120,16 @@ pub async fn force_user_posts(ctx: &mut Context<'_>, acct: &str, target: UserSet
         return;
     };
     let user = User::new(acct, profile_url_for(&server, host, name));
-    add_user_posts(ctx, vec![user], target, true).await;
+    add_user_posts(
+        ctx,
+        vec![user],
+        target,
+        Force {
+            known: true,
+            opt_out: force_opt_out,
+        },
+    )
+    .await;
 }
 
 /// The profile URL for `name` on `host`, in the shape the server's own API

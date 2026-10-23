@@ -3,6 +3,7 @@
 
 mod common;
 
+use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::backfill::{user_posts, UserSet};
 use fedifetcher::http::HttpClient;
 use fedifetcher::store::State;
@@ -18,6 +19,8 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
     let db = fedifetcher::db::open(&config).await.unwrap();
     let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
 
     // the first things a fetch would ask for, if the skip did not happen
     let nodeinfo = server
@@ -38,16 +41,7 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
-    let posts = user_posts(
-        &user,
-        UserSet::RecentlyCheckedUsers,
-        "example.social",
-        &client,
-        &config,
-        &mut state,
-        &db,
-    )
-    .await;
+    let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
     drop(guard);
 
     assert!(posts.is_none(), "an opted-out account is skipped");
@@ -77,6 +71,8 @@ async fn an_account_that_opted_out_is_fetched_when_the_rule_is_off() {
     let db = fedifetcher::db::open(&config).await.unwrap();
     let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
 
     // A local user: no fetching happens either way, but with the rule off
     // the opt-out check is skipped and the account is recorded as checked.
@@ -85,16 +81,7 @@ async fn an_account_that_opted_out_is_fetched_when_the_rule_is_off() {
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
-    let posts = user_posts(
-        &user,
-        UserSet::RecentlyCheckedUsers,
-        "example.social",
-        &client,
-        &config,
-        &mut state,
-        &db,
-    )
-    .await;
+    let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
     drop(guard);
 
     assert!(posts.is_none(), "a local user has no posts to fetch");
@@ -113,6 +100,41 @@ async fn an_account_that_opted_out_is_fetched_when_the_rule_is_off() {
 /// database with its reason, and the log line fires the first time only:
 /// LogCapture sees INFO and above, so a second line would mean the repeat
 /// skip was logged at INFO again.
+/// The data page's button on an opted-out account forces the fetch: the
+/// opt-out check is bypassed, the same way the config rule's being off
+/// bypasses it.
+#[tokio::test]
+async fn an_account_that_opted_out_is_fetched_when_forced() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
+    let mut state = State::default();
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+
+    // A local user: no fetching happens either way, but with the force the
+    // opt-out check is skipped and the account is recorded as checked.
+    let mut user = User::new("bot", "https://example.social/@bot");
+    user.note = "beep boop, nobot".to_string();
+
+    let logs = common::LogCapture::new();
+    let guard = logs.install();
+    let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, true).await;
+    drop(guard);
+
+    assert!(posts.is_none(), "a local user has no posts to fetch");
+    assert!(
+        !logs.text().contains("opted out"),
+        "no opt-out is logged when the fetch is forced: {}",
+        logs.text()
+    );
+    assert!(
+        state.recently_checked_users().contains("bot"),
+        "the account is recorded as checked"
+    );
+}
+
 #[tokio::test]
 async fn an_opted_out_account_is_recorded_and_logged_once() {
     let server = MockServer::start_async().await;
@@ -121,6 +143,8 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
     let db = fedifetcher::db::open(&config).await.unwrap();
     let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
 
     // the first things a fetch would ask for, if the skip did not happen
     let nodeinfo = server
@@ -142,26 +166,8 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
     let logs = common::LogCapture::new();
     let guard = logs.install();
     // two runs over the same database
-    let first = user_posts(
-        &user,
-        UserSet::RecentlyCheckedUsers,
-        "example.social",
-        &client,
-        &config,
-        &mut state,
-        &db,
-    )
-    .await;
-    let second = user_posts(
-        &user,
-        UserSet::RecentlyCheckedUsers,
-        "example.social",
-        &client,
-        &config,
-        &mut state,
-        &db,
-    )
-    .await;
+    let first = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
+    let second = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
     drop(guard);
 
     assert!(

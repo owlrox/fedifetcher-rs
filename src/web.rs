@@ -2,14 +2,14 @@
 //! FediFetcher has seen, and every table in the database), logs, and an
 //! editable config page that saves to the database. No JavaScript
 //! anywhere — every page is HTML from leptos SSR, and the only interactivity
-//! is a form POST that redirects back.
+//! is a form POST or a toggle link that redirects back.
 
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use axum::extract::{Query, State as AxumState};
-use axum::http::StatusCode;
-use axum::response::{Html, Redirect};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
 use leptos::prelude::*;
@@ -36,6 +36,15 @@ const HISTORY_CAPACITY: usize = 50;
 
 /// The most log lines shown on /logs.
 const LOG_LINES_SHOWN: usize = 200;
+
+/// The cookie the top bar's live-updates toggle sets: `ff_live=1` (the
+/// default when no cookie is there) or `ff_live=0`. A cookie, not a query
+/// parameter, so the choice outlives the page — there is no JavaScript to
+/// keep it in.
+const LIVE_COOKIE: &str = "ff_live";
+
+/// How often a page refreshes itself while live updates are on.
+const LIVE_REFRESH_SECONDS: u32 = 5;
 
 /// The most rows of one database table a data page sub-tab shows.
 const TABLE_ROWS_SHOWN: i64 = 500;
@@ -106,7 +115,9 @@ pub fn app(config: Config, db: SqlitePool) -> Router {
         .route("/run", post(run))
         .route("/stop", post(stop))
         .route("/fetch", post(manual_fetch))
-        .route("/hosts", get(data))
+        .route("/data", get(data))
+        .route("/hosts", get(data_redirect))
+        .route("/live", get(live))
         .route("/logs", get(logs))
         .route("/logs/clear", post(clear_logs))
         .route("/config", get(config_page).post(save_config))
@@ -115,7 +126,7 @@ pub fn app(config: Config, db: SqlitePool) -> Router {
         .with_state(state)
 }
 
-async fn dashboard(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+async fn dashboard(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
     tracing::debug!("GET /");
     let history = match db::recent_runs(&state.db, HISTORY_CAPACITY).await {
         Ok(runs) => runs,
@@ -132,10 +143,13 @@ async fn dashboard(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
             State::default()
         }
     };
-    render(move || view! { <Dashboard state=state history=history data=data /> })
+    let live = live_updates(&headers);
+    render(move || {
+        view! { <Dashboard state=state history=history data=data live=live /> }
+    })
 }
 
-/// Which column of the hosts table the /hosts page sorts by.
+/// Which column of the hosts table the /data page sorts by.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HostSort {
     Host,
@@ -146,7 +160,7 @@ enum HostSort {
 }
 
 impl HostSort {
-    /// The /hosts query string's name for the column.
+    /// The /data query string's name for the column.
     fn param(self) -> &'static str {
         match self {
             HostSort::Host => "host",
@@ -157,7 +171,7 @@ impl HostSort {
         }
     }
 
-    /// The column a /hosts query string asks for, defaulting to the host.
+    /// The column a /data query string asks for, defaulting to the host.
     fn parse(param: Option<&str>) -> Self {
         match param {
             Some("software") => HostSort::Software,
@@ -218,6 +232,8 @@ struct TableAction {
     kind: &'static str,
     set: Option<&'static str>,
     label: &'static str,
+    /// Fetch even when the account has opted out of being crawled.
+    force: bool,
 }
 
 /// The per-row action a table's rows offer, if any.
@@ -227,35 +243,48 @@ fn table_action(table: &str) -> Option<TableAction> {
             kind: "post",
             set: None,
             label: "Fetch context",
+            force: false,
         }),
         "known_followings" => Some(TableAction {
             kind: "user",
             set: Some("followings"),
             label: "Backfill user",
+            force: false,
         }),
         "recently_checked_users" => Some(TableAction {
             kind: "user",
             set: Some("checked"),
             label: "Backfill user",
+            force: false,
+        }),
+        // an account that asked not to be crawled can still be fetched on
+        // demand; the button says it overrides the opt-out
+        "opted_out_accounts" => Some(TableAction {
+            kind: "user",
+            set: Some("checked"),
+            label: "Force backfill",
+            force: true,
         }),
         "seen_urls" => Some(TableAction {
             kind: "url",
             set: None,
             label: "Re-resolve",
+            force: false,
         }),
         _ => None,
     }
 }
 
-/// The /hosts page, now the data page: sub-tabs for the hosts FediFetcher
-/// has seen and for every table in the database, except logs and config,
-/// which have pages of their own. The tab query string names "hosts" or a
-/// table; anything else falls back to the hosts tab.
+/// The /data page: sub-tabs for the hosts FediFetcher has seen and for
+/// every table in the database, except logs and config, which have pages
+/// of their own. The tab query string names "hosts" or a table; anything
+/// else falls back to the hosts tab.
 async fn data(
     AxumState(state): AxumState<Arc<AppState>>,
     Query(query): Query<DataQuery>,
+    headers: HeaderMap,
 ) -> Html<String> {
-    tracing::debug!("GET /hosts");
+    tracing::debug!("GET /data");
     let config = state.config.lock().unwrap().clone();
     let state_data = match StateStore::new(config).load(&state.db).await {
         Ok(data) => data,
@@ -294,14 +323,14 @@ async fn data(
     let mut tabs = Vec::with_capacity(table_counts.len() + 1);
     tabs.push(TabLink {
         label: "Hosts".to_string(),
-        href: "/hosts?tab=hosts".to_string(),
+        href: "/data?tab=hosts".to_string(),
         count: state_data.seen_hosts().len() as i64,
         active: table.is_none(),
     });
     for (name, count) in &table_counts {
         tabs.push(TabLink {
             label: name.clone(),
-            href: format!("/hosts?tab={name}"),
+            href: format!("/data?tab={name}"),
             count: *count,
             active: table.as_deref() == Some(name.as_str()),
         });
@@ -369,25 +398,33 @@ async fn data(
         }
     };
 
-    render(move || view! { <DataPage tabs=tabs tab=tab /> })
+    let live = live_updates(&headers);
+    render(move || view! { <DataPage tabs=tabs tab=tab live=live /> })
 }
 
-/// The /logs page's query string: which column to sort by, which way, and
-/// whether the page refreshes itself. Unknown values fall back to the
-/// defaults: newest first, refreshing every few seconds.
+/// The data page was /hosts once, before the page was renamed; old links
+/// still land on it, query string included.
+async fn data_redirect(uri: Uri) -> Redirect {
+    let mut target = "/data".to_string();
+    if let Some(query) = uri.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    Redirect::permanent(&target)
+}
+
+/// The /logs page's query string: which column to sort by, and which way.
+/// Unknown values fall back to the defaults: newest first.
 #[derive(serde::Deserialize)]
 struct LogsQuery {
     sort: Option<String>,
     dir: Option<String>,
-    live: Option<String>,
 }
-
-/// How often the /logs page refreshes itself while live updates are on.
-const LOGS_REFRESH_SECONDS: u32 = 5;
 
 async fn logs(
     AxumState(state): AxumState<Arc<AppState>>,
     Query(query): Query<LogsQuery>,
+    headers: HeaderMap,
 ) -> Html<String> {
     tracing::debug!("GET /logs");
     let sort = LogSort::parse(query.sort.as_deref());
@@ -395,7 +432,7 @@ async fn logs(
         Some("asc") => LogOrder::Asc,
         _ => LogOrder::Desc,
     };
-    let live = query.live.as_deref() != Some("0");
+    let live = live_updates(&headers);
     let rows = match db::recent_logs(&state.db, LOG_LINES_SHOWN, sort, order).await {
         Ok(rows) => rows,
         Err(ex) => {
@@ -404,6 +441,52 @@ async fn logs(
         }
     };
     render(move || view! { <LogsPage rows=rows sort=sort order=order live=live /> })
+}
+
+/// The /live query string: whether live updates are on.
+#[derive(serde::Deserialize)]
+struct LiveQuery {
+    on: Option<String>,
+}
+
+/// The top bar's live-updates toggle: remember the choice in a cookie,
+/// then go back to the page it was clicked on.
+async fn live(Query(query): Query<LiveQuery>, headers: HeaderMap) -> impl IntoResponse {
+    let on = query.on.as_deref() != Some("0");
+    tracing::debug!("GET /live: live updates {}", if on { "on" } else { "off" });
+    let value = if on { "1" } else { "0" };
+    let cookie = format!("{LIVE_COOKIE}={value}; Path=/; Max-Age=31536000; SameSite=Lax");
+    let back = referer_path(&headers).unwrap_or_else(|| "/".to_string());
+    ([(header::SET_COOKIE, cookie)], Redirect::to(&back))
+}
+
+/// Whether live updates are on: the top bar's toggle's cookie, on by
+/// default.
+fn live_updates(headers: &HeaderMap) -> bool {
+    cookie_value(headers, LIVE_COOKIE).as_deref() != Some("0")
+}
+
+/// One cookie's value, from the request's `Cookie` header.
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let header = headers.get(header::COOKIE)?.to_str().ok()?;
+    header.split(';').map(str::trim).find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| value.to_string())
+    })
+}
+
+/// The path (with its query string) of the page a request came from, for
+/// redirecting back to it. Only the path is kept, so the redirect cannot
+/// leave the site.
+fn referer_path(headers: &HeaderMap) -> Option<String> {
+    let referer = headers.get(header::REFERER)?.to_str().ok()?;
+    let url = url::Url::parse(referer).ok()?;
+    let mut path = url.path().to_string();
+    if let Some(query) = url.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    Some(path)
 }
 
 /// Empty the log the /logs page shows, and redirect back to it.
@@ -416,9 +499,13 @@ async fn clear_logs(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
     Redirect::to("/logs")
 }
 
-async fn config_page(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+async fn config_page(
+    AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Html<String> {
     tracing::debug!("GET /config");
-    render(move || view! { <ConfigPage state=state /> })
+    let live = live_updates(&headers);
+    render(move || view! { <ConfigPage state=state live=live /> })
 }
 
 /// Save the config page's form: apply the fields to the effective config,
@@ -428,8 +515,10 @@ async fn config_page(AxumState(state): AxumState<Arc<AppState>>) -> Html<String>
 /// 303 See Other, and the browser follows it with a GET.
 async fn save_config(
     AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Redirect, (StatusCode, Html<String>)> {
+    let live = live_updates(&headers);
     let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
@@ -467,7 +556,7 @@ async fn save_config(
     let before = config.to_raw_values();
     if let Err(ex) = config.apply_values(&values) {
         tracing::warn!("POST /config: not saved: {ex}");
-        return Err(save_error(StatusCode::BAD_REQUEST, &ex.to_string()));
+        return Err(save_error(StatusCode::BAD_REQUEST, &ex.to_string(), live));
     }
     if !remove_tokens.is_empty() || !new_token.is_empty() {
         let mut tokens: Vec<String> = config
@@ -488,6 +577,7 @@ async fn save_config(
         return Err(save_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &ex.to_string(),
+            live,
         ));
     }
     let after = config.to_raw_values();
@@ -516,11 +606,11 @@ fn is_optional_option(name: &str) -> bool {
 }
 
 /// A failed save: the message, and a way back to the form.
-fn save_error(status: StatusCode, message: &str) -> (StatusCode, Html<String>) {
+fn save_error(status: StatusCode, message: &str, live: bool) -> (StatusCode, Html<String>) {
     let message = message.to_string();
     let body = render(move || {
         view! {
-            <Page title="Config".to_string() refresh=None>
+            <Page title="Config".to_string() live=live refresh=None>
                 <section>
                     <h2>"Could not save the configuration"</h2>
                     <p><code>{message}</code></p>
@@ -532,15 +622,23 @@ fn save_error(status: StatusCode, message: &str) -> (StatusCode, Html<String>) {
     (status, body)
 }
 
-async fn debug_page(AxumState(state): AxumState<Arc<AppState>>) -> Html<String> {
+async fn debug_page(
+    AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Html<String> {
     tracing::debug!("GET /debug");
-    render(move || view! { <DebugPage state=state result=None /> })
+    let live = live_updates(&headers);
+    render(move || view! { <DebugPage state=state result=None live=live /> })
 }
 
 /// Run the debug tab's form, and render the page with the result. The
 /// result is shown in the POST's own response: there is nowhere to
 /// redirect to that would not lose it.
-async fn debug_post(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -> Html<String> {
+async fn debug_post(
+    AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Html<String> {
     let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
@@ -549,7 +647,8 @@ async fn debug_post(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -> 
         DebugOutcome::Failed { message } => tracing::warn!("POST /debug: failed: {message}"),
         _ => tracing::debug!("POST /debug: succeeded"),
     }
-    render(move || view! { <DebugPage state=state result=Some(outcome) /> })
+    let live = live_updates(&headers);
+    render(move || view! { <DebugPage state=state result=Some(outcome) live=live /> })
 }
 
 /// Run one debug action against the configured server, with the first
@@ -725,6 +824,9 @@ async fn manual_fetch(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -
     let kind = field("kind");
     let key = field("key");
     let set = field("set");
+    // the opted_out_accounts table's button: fetch even when the account
+    // has opted out
+    let force = field("force") == "1";
     // the redirect target comes from a form: only a same-site path is one
     let back = match field("back").as_str() {
         back if back.starts_with('/') && !back.starts_with("//") && !back.starts_with("/\\") => {
@@ -739,7 +841,7 @@ async fn manual_fetch(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -
     if let Ok(guard) = state.run_guard.clone().try_lock_owned() {
         tracing::info!("POST /fetch: {kind} {key} triggered from the web UI");
         tokio::spawn(async move {
-            run_fetch(&state, &kind, &key, &set).await;
+            run_fetch(&state, &kind, &key, &set, force).await;
             drop(guard);
         });
     } else {
@@ -751,7 +853,7 @@ async fn manual_fetch(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -
 /// Run one manual fetch: load the state, do the work, write the state back.
 /// The lock file keeps it from overlapping a run in another process, the
 /// same as a run's own lock.
-async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str) {
+async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str, force: bool) {
     let config = state.config.lock().unwrap().clone();
     if config.server.is_empty() {
         tracing::warn!("POST /fetch: no server is configured; nothing was fetched");
@@ -794,7 +896,7 @@ async fn run_fetch(state: &Arc<AppState>, kind: &str, key: &str, set: &str) {
                 "followings" => UserSet::KnownFollowings,
                 _ => UserSet::RecentlyCheckedUsers,
             };
-            fetch::force_user_posts(&mut ctx, key, target).await;
+            fetch::force_user_posts(&mut ctx, key, target, force).await;
         }
         "host" => fetch::force_host_info(key, &http, ctx.state).await,
         "url" => fetch::force_resolve_url(&home, ctx.state, key).await,
@@ -943,12 +1045,13 @@ fn log_level_row(value: &str) -> AnyView {
 const CSS: &str = r#"
 :root { color-scheme: light dark; }
 body { font-family: system-ui, sans-serif; margin: 0; }
-header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; }
+header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; }
 header h1 { font-size: 1.1rem; margin: 0; }
 header h1 a { color: inherit; text-decoration: none; }
 .version { color: #888; font-weight: normal; }
 nav { display: flex; gap: 1rem; }
 nav a { color: #06c; }
+header a.live { margin-left: auto; color: #06c; border: 1px solid #06c55; border-radius: 0.4rem; padding: 0.1rem 0.6rem; text-decoration: none; white-space: nowrap; }
 nav.tabs { gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #8884; margin-bottom: 1.5rem; }
 nav.tabs a { color: #06c; text-decoration: none; padding-bottom: 0.25rem; }
 nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
@@ -985,8 +1088,12 @@ form.fetch button { font-size: 0.8rem; padding: 0.15rem 0.5rem; white-space: now
 #[component]
 fn Page(
     title: String,
+    /// Whether live updates are on: the top bar's toggle shows the choice,
+    /// and `refresh` decides whether this page reloads itself.
+    live: bool,
     /// When set, the page reloads itself every this many seconds — the
-    /// logs page's live updates, which need no JavaScript.
+    /// live updates the top bar's toggle controls, which need no
+    /// JavaScript.
     refresh: Option<u32>,
     children: Children,
 ) -> impl IntoView {
@@ -1009,11 +1116,12 @@ fn Page(
                     </h1>
                     <nav>
                         <a href="/">"Dashboard"</a>
-                        <a href="/hosts">"Data"</a>
+                        <a href="/data">"Data"</a>
                         <a href="/logs">"Logs"</a>
                         <a href="/config">"Config"</a>
                         <a href="/debug">"Debug"</a>
                     </nav>
+                    {live_toggle(live)}
                 </header>
                 <main>{children()}</main>
             </body>
@@ -1021,8 +1129,21 @@ fn Page(
     }
 }
 
+/// The top bar's live-updates toggle, at the bar's right: a link that
+/// flips the `ff_live` cookie and returns to this page.
+fn live_toggle(live: bool) -> AnyView {
+    let title = format!("While on, pages reload themselves every {LIVE_REFRESH_SECONDS} seconds");
+    if live {
+        view! { <a class="live" href="/live?on=0" title={title}>"Pause live updates"</a> }
+            .into_any()
+    } else {
+        view! { <a class="live" href="/live?on=1" title={title}>"Resume live updates"</a> }
+            .into_any()
+    }
+}
+
 #[component]
-fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl IntoView {
+fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State, live: bool) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
     let (status_label, status_class, is_running) = {
         let ui = state.ui.lock().unwrap();
@@ -1058,10 +1179,15 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl In
     ];
 
     // a run still in progress refreshes the page, so its elapsed time ticks
-    // and its row flips to finished when it ends
-    let live = history.iter().any(|record| record.outcome == "running");
+    // and its row flips to finished when it ends — while live updates are on
+    let run_going = history.iter().any(|record| record.outcome == "running");
+    let refresh = if live && run_going {
+        Some(LIVE_REFRESH_SECONDS)
+    } else {
+        None
+    };
     view! {
-        <Page title="Dashboard".to_string() refresh=if live { Some(5) } else { None }>
+        <Page title="Dashboard".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Run"</h2>
                 <p>
@@ -1177,7 +1303,7 @@ fn Dashboard(state: Arc<AppState>, history: Vec<RunRow>, data: State) -> impl In
 /// table in the database except logs and config (those have their own
 /// pages), each sortable by clicking a column heading.
 #[component]
-fn DataPage(tabs: Vec<TabLink>, tab: TabView) -> impl IntoView {
+fn DataPage(tabs: Vec<TabLink>, tab: TabView, live: bool) -> impl IntoView {
     let links: Vec<AnyView> = tabs
         .iter()
         .map(|tab| {
@@ -1205,7 +1331,7 @@ fn DataPage(tabs: Vec<TabLink>, tab: TabView) -> impl IntoView {
         } => table_tab(name, columns, rows, count, sort, order, action),
     };
     view! {
-        <Page title="Data".to_string() refresh=None>
+        <Page title="Data".to_string() live=live refresh=None>
             <nav class="tabs">{links}</nav>
             {section}
         </Page>
@@ -1291,11 +1417,12 @@ fn hosts_tab(
         LogOrder::Asc => "asc",
         LogOrder::Desc => "desc",
     };
-    let back = format!("/hosts?tab=hosts&sort={}&dir={}", sort.param(), dir);
+    let back = format!("/data?tab=hosts&sort={}&dir={}", sort.param(), dir);
     let action = TableAction {
         kind: "host",
         set: None,
         label: "Re-check",
+        force: false,
     };
     view! {
         <section>
@@ -1310,11 +1437,11 @@ fn hosts_tab(
                     <table>
                         <thead>
                             <tr>
-                                <th>{sort_link("Host", HostSort::Host.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
-                                <th>{sort_link("Software", HostSort::Software.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
-                                <th>{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
-                                <th>{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
-                                <th>{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/hosts?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("Host", HostSort::Host.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("Software", HostSort::Software.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th>{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
                                 <th>"Actions"</th>
                             </tr>
                         </thead>
@@ -1357,7 +1484,7 @@ fn table_tab(
     order: LogOrder,
     action: Option<TableAction>,
 ) -> AnyView {
-    let base = format!("/hosts?tab={name}");
+    let base = format!("/data?tab={name}");
     let dir = match order {
         LogOrder::Asc => "asc",
         LogOrder::Desc => "desc",
@@ -1438,14 +1565,23 @@ fn fetch_button(action: &TableAction, key: &str, back: &str) -> AnyView {
     let set_field = action
         .set
         .map(|set| view! { <input type="hidden" name="set" value={set}/> }.into_any());
+    let force_field = action
+        .force
+        .then(|| view! { <input type="hidden" name="force" value="1"/> }.into_any());
+    let title = if action.force {
+        "Ignores the account's opt-out. Runs in the background; watch the Logs page"
+    } else {
+        "Runs in the background; watch the Logs page"
+    };
     view! {
         <td>
             <form method="post" action="/fetch" class="fetch">
                 <input type="hidden" name="kind" value={action.kind}/>
                 <input type="hidden" name="key" value={key.to_string()}/>
                 {set_field}
+                {force_field}
                 <input type="hidden" name="back" value={back.to_string()}/>
-                <button type="submit" title="Runs in the background; watch the Logs page">{action.label}</button>
+                <button type="submit" title={title}>{action.label}</button>
             </form>
         </td>
     }
@@ -1454,37 +1590,22 @@ fn fetch_button(action: &TableAction, key: &str, back: &str) -> AnyView {
 
 #[component]
 fn LogsPage(rows: Vec<LogRow>, sort: LogSort, order: LogOrder, live: bool) -> impl IntoView {
-    let dir = match order {
-        LogOrder::Asc => "asc",
-        LogOrder::Desc => "desc",
-    };
     let refresh = if live {
-        Some(LOGS_REFRESH_SECONDS)
+        Some(LIVE_REFRESH_SECONDS)
     } else {
         None
     };
-    let toggle = if live {
-        view! {
-            <a href={format!("/logs?sort={}&dir={}&live=0", sort.param(), dir)}>"Pause live updates"</a>
-        }
-        .into_any()
-    } else {
-        view! {
-            <a href={format!("/logs?sort={}&dir={}&live=1", sort.param(), dir)}>"Resume live updates"</a>
-        }
-        .into_any()
-    };
     let live_note = if live {
-        format!(" The page refreshes itself every {LOGS_REFRESH_SECONDS} seconds.")
+        format!(" The page refreshes itself every {LIVE_REFRESH_SECONDS} seconds.")
     } else {
         String::new()
     };
     view! {
-        <Page title="Logs".to_string() refresh=refresh>
+        <Page title="Logs".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Recent log"</h2>
                 <p class="muted">
-                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction." {live_note} " " {toggle}
+                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction." {live_note}
                 </p>
                 <form method="post" action="/logs/clear">
                     <button type="submit">"Clear log"</button>
@@ -1577,7 +1698,7 @@ fn sort_link(
 }
 
 #[component]
-fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
+fn ConfigPage(state: Arc<AppState>, live: bool) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
     let db_path = config
         .state_dir
@@ -1665,7 +1786,7 @@ fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
     rows.push(log_level_row(&config.log_level));
     rows.push(text_row("log_format", &config.log_format));
     view! {
-        <Page title="Config".to_string() refresh=None>
+        <Page title="Config".to_string() live=live refresh=None>
             <section>
                 <h2>"Edit configuration"</h2>
                 <p class="muted">
@@ -1685,7 +1806,7 @@ fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
 }
 
 #[component]
-fn DebugPage(state: Arc<AppState>, result: Option<DebugOutcome>) -> impl IntoView {
+fn DebugPage(state: Arc<AppState>, result: Option<DebugOutcome>, live: bool) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
     let server = if config.server.is_empty() {
         "not set".to_string()
@@ -1698,7 +1819,7 @@ fn DebugPage(state: Arc<AppState>, result: Option<DebugOutcome>) -> impl IntoVie
         .map(|token| masked(token))
         .unwrap_or_else(|| "none".to_string());
     view! {
-        <Page title="Debug".to_string() refresh=None>
+        <Page title="Debug".to_string() live=live refresh=None>
             <section>
                 <h2>"Test connection"</h2>
                 <p class="muted">

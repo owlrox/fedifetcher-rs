@@ -426,3 +426,52 @@ async fn the_home_server_client_runs_against_a_live_http_server() {
         .await;
     assert_eq!(home.user_id(None).await.unwrap(), "42");
 }
+
+/// A 403 names the permission the access token is missing, so the log says
+/// which scope to add — for every endpoint a run reads.
+#[tokio::test]
+async fn a_403_names_the_missing_permission() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let host = host(&server);
+    // the home server client is authenticated, so it ignores robots.txt
+    let home = HomeServer::with_scheme(&host, "http", "secret-token", http(&dir).await);
+
+    for path in [
+        "/api/v1/bookmarks",
+        "/api/v1/favourites",
+        "/api/v1/follow_requests",
+        "/api/v1/lists",
+        "/api/v1/notifications",
+    ] {
+        server
+            .mock_async(|when, then| {
+                when.method(Method::GET).path(path);
+                then.status(403);
+            })
+            .await;
+    }
+
+    let err = home.bookmarks(10).await.unwrap_err().to_string();
+    assert!(err.contains("Status code: 403"), "{err}");
+    assert!(err.contains("read:bookmarks"), "the scope is named: {err}");
+
+    let err = home.favorites(10).await.unwrap_err().to_string();
+    assert!(err.contains("read:favorites"), "the scope is named: {err}");
+
+    let err = home.follow_requests(10).await.unwrap_err().to_string();
+    assert!(err.contains("read:follows"), "the scope is named: {err}");
+
+    let err = home.lists().await.unwrap_err().to_string();
+    assert!(err.contains("read:lists"), "the scope is named: {err}");
+
+    let err = home
+        .notification_accounts(fedifetcher::timeutil::now())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("read:notifications"),
+        "the scope is named: {err}"
+    );
+}

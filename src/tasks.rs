@@ -5,7 +5,7 @@ use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info};
 
 use crate::api::mastodon::HomeServer;
-use crate::backfill::{add_user_posts, filter_known_users, UserSet};
+use crate::backfill::{add_user_posts, filter_known_users, Force, UserSet};
 use crate::config::Config;
 use crate::context::{add_context_urls, context_urls, known_context_urls, replied_toot_server_ids};
 use crate::error::Result;
@@ -98,7 +98,13 @@ async fn fetch_timeline_context(ctx: &mut Context<'_>, timeline_posts: Vec<Post>
         }
 
         let new_users = filter_known_users(mentioned_users, ctx.state.all_known_users());
-        add_user_posts(ctx, new_users, UserSet::RecentlyCheckedUsers, false).await;
+        add_user_posts(
+            ctx,
+            new_users,
+            UserSet::RecentlyCheckedUsers,
+            Force::default(),
+        )
+        .await;
     }
 }
 
@@ -141,7 +147,13 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 accounts.len(),
                 user_list.title
             );
-            add_user_posts(ctx, accounts, UserSet::RecentlyCheckedUsers, false).await;
+            add_user_posts(
+                ctx,
+                accounts,
+                UserSet::RecentlyCheckedUsers,
+                Force::default(),
+            )
+            .await;
         }
     }
     Ok(())
@@ -206,7 +218,13 @@ async fn backfill_followings(ctx: &mut Context<'_>) -> Result<()> {
     let new_followings = filter_known_users(followings, ctx.state.all_known_users());
     let new = new_followings.len();
     info!("Got {total} followings, {new} of which are new");
-    add_user_posts(ctx, new_followings, UserSet::KnownFollowings, false).await;
+    add_user_posts(
+        ctx,
+        new_followings,
+        UserSet::KnownFollowings,
+        Force::default(),
+    )
+    .await;
     Ok(())
 }
 
@@ -225,7 +243,13 @@ async fn backfill_followers(ctx: &mut Context<'_>) -> Result<()> {
     let new_followers = filter_known_users(followers, ctx.state.all_known_users());
     let new = new_followers.len();
     info!("Got {total} followers, {new} of which are new");
-    add_user_posts(ctx, new_followers, UserSet::RecentlyCheckedUsers, false).await;
+    add_user_posts(
+        ctx,
+        new_followers,
+        UserSet::RecentlyCheckedUsers,
+        Force::default(),
+    )
+    .await;
     Ok(())
 }
 
@@ -243,7 +267,13 @@ async fn backfill_follow_requests(ctx: &mut Context<'_>) -> Result<()> {
     let new_requests = filter_known_users(follow_requests, ctx.state.all_known_users());
     let new = new_requests.len();
     info!("Got {total} follow_requests, {new} of which are new");
-    add_user_posts(ctx, new_requests, UserSet::RecentlyCheckedUsers, false).await;
+    add_user_posts(
+        ctx,
+        new_requests,
+        UserSet::RecentlyCheckedUsers,
+        Force::default(),
+    )
+    .await;
     Ok(())
 }
 
@@ -259,7 +289,13 @@ async fn backfill_from_notifications(ctx: &mut Context<'_>) -> Result<()> {
     let new_accounts = filter_known_users(accounts, ctx.state.all_known_users());
     let new = new_accounts.len();
     info!("Found {total} users in notifications, {new} of which are new");
-    add_user_posts(ctx, new_accounts, UserSet::RecentlyCheckedUsers, false).await;
+    add_user_posts(
+        ctx,
+        new_accounts,
+        UserSet::RecentlyCheckedUsers,
+        Force::default(),
+    )
+    .await;
     Ok(())
 }
 

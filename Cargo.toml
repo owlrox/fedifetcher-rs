@@ -1,6 +1,6 @@
 [package]
 name = "fedifetcher"
-version = "1.0.34"
+version = "1.0.35"
 edition = "2021"
 description = "Pull missing posts and profiles into your Mastodon instance (Rust port with web UI)"
 license = "MIT"

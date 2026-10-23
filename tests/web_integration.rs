@@ -90,7 +90,7 @@ async fn every_page_renders_without_javascript() {
 
     for (path, marker) in [
         ("/", "FediFetch NOW!"),
-        ("/hosts", "Seen hosts"),
+        ("/data", "Seen hosts"),
         ("/logs", "Recent log"),
         ("/config", "access_tokens"),
         ("/debug", "Test connection"),
@@ -491,7 +491,7 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
     let position = |body: &str, host: &str| body.find(host).unwrap();
 
     // the default is hosts alphabetically
-    let (status, body) = get(&format!("{base}/hosts")).await;
+    let (status, body) = get(&format!("{base}/data")).await;
     assert_eq!(status, 200);
     assert!(
         position(&body, "alpha.example") < position(&body, "beta.example")
@@ -503,12 +503,12 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
         "the APIs column lists the supported APIs"
     );
     assert!(
-        body.contains("/hosts?tab=hosts&amp;sort=software&amp;dir=asc"),
+        body.contains("/data?tab=hosts&amp;sort=software&amp;dir=asc"),
         "a new column sorts the page's default way"
     );
 
     // by software, ascending: Akkoma, Mastodon, Pleroma
-    let (_, body) = get(&format!("{base}/hosts?sort=software&dir=asc")).await;
+    let (_, body) = get(&format!("{base}/data?sort=software&dir=asc")).await;
     assert!(
         position(&body, "beta.example") < position(&body, "alpha.example")
             && position(&body, "alpha.example") < position(&body, "gamma.example"),
@@ -519,12 +519,12 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
         "the sorted column shows its direction"
     );
     assert!(
-        body.contains("/hosts?tab=hosts&amp;sort=software&amp;dir=desc"),
+        body.contains("/data?tab=hosts&amp;sort=software&amp;dir=desc"),
         "clicking the sorted column flips the direction"
     );
 
     // by software, descending: Pleroma, Mastodon, Akkoma
-    let (_, body) = get(&format!("{base}/hosts?sort=software&dir=desc")).await;
+    let (_, body) = get(&format!("{base}/data?sort=software&dir=desc")).await;
     assert!(
         position(&body, "gamma.example") < position(&body, "alpha.example")
             && position(&body, "alpha.example") < position(&body, "beta.example"),
@@ -532,7 +532,7 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
     );
 
     // by version, ascending: 3.13.0, 4.1.0, 4.2.0
-    let (_, body) = get(&format!("{base}/hosts?sort=version&dir=asc")).await;
+    let (_, body) = get(&format!("{base}/data?sort=version&dir=asc")).await;
     assert!(
         position(&body, "beta.example") < position(&body, "gamma.example")
             && position(&body, "gamma.example") < position(&body, "alpha.example"),
@@ -540,7 +540,7 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
     );
 
     // by last checked, descending: 1, 2, 3 days ago
-    let (_, body) = get(&format!("{base}/hosts?sort=last_checked&dir=desc")).await;
+    let (_, body) = get(&format!("{base}/data?sort=last_checked&dir=desc")).await;
     assert!(
         position(&body, "beta.example") < position(&body, "gamma.example")
             && position(&body, "gamma.example") < position(&body, "alpha.example"),
@@ -548,7 +548,7 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
     );
 
     // an unknown sort falls back to hosts alphabetically
-    let (_, body) = get(&format!("{base}/hosts?sort=nonsense")).await;
+    let (_, body) = get(&format!("{base}/data?sort=nonsense")).await;
     assert!(
         position(&body, "alpha.example") < position(&body, "beta.example")
             && position(&body, "beta.example") < position(&body, "gamma.example"),
@@ -626,7 +626,7 @@ async fn the_data_page_drills_into_the_databases_tables() {
 
     // every table but logs and config is a sub-tab, with its row count;
     // those two tables have pages of their own
-    let (status, body) = get(&format!("{base}/hosts")).await;
+    let (status, body) = get(&format!("{base}/data")).await;
     assert_eq!(status, 200);
     for tab in [
         "hosts",
@@ -636,13 +636,13 @@ async fn the_data_page_drills_into_the_databases_tables() {
         "seen_urls",
     ] {
         assert!(
-            body.contains(&format!("href=\"/hosts?tab={tab}\"")),
+            body.contains(&format!("href=\"/data?tab={tab}\"")),
             "the {tab} sub-tab is linked"
         );
     }
     for gone in ["logs", "config"] {
         assert!(
-            !body.contains(&format!("href=\"/hosts?tab={gone}\"")),
+            !body.contains(&format!("href=\"/data?tab={gone}\"")),
             "the {gone} table has its own page, not a sub-tab"
         );
     }
@@ -652,7 +652,7 @@ async fn the_data_page_drills_into_the_databases_tables() {
     assert!(body.contains("alpha.example"));
 
     // a table tab shows the table's rows, newest first by default
-    let (status, body) = get(&format!("{base}/hosts?tab=runs")).await;
+    let (status, body) = get(&format!("{base}/data?tab=runs")).await;
     assert_eq!(status, 200);
     assert!(body.contains("first run"));
     assert!(body.contains("second run"));
@@ -661,42 +661,51 @@ async fn the_data_page_drills_into_the_databases_tables() {
         "the newest row comes first by default"
     );
     assert!(
-        body.contains("/hosts?tab=runs&amp;sort=outcome&amp;dir=asc"),
+        body.contains("/data?tab=runs&amp;sort=outcome&amp;dir=asc"),
         "a column heading links to that sort"
     );
 
     // sorted by a column, ascending: error before ok
-    let (_, body) = get(&format!("{base}/hosts?tab=runs&sort=outcome&dir=asc")).await;
+    let (_, body) = get(&format!("{base}/data?tab=runs&sort=outcome&dir=asc")).await;
     assert!(
         position(&body, "first run") < position(&body, "second run"),
         "outcome ascending is error, ok"
     );
     // and descending flips it
-    let (_, body) = get(&format!("{base}/hosts?tab=runs&sort=outcome&dir=desc")).await;
+    let (_, body) = get(&format!("{base}/data?tab=runs&sort=outcome&dir=desc")).await;
     assert!(
         position(&body, "second run") < position(&body, "first run"),
         "outcome descending is ok, error"
     );
     // an unknown column falls back to the default sort, newest first
-    let (_, body) = get(&format!("{base}/hosts?tab=runs&sort=nonsense")).await;
+    let (_, body) = get(&format!("{base}/data?tab=runs&sort=nonsense")).await;
     assert!(
         position(&body, "second run") < position(&body, "first run"),
         "an unknown column falls back to the newest first"
     );
 
     // the other tables show their rows too
-    let (status, body) = get(&format!("{base}/hosts?tab=private_posts")).await;
+    let (status, body) = get(&format!("{base}/data?tab=private_posts")).await;
     assert_eq!(status, 200);
     assert!(body.contains("https://remote.example/@a/1"));
-    let (status, body) = get(&format!("{base}/hosts?tab=opted_out_accounts")).await;
+    let (status, body) = get(&format!("{base}/data?tab=opted_out_accounts")).await;
     assert_eq!(status, 200);
     assert!(body.contains("bot@remote.example"));
     assert!(body.contains("it is not indexable"));
+    // the row offers to backfill the account anyway, past its opt-out
+    assert!(body.contains("name=\"kind\" value=\"user\""));
+    assert!(body.contains("name=\"set\" value=\"checked\""));
+    assert!(
+        body.contains("name=\"force\" value=\"1\""),
+        "the button forces past the opt-out"
+    );
+    assert!(body.contains("name=\"key\" value=\"bot@remote.example\""));
+    assert!(body.contains(">Force backfill</button>"));
 
     // an unknown tab falls back to the hosts tab, and so do the tables
     // with pages of their own
     for tab in ["nonsense", "logs", "config"] {
-        let (status, body) = get(&format!("{base}/hosts?tab={tab}")).await;
+        let (status, body) = get(&format!("{base}/data?tab={tab}")).await;
         assert_eq!(status, 200);
         assert!(
             body.contains("Seen hosts"),
@@ -922,8 +931,9 @@ async fn debug_rejects_an_unknown_action() {
 }
 
 /// The logs page refreshes itself while live updates are on — a meta
-/// refresh, the one kind of live update that needs no JavaScript — and the
-/// toggle pauses and resumes it, keeping the sort.
+/// refresh, the one kind of live update that needs no JavaScript — and
+/// the top bar's toggle pauses and resumes it with a cookie, going back
+/// to the page it was clicked on.
 #[tokio::test]
 async fn the_logs_page_refreshes_itself_unless_paused() {
     let dir = common::tmp_dir();
@@ -933,27 +943,126 @@ async fn the_logs_page_refreshes_itself_unless_paused() {
     assert_eq!(status, 200);
     assert!(body.contains("http-equiv=\"refresh\""), "live by default");
     assert!(body.contains("content=\"5\""), "every five seconds");
-    assert!(body.contains("Pause live updates"));
+    assert!(
+        body.contains("href=\"/live?on=0\"") && body.contains(">Pause live updates</a>"),
+        "the top bar's toggle pauses: {body}"
+    );
 
-    let (status, body) = get(&format!("{base}/logs?live=0")).await;
+    // the toggle is in the top bar, on every page
+    let (status, body) = get(&format!("{base}/")).await;
     assert_eq!(status, 200);
+    assert!(
+        body.contains("href=\"/live?on=0\"") && body.contains(">Pause live updates</a>"),
+        "the toggle is in the top bar: {body}"
+    );
+
+    // pausing sets the cookie and goes back to the page it was clicked
+    // on, sort and all
+    let resp = client()
+        .get(format!("{base}/live?on=0"))
+        .header("Referer", format!("{base}/logs?sort=level&dir=asc"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303, "the toggle redirects back");
+    assert_eq!(
+        resp.headers().get("Location").unwrap(),
+        "/logs?sort=level&dir=asc",
+        "back to the page, the sort kept"
+    );
+    let cookie = resp.headers().get("Set-Cookie").unwrap().to_str().unwrap();
+    assert!(
+        cookie.starts_with("ff_live=0;"),
+        "the cookie pauses: {cookie}"
+    );
+
+    // with the cookie, the page does not refresh and offers to resume
+    let resp = client()
+        .get(format!("{base}/logs"))
+        .header("Cookie", "ff_live=0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
     assert!(
         !body.contains("http-equiv=\"refresh\""),
         "paused: no auto-refresh"
     );
-    assert!(body.contains("Resume live updates"));
+    assert!(
+        body.contains("href=\"/live?on=1\"") && body.contains(">Resume live updates</a>"),
+        "the toggle resumes: {body}"
+    );
 
-    // the toggle keeps the sort and direction
-    let (_, body) = get(&format!("{base}/logs?sort=level&dir=asc&live=0")).await;
+    // resuming with no page to go back to lands on the dashboard
+    let resp = client()
+        .get(format!("{base}/live?on=1"))
+        .header("Cookie", "ff_live=0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    assert_eq!(resp.headers().get("Location").unwrap(), "/");
+    let cookie = resp.headers().get("Set-Cookie").unwrap().to_str().unwrap();
     assert!(
-        body.contains("/logs?sort=level&amp;dir=asc&amp;live=1"),
-        "resuming keeps the sort: {body}"
+        cookie.starts_with("ff_live=1;"),
+        "the cookie resumes: {cookie}"
     );
-    let (_, body) = get(&format!("{base}/logs?sort=level&dir=asc")).await;
+}
+
+/// A paused dashboard does not refresh itself, even with a run in
+/// progress: the top bar's toggle pauses every page.
+#[tokio::test]
+async fn a_paused_dashboard_does_not_refresh_while_a_run_is_in_progress() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    // a run recorded as started but not finished, as one in progress is
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
+    fedifetcher::db::start_run(&db, &started).await.unwrap();
+
+    let resp = client()
+        .get(format!("{base}/"))
+        .header("Cookie", "ff_live=0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
     assert!(
-        body.contains("/logs?sort=level&amp;dir=asc&amp;live=0"),
-        "pausing keeps the sort: {body}"
+        !body.contains("http-equiv=\"refresh\""),
+        "paused: no auto-refresh, even while a run is in progress"
     );
+    assert!(
+        body.contains("href=\"/live?on=1\"") && body.contains(">Resume live updates</a>"),
+        "the toggle is in the top bar: {body}"
+    );
+}
+
+/// The data page moved from /hosts to /data: the old links redirect
+/// permanently, keeping the query string.
+#[tokio::test]
+async fn the_old_hosts_links_redirect_to_the_data_page() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    for (old, new) in [
+        ("/hosts", "/data"),
+        (
+            "/hosts?tab=runs&sort=outcome&dir=asc",
+            "/data?tab=runs&sort=outcome&dir=asc",
+        ),
+    ] {
+        let resp = client().get(format!("{base}{old}")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 308, "{old} redirects permanently");
+        assert_eq!(
+            resp.headers().get("Location").unwrap(),
+            new,
+            "{old} goes to {new}"
+        );
+    }
 }
 
 /// The data page offers a fetch button on every row of the tables that
@@ -1008,7 +1117,7 @@ async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
     let base = spawn_ui(&dir).await;
 
     // a post: fetch its context
-    let (status, body) = get(&format!("{base}/hosts?tab=trigger_posts")).await;
+    let (status, body) = get(&format!("{base}/data?tab=trigger_posts")).await;
     assert_eq!(status, 200);
     assert!(
         body.contains("action=\"/fetch\""),
@@ -1021,12 +1130,12 @@ async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
     );
     assert!(body.contains(">Fetch context</button>"));
     assert!(
-        body.contains("name=\"back\" value=\"/hosts?tab=trigger_posts&amp;sort=uri&amp;dir=asc\""),
+        body.contains("name=\"back\" value=\"/data?tab=trigger_posts&amp;sort=uri&amp;dir=asc\""),
         "the button returns to this view"
     );
 
     // a context cache row: same action
-    let (status, body) = get(&format!("{base}/hosts?tab=context_cache")).await;
+    let (status, body) = get(&format!("{base}/data?tab=context_cache")).await;
     assert_eq!(status, 200);
     assert!(
         body.contains("name=\"key\" value=\"https://remote.example/@a/5\""),
@@ -1034,7 +1143,7 @@ async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
     );
 
     // a known following: backfill the user, into the followings set
-    let (status, body) = get(&format!("{base}/hosts?tab=known_followings")).await;
+    let (status, body) = get(&format!("{base}/data?tab=known_followings")).await;
     assert_eq!(status, 200);
     assert!(body.contains("name=\"kind\" value=\"user\""));
     assert!(body.contains("name=\"set\" value=\"followings\""));
@@ -1042,27 +1151,27 @@ async fn the_data_page_offers_a_fetch_button_per_actionable_row() {
     assert!(body.contains(">Backfill user</button>"));
 
     // a recently checked user: backfill, into the checked set
-    let (status, body) = get(&format!("{base}/hosts?tab=recently_checked_users")).await;
+    let (status, body) = get(&format!("{base}/data?tab=recently_checked_users")).await;
     assert_eq!(status, 200);
     assert!(body.contains("name=\"set\" value=\"checked\""));
     assert!(body.contains("name=\"key\" value=\"bob@remote.example\""));
 
     // a seen URL: re-resolve it
-    let (status, body) = get(&format!("{base}/hosts?tab=seen_urls")).await;
+    let (status, body) = get(&format!("{base}/data?tab=seen_urls")).await;
     assert_eq!(status, 200);
     assert!(body.contains("name=\"kind\" value=\"url\""));
     assert!(body.contains("name=\"key\" value=\"https://remote.example/@a/9\""));
     assert!(body.contains(">Re-resolve</button>"));
 
     // a host: re-check its server info
-    let (status, body) = get(&format!("{base}/hosts")).await;
+    let (status, body) = get(&format!("{base}/data")).await;
     assert_eq!(status, 200);
     assert!(body.contains("name=\"kind\" value=\"host\""));
     assert!(body.contains("name=\"key\" value=\"alpha.example\""));
     assert!(body.contains(">Re-check</button>"));
 
     // a table without an action has no fetch form
-    let (status, body) = get(&format!("{base}/hosts?tab=private_posts")).await;
+    let (status, body) = get(&format!("{base}/data?tab=private_posts")).await;
     assert_eq!(status, 200);
     assert!(!body.contains("action=\"/fetch\""));
 }
@@ -1097,11 +1206,11 @@ async fn posting_fetch_redirects_back_to_the_given_page() {
 
     let (status, location) = post_fetch(
         &base,
-        "kind=url&key=https%3A%2F%2Fremote.example%2F%40a%2F1&back=%2Fhosts%3Ftab%3Dseen_urls",
+        "kind=url&key=https%3A%2F%2Fremote.example%2F%40a%2F1&back=%2Fdata%3Ftab%3Dseen_urls",
     )
     .await;
     assert_eq!(status, 303, "the POST must redirect");
-    assert_eq!(location.as_deref(), Some("/hosts?tab=seen_urls"));
+    assert_eq!(location.as_deref(), Some("/data?tab=seen_urls"));
 }
 
 /// The fetch POST's fields are validated: an unknown kind or an empty key
@@ -1113,14 +1222,14 @@ async fn posting_fetch_validates_its_fields() {
     let base = spawn_ui(&dir).await;
 
     // an unknown kind is not a fetch this UI offers
-    let (status, location) = post_fetch(&base, "kind=dance&key=x&back=/hosts").await;
+    let (status, location) = post_fetch(&base, "kind=dance&key=x&back=/data").await;
     assert_eq!(status, 303);
-    assert_eq!(location.as_deref(), Some("/hosts"));
+    assert_eq!(location.as_deref(), Some("/data"));
 
     // a fetch with no key does nothing
-    let (status, location) = post_fetch(&base, "kind=post&key=&back=/hosts").await;
+    let (status, location) = post_fetch(&base, "kind=post&key=&back=/data").await;
     assert_eq!(status, 303);
-    assert_eq!(location.as_deref(), Some("/hosts"));
+    assert_eq!(location.as_deref(), Some("/data"));
 
     // the redirect target is a same-site path, never off-site
     for form in [

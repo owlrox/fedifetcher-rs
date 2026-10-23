@@ -1,13 +1,10 @@
 //! Fetching the posts of accounts we do not follow yet.
 
-use sqlx::SqlitePool;
 use tracing::{debug, error, info, warn};
 
 use crate::api::{client_for, find_post};
-use crate::config::Config;
 use crate::context::{add_context_urls, context_fetchable, known_context_urls};
 use crate::db::mark_opted_out_account;
-use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::Context;
 use crate::servers::server_info;
@@ -35,6 +32,19 @@ impl UserSet {
     }
 }
 
+/// Which of an account's own wishes a backfill goes past: `known`
+/// fetches an account that is already known, `opt_out` one that has
+/// asked not to be crawled. A run goes past neither — only accounts that
+/// are new and have not opted out are fetched — while the web UI's
+/// buttons go past the ones they say they do.
+#[derive(Clone, Copy, Default)]
+pub struct Force {
+    /// Fetch the account even though it is already known.
+    pub known: bool,
+    /// Fetch the account even though it has opted out.
+    pub opt_out: bool,
+}
+
 pub fn filter_known_users(users: Vec<User>, known_users: &TimestampedSet) -> Vec<User> {
     users
         .into_iter()
@@ -57,22 +67,22 @@ pub fn opt_out_reason(user: &User) -> Option<&'static str> {
     None
 }
 
+/// Fetch one account's posts. With `force_opt_out`, an account that has
+/// opted out is fetched anyway — only the data page's button on an
+/// opted-out account passes that.
 pub async fn user_posts(
+    ctx: &mut Context<'_>,
     user: &User,
     target: UserSet,
-    server: &str,
-    http: &HttpClient,
-    config: &Config,
-    state: &mut State,
-    db: &SqlitePool,
+    force_opt_out: bool,
 ) -> Option<Vec<Post>> {
-    if config.respect_user_opt_out {
+    if ctx.config.respect_user_opt_out && !force_opt_out {
         if let Some(reason) = opt_out_reason(user) {
             // the skip costs no requests — it happens before any server is
             // contacted — but the account is recorded so the log line fires
             // the first time only; the account is still re-checked each run,
             // so one that later opts in is fetched after all
-            let first_seen = match mark_opted_out_account(db, &user.acct, reason).await {
+            let first_seen = match mark_opted_out_account(ctx.db, &user.acct, reason).await {
                 Ok(first_seen) => first_seen,
                 Err(ex) => {
                     warn!("Could not record opted-out account {}: {ex}", user.acct);
@@ -96,32 +106,32 @@ pub async fn user_posts(
     let Some(host) = host_of(&user.url) else {
         error!("Error parsing Profile URL {}", user.url);
         // We are adding it as 'known' anyway, because we won't be able to fix this.
-        target.get(state).add(&user.acct, None);
+        target.get(ctx.state).add(&user.acct, None);
         return None;
     };
 
-    if host == server {
+    if host == ctx.home.server {
         debug!("{} is a local user. Skip", user.acct);
-        target.get(state).add(&user.acct, None);
+        target.get(ctx.state).add(&user.acct, None);
         return None;
     }
 
-    let Some(post_server) = server_info(&host, state.seen_hosts_mut(), http).await else {
+    let Some(post_server) = server_info(&host, ctx.state.seen_hosts_mut(), ctx.http).await else {
         error!("server {host} not found for post");
         return None;
     };
 
-    let client = client_for(&post_server, http)?;
+    let client = client_for(&post_server, ctx.http)?;
 
     // the server has told us what it runs, so only its own URL shapes are tried
     let Some(username) = client.username_from(&user.url) else {
         error!("Error parsing Profile URL {}", user.url);
-        target.get(state).add(&user.acct, None);
+        target.get(ctx.state).add(&user.acct, None);
         return None;
     };
 
     client
-        .fetch_user_posts(&username, &user.url, config.max_posts_per_account)
+        .fetch_user_posts(&username, &user.url, ctx.config.max_posts_per_account)
         .await
 }
 
@@ -146,32 +156,25 @@ pub async fn add_post_with_context(ctx: &mut Context<'_>, post: &Post) -> bool {
     false
 }
 
-/// Add the posts of the given accounts. `force` fetches an account even
-/// when it is already known — a run passes false, a manual fetch true.
+/// Add the posts of the given accounts. `force` says which of the
+/// accounts' own wishes the fetch goes past: a run passes
+/// `Force::default()`, fetching only accounts that are neither known
+/// nor opted out; the web UI's buttons pass what they need.
 pub async fn add_user_posts(
     ctx: &mut Context<'_>,
     followings: Vec<User>,
     target: UserSet,
-    force: bool,
+    force: Force,
 ) {
     let home_server = ctx.home.server.clone();
     for user in followings {
         if ctx.cancel.is_canceled() {
             break;
         }
-        if (!ctx.state.all_known_users().contains(&user.acct) || force)
+        if (!ctx.state.all_known_users().contains(&user.acct) || force.known)
             && !user.url.starts_with(&format!("https://{home_server}/"))
         {
-            let posts = user_posts(
-                &user,
-                target,
-                &home_server,
-                ctx.http,
-                ctx.config,
-                ctx.state,
-                ctx.db,
-            )
-            .await;
+            let posts = user_posts(ctx, &user, target, force.opt_out).await;
 
             if let Some(posts) = posts {
                 let mut count = 0;

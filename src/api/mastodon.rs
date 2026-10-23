@@ -506,6 +506,8 @@ impl HomeServer {
         }
     }
 
+    /// `required_scope` names the permission a 401/403 answer is reported
+    /// with, so the log says which scope the access token is missing.
     async fn paginated(
         &self,
         path: &str,
@@ -551,29 +553,39 @@ impl HomeServer {
     }
 
     pub async fn bookmarks(&self, limit: i64) -> Result<Vec<Post>> {
-        self.posts("/api/v1/bookmarks", StopAt::Count(limit), "")
+        self.posts("/api/v1/bookmarks", StopAt::Count(limit), "read:bookmarks")
             .await
     }
 
     pub async fn favorites(&self, limit: i64) -> Result<Vec<Post>> {
-        self.posts("/api/v1/favourites", StopAt::Count(limit), "")
+        self.posts("/api/v1/favourites", StopAt::Count(limit), "read:favorites")
             .await
     }
 
-    async fn accounts(&self, path: &str, stop_at: StopAt) -> Result<Vec<User>> {
-        let raw = self.paginated(path, &stop_at, "").await?;
+    async fn accounts(
+        &self,
+        path: &str,
+        stop_at: StopAt,
+        required_scope: &str,
+    ) -> Result<Vec<User>> {
+        let raw = self.paginated(path, &stop_at, required_scope).await?;
         Ok(usable(raw.iter().map(parse_user)))
     }
 
     pub async fn follow_requests(&self, limit: i64) -> Result<Vec<User>> {
-        self.accounts("/api/v1/follow_requests", StopAt::Count(limit))
-            .await
+        self.accounts(
+            "/api/v1/follow_requests",
+            StopAt::Count(limit),
+            "read:follows",
+        )
+        .await
     }
 
     pub async fn followers(&self, user_id: &str, limit: i64) -> Result<Vec<User>> {
         self.accounts(
             &format!("/api/v1/accounts/{user_id}/followers"),
             StopAt::Count(limit),
+            "read:follows",
         )
         .await
     }
@@ -582,12 +594,15 @@ impl HomeServer {
         self.accounts(
             &format!("/api/v1/accounts/{user_id}/following"),
             StopAt::Count(limit),
+            "read:follows",
         )
         .await
     }
 
     pub async fn lists(&self) -> Result<Vec<UserList>> {
-        let raw = self.paginated("/api/v1/lists", &StopAt::All, "").await?;
+        let raw = self
+            .paginated("/api/v1/lists", &StopAt::All, "read:lists")
+            .await?;
         Ok(usable(raw.iter().map(parse_list)))
     }
 
@@ -595,7 +610,7 @@ impl HomeServer {
         self.posts(
             &format!("/api/v1/timelines/list/{list_id}"),
             StopAt::Count(limit),
-            "",
+            "read:lists",
         )
         .await
     }
@@ -604,6 +619,7 @@ impl HomeServer {
         self.accounts(
             &format!("/api/v1/lists/{list_id}/accounts"),
             StopAt::Count(limit),
+            "read:lists",
         )
         .await
     }
@@ -611,7 +627,11 @@ impl HomeServer {
     /// Accounts appearing in notifications since the given time.
     pub async fn notification_accounts(&self, since: OffsetDateTime) -> Result<Vec<User>> {
         let notifications = self
-            .paginated("/api/v1/notifications", &StopAt::Since(since), "")
+            .paginated(
+                "/api/v1/notifications",
+                &StopAt::Since(since),
+                "read:notifications",
+            )
             .await?;
         let mut accounts: Vec<User> = Vec::new();
         for notification in &notifications {

@@ -199,6 +199,7 @@ async fn force_user_posts_refuses_an_opted_out_account() {
         &mut ctx,
         "bot@remote.example",
         UserSet::RecentlyCheckedUsers,
+        false,
     )
     .await;
     drop(guard);
@@ -217,6 +218,53 @@ async fn force_user_posts_refuses_an_opted_out_account() {
     assert!(logs.text().contains("bot@remote.example"));
 }
 
+/// The data page's button on an opted-out account forces the backfill: the
+/// recorded opt-out is overridden, and the fetch goes ahead (failing here
+/// only because the host is not there).
+#[tokio::test]
+async fn force_user_posts_fetches_an_opted_out_account_when_forced() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "home.example");
+    let db = db::open(&config).await.unwrap();
+    let http = HttpClient::new(config.clone(), db.clone());
+    let home = HomeServer::with_scheme("home.example", "http", "secret-token", http.clone());
+    let mut state = State::default();
+    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+
+    db::mark_opted_out_account(&db, "bot@127.0.0.1:9", "it is not indexable")
+        .await
+        .unwrap();
+
+    let logs = common::LogCapture::new();
+    let guard = logs.install();
+    fetch::force_user_posts(
+        &mut ctx,
+        "bot@127.0.0.1:9",
+        UserSet::RecentlyCheckedUsers,
+        true,
+    )
+    .await;
+    drop(guard);
+
+    let logged = logs.text();
+    assert!(
+        logged.contains("backfilling bot@127.0.0.1:9 anyway"),
+        "the opt-out is overridden: {logged}"
+    );
+    assert!(
+        logged.contains("opted out (it is not indexable)"),
+        "the recorded reason is kept: {logged}"
+    );
+    assert!(
+        !logged.contains("not backfilling"),
+        "the account is not refused: {logged}"
+    );
+    assert!(
+        logged.contains("server info for 127.0.0.1:9 is unavailable"),
+        "the backfill was attempted: {logged}"
+    );
+}
+
 /// A local account has nothing to backfill.
 #[tokio::test]
 async fn force_user_posts_refuses_a_local_account() {
@@ -230,7 +278,7 @@ async fn force_user_posts_refuses_a_local_account() {
 
     let logs = common::LogCapture::new();
     let guard = logs.install();
-    fetch::force_user_posts(&mut ctx, "alice", UserSet::KnownFollowings).await;
+    fetch::force_user_posts(&mut ctx, "alice", UserSet::KnownFollowings, false).await;
     drop(guard);
 
     assert!(logs.text().contains("local user"), "{}", logs.text());
