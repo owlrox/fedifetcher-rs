@@ -9,6 +9,7 @@
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{AssertSqlSafe, Row};
+use tracing::debug;
 
 use crate::config::{Config, RawValues};
 use crate::error::{Error, Result};
@@ -41,6 +42,12 @@ pub struct RunRow {
     pub message: String,
 }
 
+/// How long a write waits for another connection's transaction to finish
+/// before failing with "database is locked". A state save can hold the
+/// database's single write lock for seconds; a write that arrives meanwhile
+/// waits it out rather than failing.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Open the database, creating it and its tables if they are not there yet.
 pub async fn open(config: &Config) -> Result<SqlitePool> {
     std::fs::create_dir_all(&config.state_dir).map_err(|ex| {
@@ -52,16 +59,30 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
     let path = config.state_dir.join("fedifetcher.db");
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect_with(
-            SqliteConnectOptions::new()
-                .filename(&path)
-                .create_if_missing(true)
-                // WAL lets the web UI read while a run is writing
-                .journal_mode(SqliteJournalMode::Wal)
-                .busy_timeout(std::time::Duration::from_secs(5)),
-        )
+        .connect_with(sqlite_options(&path, BUSY_TIMEOUT))
         .await
         .map_err(|ex| Error(format!("Could not open {}: {ex}", path.display())))?;
+    create_schema(&pool).await?;
+    Ok(pool)
+}
+
+/// The options every pool to the database file shares: WAL, so the web UI
+/// can read while a run is writing, and a busy timeout, so a write waits
+/// out another connection's transaction instead of failing at once.
+fn sqlite_options(
+    path: &std::path::Path,
+    busy_timeout: std::time::Duration,
+) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(busy_timeout)
+}
+
+/// Create the tables if they are not there yet, and reshape the ones older
+/// versions wrote.
+async fn create_schema(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,7 +92,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             message TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -83,7 +104,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             message TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -92,7 +113,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             first_marked TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -102,7 +123,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             first_seen TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -112,7 +133,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             last_seen TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -133,7 +154,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             mentions TEXT
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -142,7 +163,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             value TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -151,7 +172,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             first_seen TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -160,7 +181,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             first_seen TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -169,10 +190,10 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             first_seen TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
-    create_seen_hosts(&pool).await?;
+    create_seen_hosts(pool).await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS context_cache (
             uri TEXT PRIMARY KEY,
@@ -180,7 +201,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             created_at TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -191,7 +212,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             post_id TEXT
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     sqlx::query(
@@ -201,13 +222,13 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
             fetched_at TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .map_err(db_error)?;
     // databases written by earlier versions get their tables reshaped here
-    migrate_trigger_posts(&pool).await?;
-    migrate_seen_hosts(&pool).await?;
-    Ok(pool)
+    migrate_trigger_posts(pool).await?;
+    migrate_seen_hosts(pool).await?;
+    Ok(())
 }
 
 /// Create the seen_hosts table, whose fields are columns rather than one
@@ -259,6 +280,54 @@ async fn migrate_trigger_posts(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// How many times a write is retried while another connection holds the
+/// database's single write lock. Each attempt already waits out the busy
+/// timeout; the retries cover a lock held longer still, and the snapshot
+/// conflict below, which no timeout waits out.
+const LOCKED_RETRIES: usize = 3;
+
+/// Whether a database error is the write lock being held by another
+/// connection: SQLITE_BUSY (5), or SQLITE_BUSY_SNAPSHOT (517) — a
+/// transaction that read, then found another connection had written since,
+/// so its read snapshot can no longer be upgraded to a write. The busy
+/// timeout waits out the first; the second fails at once. Both are worth
+/// retrying: a fresh attempt gets a fresh snapshot and a fresh chance at
+/// the lock.
+fn is_locked(ex: &sqlx::Error) -> bool {
+    match ex {
+        sqlx::Error::Database(db) => {
+            matches!(db.code().as_deref(), Some("5") | Some("517"))
+        }
+        _ => false,
+    }
+}
+
+/// Run a database write, retrying while another connection holds the
+/// database's single write lock. SQLite lets one connection write at a
+/// time; a write that arrives while a long transaction — a state save, a
+/// scan's trigger-post record — is running fails at once with "database is
+/// locked" rather than queueing, so the write is tried again after a short
+/// pause. The write must be safe to repeat: a failed attempt's transaction
+/// rolls back when it is dropped.
+async fn retry_locked<T, F, Fut>(mut write: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, sqlx::Error>>,
+{
+    let mut attempt = 0;
+    loop {
+        match write().await {
+            Ok(value) => return Ok(value),
+            Err(ex) if is_locked(&ex) && attempt < LOCKED_RETRIES => {
+                attempt += 1;
+                debug!("Database is locked; retrying the write (attempt {attempt})");
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
+            }
+            Err(ex) => return Err(db_error(ex)),
+        }
+    }
+}
+
 /// Rebuild a seen_hosts table that kept every field in one JSON `info`
 /// column, breaking each row's fields out into columns. Rows whose JSON does
 /// not parse are dropped, as the load path dropped them.
@@ -282,7 +351,9 @@ async fn migrate_seen_hosts(pool: &SqlitePool) -> Result<()> {
         let Ok(value) = serde_json::from_str::<Value>(&info) else {
             continue;
         };
-        insert_host_row(pool, &HostRow::from_state_value(&host, &value)).await?;
+        insert_host_row(pool, &HostRow::from_state_value(&host, &value))
+            .await
+            .map_err(db_error)?;
     }
     sqlx::query("DROP TABLE seen_hosts_legacy")
         .execute(pool)
@@ -798,19 +869,35 @@ pub async fn record_trigger_posts(
     if posts.is_empty() {
         return Ok(0);
     }
+    retry_locked(|| record_trigger_posts_tx(pool, posts, keep)).await
+}
+
+/// One attempt at `record_trigger_posts`, as a database-level result so the
+/// caller can tell a held write lock from any other failure.
+async fn record_trigger_posts_tx(
+    pool: &SqlitePool,
+    posts: &[TriggerPost],
+    keep: i64,
+) -> std::result::Result<usize, sqlx::Error> {
     let now = timeutil::fmt_state_ts(timeutil::now());
-    let mut tx = pool.begin().await.map_err(db_error)?;
+    // Which posts are new is counted before the write transaction: a
+    // transaction that reads and then writes fails at once when another
+    // connection writes in between (its read snapshot can no longer be
+    // upgraded to a write), and the count is only for the log line anyway.
     let mut fresh = 0usize;
+    let mut counted = std::collections::HashSet::new();
     for post in posts {
         let existed: Option<(String,)> =
             sqlx::query_as("SELECT first_seen FROM trigger_posts WHERE uri = ?")
                 .bind(&post.uri)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_error)?;
-        if existed.is_none() {
+                .fetch_optional(pool)
+                .await?;
+        if existed.is_none() && counted.insert(post.uri.as_str()) {
             fresh += 1;
         }
+    }
+    let mut tx = pool.begin().await?;
+    for post in posts {
         sqlx::query(
             "INSERT INTO trigger_posts (uri, url, acct, author_url, replies_count, created_at, in_reply_to_id, in_reply_to_account_id, is_public, is_boost, mentions, source, first_seen, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -842,8 +929,7 @@ pub async fn record_trigger_posts(
         .bind(&now)
         .bind(&now)
         .execute(&mut *tx)
-        .await
-        .map_err(db_error)?;
+        .await?;
     }
     // keep only the newest rows, so the table cannot grow forever
     sqlx::query(
@@ -852,9 +938,8 @@ pub async fn record_trigger_posts(
     )
     .bind(keep)
     .execute(&mut *tx)
-    .await
-    .map_err(db_error)?;
-    tx.commit().await.map_err(db_error)?;
+    .await?;
+    tx.commit().await?;
     Ok(fresh)
 }
 
@@ -902,7 +987,7 @@ fn host_row(row: &sqlx::sqlite::SqliteRow) -> HostRow {
 }
 
 /// Write one seen_hosts row, whose fields are columns.
-async fn insert_host_row<'e, E>(executor: E, row: &HostRow) -> Result<()>
+async fn insert_host_row<'e, E>(executor: E, row: &HostRow) -> std::result::Result<(), sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -922,8 +1007,7 @@ where
     .bind(&row.error)
     .bind(&row.raw_nodeinfo)
     .execute(executor)
-    .await
-    .map_err(db_error)?;
+    .await?;
     Ok(())
 }
 
@@ -992,7 +1076,19 @@ pub async fn load_state(pool: &SqlitePool) -> Result<State> {
 /// Write the whole remembered state back, replacing what was there. The
 /// append-only collections keep only their newest `max_entries` items.
 pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) -> Result<()> {
-    let mut tx = pool.begin().await.map_err(db_error)?;
+    retry_locked(|| save_state_tx(pool, state, max_entries)).await
+}
+
+/// One attempt at `save_state`, as a database-level result so the caller
+/// can tell a held write lock from any other failure. The transaction is
+/// long when the remembered state is large, so it is the write most likely
+/// to find the lock held — and to hold it for everyone else.
+async fn save_state_tx(
+    pool: &SqlitePool,
+    state: &State,
+    max_entries: usize,
+) -> std::result::Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
 
     save_timestamped_set(&mut tx, "seen_urls", "uri", state.seen_urls(), max_entries).await?;
     save_timestamped_set(
@@ -1014,30 +1110,26 @@ pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) ->
 
     sqlx::query("DELETE FROM seen_hosts")
         .execute(&mut *tx)
-        .await
-        .map_err(db_error)?;
+        .await?;
     for (host, info) in state.seen_hosts().iter() {
         insert_host_row(&mut *tx, &HostRow::from_state_value(host, info)).await?;
     }
 
     sqlx::query("DELETE FROM context_cache")
         .execute(&mut *tx)
-        .await
-        .map_err(db_error)?;
+        .await?;
     for (uri, entry) in state.recently_checked_context().entries() {
         sqlx::query("INSERT INTO context_cache (uri, last_seen, created_at) VALUES (?, ?, ?)")
             .bind(uri)
             .bind(timeutil::fmt_state_ts(entry.last_seen))
             .bind(timeutil::fmt_state_ts(entry.created_at))
             .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+            .await?;
     }
 
     sqlx::query("DELETE FROM replied_toots")
         .execute(&mut *tx)
-        .await
-        .map_err(db_error)?;
+        .await?;
     let replied: Vec<_> = state.replied_toot_server_ids().iter().collect();
     let start = replied.len().saturating_sub(max_entries);
     for (url, toot) in &replied[start..] {
@@ -1060,11 +1152,10 @@ pub async fn save_state(pool: &SqlitePool, state: &State, max_entries: usize) ->
         .bind(server)
         .bind(post_id)
         .execute(&mut *tx)
-        .await
-        .map_err(db_error)?;
+        .await?;
     }
 
-    tx.commit().await.map_err(db_error)?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1097,12 +1188,11 @@ async fn save_timestamped_set(
     key_column: &str,
     set: &TimestampedSet,
     max_entries: usize,
-) -> Result<()> {
+) -> std::result::Result<(), sqlx::Error> {
     let delete = format!("DELETE FROM {table}");
     sqlx::query(AssertSqlSafe(delete))
         .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
+        .await?;
     let entries: Vec<_> = set.entries().collect();
     let start = entries.len().saturating_sub(max_entries);
     let insert = format!("INSERT INTO {table} ({key_column}, first_seen) VALUES (?, ?)");
@@ -1111,8 +1201,7 @@ async fn save_timestamped_set(
             .bind(*item)
             .bind(timeutil::fmt_state_ts(*when))
             .execute(&mut **tx)
-            .await
-            .map_err(db_error)?;
+            .await?;
     }
     Ok(())
 }
@@ -1741,6 +1830,128 @@ mod tests {
         // recording nothing records nothing, and prunes nothing
         assert_eq!(record_trigger_posts(&pool, &[], 3).await.unwrap(), 0);
         assert_eq!(table_count(&pool, "trigger_posts").await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_post_seen_twice_in_one_scan_counts_as_new_once() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+
+        let post = sample_trigger_post("https://remote.example/@a/1", "home timeline");
+        assert_eq!(
+            record_trigger_posts(&pool, &[post.clone(), post], 100)
+                .await
+                .unwrap(),
+            1,
+            "a post repeated in one scan is new once"
+        );
+    }
+
+    /// A pool on the test database with its own busy timeout, so a write
+    /// fails at once instead of waiting out another connection's lock.
+    async fn pool_at(path: &std::path::Path, busy_timeout: std::time::Duration) -> SqlitePool {
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlite_options(path, busy_timeout))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_held_write_lock_is_recognized_as_locked() {
+        let (_config, dir) = test_config();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fedifetcher.db");
+        let writer = pool_at(&path, std::time::Duration::from_secs(30)).await;
+        create_schema(&writer).await.unwrap();
+        let reader = pool_at(&path, std::time::Duration::ZERO).await;
+
+        let insert =
+            "INSERT INTO logs (ts, level, target, message) VALUES ('t', 'INFO', 'test', 'm')";
+
+        // SQLITE_BUSY: a write while another connection holds the write lock
+        let mut tx = writer.begin().await.unwrap();
+        sqlx::query(insert).execute(&mut *tx).await.unwrap();
+        let err = sqlx::query(insert).execute(&reader).await.unwrap_err();
+        assert!(is_locked(&err), "a held lock reads as locked: {err}");
+        tx.commit().await.unwrap();
+
+        // SQLITE_BUSY_SNAPSHOT: a transaction that read, then found another
+        // connection had written since, cannot upgrade its snapshot to a write
+        let mut tx = reader.begin().await.unwrap();
+        let _: Option<(i64,)> = sqlx::query_as("SELECT COUNT(*) FROM logs")
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(insert).execute(&writer).await.unwrap();
+        let err = sqlx::query(insert).execute(&mut *tx).await.unwrap_err();
+        assert!(is_locked(&err), "a stale snapshot reads as locked: {err}");
+        // the pool has one connection; the open transaction holds it
+        drop(tx);
+
+        // any other database error is not a held lock
+        let err = sqlx::query("INSERT INTO logs (ts) VALUES ('t')")
+            .execute(&reader)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, sqlx::Error::Database(_)),
+            "the failed insert is a database error: {err}"
+        );
+        assert!(!is_locked(&err), "a constraint error is not a lock: {err}");
+    }
+
+    /// The failure a run logs when it cannot record its trigger posts: the
+    /// web UI and the log writer are writing to the same database all the
+    /// while, and a write that arrives mid-transaction fails at once.
+    #[tokio::test]
+    async fn a_write_is_retried_while_another_connection_holds_the_lock() {
+        let (_config, dir) = test_config();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fedifetcher.db");
+        let pool = pool_at(&path, std::time::Duration::ZERO).await;
+        create_schema(&pool).await.unwrap();
+        let other = pool_at(&path, std::time::Duration::from_secs(30)).await;
+
+        // another connection holds the write lock until the test releases it
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn(async move {
+            let mut tx = other.begin().await.unwrap();
+            sqlx::query(
+                "INSERT INTO logs (ts, level, target, message) VALUES ('t', 'INFO', 'test', 'held')",
+            )
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            let _ = held.await;
+            tx.commit().await.unwrap();
+        });
+
+        // the write fails at once while the lock is held, and succeeds once
+        // it is released
+        let writing = pool.clone();
+        let write = tokio::spawn(async move {
+            record_trigger_posts(
+                &writing,
+                &[sample_trigger_post(
+                    "https://remote.example/@a/1",
+                    "home timeline",
+                )],
+                100,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = release.send(());
+        assert_eq!(write.await.unwrap().unwrap(), 1, "the post is new");
+        holder.await.unwrap();
+        assert!(
+            trigger_post(&pool, "https://remote.example/@a/1")
+                .await
+                .unwrap()
+                .is_some(),
+            "the post is recorded"
+        );
     }
 
     /// Open a database whose trigger_posts table predates the columns that
