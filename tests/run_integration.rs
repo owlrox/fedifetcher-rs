@@ -27,6 +27,14 @@ async fn a_run_with_nothing_enabled_still_succeeds() {
         !dir.join("lock.lock").exists(),
         "the lock should be released"
     );
+    let runs = fedifetcher::db::recent_runs(&db, 10).await.unwrap();
+    assert_eq!(runs.len(), 1, "the run should record itself in the history");
+    assert_eq!(runs[0].outcome, "ok");
+    assert!(
+        runs[0].message.starts_with("Processing finished in "),
+        "{}",
+        runs[0].message
+    );
 }
 
 #[cfg(unix)]
@@ -67,6 +75,14 @@ async fn a_held_lock_stops_the_run() {
         "the foreign lock is not ours to remove"
     );
     assert_eq!(fail.calls(), 1, "the failure callback should fire");
+    let runs = fedifetcher::db::recent_runs(&db, 10).await.unwrap();
+    assert_eq!(runs.len(), 1, "the refused run should record itself too");
+    assert_eq!(runs[0].outcome, "error");
+    assert!(
+        runs[0].message.contains("Another FediFetcher is running"),
+        "{}",
+        runs[0].message
+    );
 }
 
 /// A lock in the old format (no recorded process) is reclaimed, not blocking.
@@ -189,6 +205,14 @@ async fn a_canceled_run_stops_before_doing_anything() {
     assert!(
         !dir.join("lock.lock").exists(),
         "the lock should be released"
+    );
+    let runs = fedifetcher::db::recent_runs(&db, 10).await.unwrap();
+    assert_eq!(runs.len(), 1, "the stopped run should record itself too");
+    assert_eq!(runs[0].outcome, "stopped");
+    assert!(
+        runs[0].message.starts_with("Stopped after "),
+        "{}",
+        runs[0].message
     );
 }
 

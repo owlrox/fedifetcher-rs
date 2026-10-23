@@ -21,12 +21,14 @@ use tracing::{debug, info, warn};
 
 use crate::api::mastodon::{masked, parse_post, report_mastodon_error, HomeServer};
 use crate::config::Config;
+use crate::db;
 use crate::error::Error;
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::{CancelToken, Context, Pause};
 use crate::store::{lock, LockGuard, StateStore};
 use crate::tasks::fetch_timeline_context;
+use crate::timeutil;
 
 /// Seconds to wait before reconnecting after the stream ends or fails,
 /// tried in order, the last one repeating.
@@ -390,13 +392,30 @@ async fn handle_update(handler: &Handler, data: &str) {
 
 /// Fetch the given posts' context in one session, with the lock held: the
 /// posts are recorded as trigger posts under the "stream" source, and the
-/// state is written back before the lock is released.
+/// state is written back before the lock is released. The fetch records
+/// itself in the run history, like a manual one, so the web UI's pill shows
+/// it as running while it holds the lock.
 async fn handle_posts(handler: &Handler, posts: Vec<Post>, lock: LockGuard) {
+    let started = timeutil::now();
+    let run_id = match db::start_run(&handler.db, &timeutil::fmt_state_ts(started)).await {
+        Ok(id) => Some(id),
+        Err(ex) => {
+            warn!("Stream: could not record the fetch's start in the database: {ex}");
+            None
+        }
+    };
     let store = StateStore::new(handler.config.clone());
     let mut session = match store.session(&handler.db).await {
         Ok(session) => session,
         Err(ex) => {
             warn!("Stream: could not load the state: {ex}");
+            finish_stream_fetch(
+                &handler.db,
+                run_id,
+                "error",
+                &format!("Stream: home timeline (could not load the state: {ex})"),
+            )
+            .await;
             return;
         }
     };
@@ -412,10 +431,36 @@ async fn handle_posts(handler: &Handler, posts: Vec<Post>, lock: LockGuard) {
         };
         fetch_timeline_context(&mut ctx, posts, "stream").await;
     }
-    if let Err(ex) = session.finish().await {
-        warn!("Stream: could not write the state back: {ex}");
-    }
+    let (outcome, message) = match session.finish().await {
+        Ok(()) => ("ok".to_string(), "Stream: home timeline".to_string()),
+        Err(ex) => {
+            warn!("Stream: could not write the state back: {ex}");
+            (
+                "error".to_string(),
+                format!("Stream: home timeline (could not write the state back: {ex})"),
+            )
+        }
+    };
+    finish_stream_fetch(&handler.db, run_id, &outcome, &message).await;
     drop(lock);
+}
+
+/// Complete the stream fetch's run history row.
+async fn finish_stream_fetch(db: &SqlitePool, run_id: Option<i64>, outcome: &str, message: &str) {
+    let Some(id) = run_id else {
+        return;
+    };
+    if let Err(ex) = db::finish_run(
+        db,
+        id,
+        &timeutil::fmt_state_ts(timeutil::now()),
+        outcome,
+        message,
+    )
+    .await
+    {
+        warn!("Stream: could not record the fetch's end in the database: {ex}");
+    }
 }
 
 /// Handle the queued update events as soon as the lock a run holds comes

@@ -908,41 +908,15 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> 
         tracing::info!("POST /run: run triggered from the web UI");
         state.cancel.reset();
         state.pause.resume();
-        let started = timeutil::now();
-        // the run is recorded the moment it starts — the history row is
-        // the one source of run status, so every page's pill flips to
-        // running with the row, not with anything held in memory
-        let run_id = match db::start_run(&state.db, &timeutil::fmt_state_ts(started)).await {
-            Ok(id) => Some(id),
-            Err(ex) => {
-                tracing::warn!("Could not record the run's start in the database: {ex}");
-                None
-            }
-        };
         tokio::spawn(async move {
             let config = state.config.lock().unwrap().clone();
             let cancel = state.cancel.clone();
             let pause = state.pause.clone();
-            let outcome = run_once(config.clone(), cancel.clone(), pause.clone(), &state.db).await;
-            let finished = timeutil::now();
-            let (outcome_label, message) = match &outcome {
-                Ok(message) if cancel.is_canceled() => ("stopped".to_string(), message.clone()),
-                Ok(message) => ("ok".to_string(), message.clone()),
-                Err(ex) => ("error".to_string(), ex.to_string()),
-            };
-            if let Some(id) = run_id {
-                if let Err(ex) = db::finish_run(
-                    &state.db,
-                    id,
-                    &timeutil::fmt_state_ts(finished),
-                    &outcome_label,
-                    &message,
-                )
-                .await
-                {
-                    tracing::warn!("Could not record the run's end in the database: {ex}");
-                }
-            }
+            // the run records itself in the run history the moment it starts
+            // — the history row is the one source of run status, so every
+            // page's pill flips to running with the row, not with anything
+            // held in memory
+            let _ = run_once(config, cancel, pause, &state.db).await;
 
             drop(guard);
         });

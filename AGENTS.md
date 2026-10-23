@@ -58,6 +58,11 @@ Before committing, `cargo test`, `cargo clippy --all-targets`, and
   their own.
 - Manual fetches are recorded in `runs` ("Manual fetch: ..."), and a
   stopped run logs the elapsed time ("Stopped after ...").
+- Runs record themselves in `runs` from any process — the web UI's Run
+  button, the command line (cron), a manual fetch ("Manual fetch: ..."),
+  and the stream listener ("Stream: home timeline") — so the pill shows
+  Running whenever FediFetcher is fetching, and a run from another
+  process is in the history too.
 
 ## Testing
 

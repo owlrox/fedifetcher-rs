@@ -179,6 +179,10 @@ async fn a_streamed_update_becomes_a_trigger_post() {
             .is_none(),
         "a notification event is not a trigger post"
     );
+    let runs = db::recent_runs(&db, 1).await.unwrap();
+    assert_eq!(runs.len(), 1, "the stream fetch should record itself too");
+    assert_eq!(runs[0].outcome, "ok");
+    assert_eq!(runs[0].message, "Stream: home timeline");
     assert_eq!(
         search.calls(),
         0,

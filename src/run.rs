@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::api::mastodon::HomeServer;
 use crate::config::Config;
+use crate::db;
 use crate::error::Result;
 use crate::http::{build_callback_url, HttpClient};
 use crate::store::{lock, Session, State, StateStore, ROBOTS_MAX_AGE};
@@ -179,12 +180,52 @@ impl Context<'_> {
 
 /// Do one run, and report the message it finished with.
 ///
+/// The run records itself in the run history, whichever process started it
+/// — the web UI, or the command line — so the dashboard's status pill and
+/// history see it while it is going.
+///
 /// The state is written back even when a task fails part way through, and the
 /// lock is released either way. A run whose `cancel` was set finishes early
 /// and reports how long it ran before stopping; a paused run holds at its
 /// checkpoints until it is resumed or stopped. Posts found private are
 /// recorded in `db`, so later runs skip them without asking again.
 pub async fn run_once(
+    config: Config,
+    cancel: CancelToken,
+    pause: Pause,
+    db: &SqlitePool,
+) -> Result<String> {
+    let started = timeutil::now();
+    let run_id = match db::start_run(db, &timeutil::fmt_state_ts(started)).await {
+        Ok(id) => Some(id),
+        Err(ex) => {
+            warn!("Could not record the run's start in the database: {ex}");
+            None
+        }
+    };
+    let result = run_once_inner(config, cancel.clone(), pause, db).await;
+    if let Some(id) = run_id {
+        let (outcome, message) = match &result {
+            Ok(message) if cancel.is_canceled() => ("stopped", message.clone()),
+            Ok(message) => ("ok", message.clone()),
+            Err(ex) => ("error", ex.to_string()),
+        };
+        if let Err(ex) = db::finish_run(
+            db,
+            id,
+            &timeutil::fmt_state_ts(timeutil::now()),
+            outcome,
+            &message,
+        )
+        .await
+        {
+            warn!("Could not record the run's end in the database: {ex}");
+        }
+    }
+    result
+}
+
+async fn run_once_inner(
     config: Config,
     cancel: CancelToken,
     pause: Pause,
