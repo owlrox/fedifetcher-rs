@@ -39,6 +39,12 @@ const RECONNECT_DELAYS: [u64; 5] = [1, 5, 15, 60, 300];
 /// inside this.
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How long one stream connection may last before it is recycled. Proxies
+/// in front of some instances close long-lived SSE connections around a
+/// hundred seconds, so the listener reconnects first and keeps that reset
+/// from ever reaching the read.
+const MAX_STREAM_LIFETIME: Duration = Duration::from_secs(90);
+
 /// How often a blocked stream read re-checks the cancel flag, and how the
 /// silence clock ticks.
 const READ_POLL: Duration = Duration::from_secs(1);
@@ -324,8 +330,13 @@ async fn read_stream(url: &str, token: &str, cancel: &CancelToken, handler: &Han
     let mut parser = EventStreamParser::new();
     let mut chunks = response.bytes_stream();
     let mut silent = Duration::ZERO;
+    let started = Instant::now();
     loop {
         if cancel.is_canceled() {
+            return StreamEnd::Closed;
+        }
+        if started.elapsed() >= MAX_STREAM_LIFETIME {
+            debug!("The stream reached its maximum lifetime; reconnecting");
             return StreamEnd::Closed;
         }
         let chunk = match tokio::time::timeout(READ_POLL, chunks.next()).await {
