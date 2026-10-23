@@ -29,7 +29,7 @@ pub async fn reply_toots(
     let replies_since = timeutil::now() - Duration::hours(reply_interval_hours);
     let mut reply_toots = Vec::new();
     for user_id in user_ids {
-        if cancel.is_cancelled() {
+        if cancel.is_canceled() {
             break;
         }
         reply_toots.extend(reply_toots_for_user(user_id, home, replies_since, state).await);
@@ -274,14 +274,14 @@ async fn fetch_bookmark_context(ctx: &mut Context<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Pull replies to the API key owner's favourites.
-async fn fetch_favourite_context(ctx: &mut Context<'_>) -> Result<()> {
+/// Pull replies to the API key owner's favorites.
+async fn fetch_favorite_context(ctx: &mut Context<'_>) -> Result<()> {
     info!(
-        "Pulling replies to the last {} favourites",
-        ctx.config.max_favourites
+        "Pulling replies to the last {} favorites",
+        ctx.config.max_favorites
     );
-    let favourites = ctx.home.favourites(ctx.config.max_favourites).await?;
-    pull_context_for(ctx, favourites, "favourites").await;
+    let favorites = ctx.home.favorites(ctx.config.max_favorites).await?;
+    pull_context_for(ctx, favorites, "favorites").await;
     Ok(())
 }
 
@@ -302,59 +302,59 @@ fn config_user(config: &Config) -> Option<&str> {
 
 /// Run each task whose setting asks for it, in the Python original's order.
 ///
-/// A cancelled run stops between tasks: whatever finished is kept, and the
+/// A canceled run stops between tasks: whatever finished is kept, and the
 /// run reports that it was stopped.
 pub async fn run_enabled_tasks(ctx: &mut Context<'_>) -> Result<()> {
     if ctx.config.from_lists {
         fetch_from_lists(ctx).await?;
     }
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_canceled() {
         return Ok(());
     }
     if ctx.config.reply_interval_in_hours > 0 {
         fetch_reply_context(ctx).await?;
     }
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_canceled() {
         return Ok(());
     }
     if ctx.config.home_timeline_length > 0 {
         fetch_home_timeline(ctx).await?;
     }
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_canceled() {
         return Ok(());
     }
     if ctx.config.max_followings > 0 {
         backfill_followings(ctx).await?;
     }
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_canceled() {
         return Ok(());
     }
     if ctx.config.max_followers > 0 {
         backfill_followers(ctx).await?;
     }
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_canceled() {
         return Ok(());
     }
     if ctx.config.max_follow_requests > 0 {
         backfill_follow_requests(ctx).await?;
     }
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_canceled() {
         return Ok(());
     }
     if ctx.config.from_notifications > 0 {
         backfill_from_notifications(ctx).await?;
     }
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_canceled() {
         return Ok(());
     }
     if ctx.config.max_bookmarks > 0 {
         fetch_bookmark_context(ctx).await?;
     }
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_canceled() {
         return Ok(());
     }
-    if ctx.config.max_favourites > 0 {
-        fetch_favourite_context(ctx).await?;
+    if ctx.config.max_favorites > 0 {
+        fetch_favorite_context(ctx).await?;
     }
     Ok(())
 }

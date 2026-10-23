@@ -629,7 +629,7 @@ async fn get_redirect_url_gives_up_on_other_statuses() {
 }
 
 #[tokio::test]
-async fn get_redirect_url_honours_the_blocklist() {
+async fn get_redirect_url_honors_the_blocklist() {
     let server = MockServer::start_async().await;
     let dir = common::tmp_dir();
     let object = server
@@ -654,7 +654,7 @@ async fn get_redirect_url_honours_the_blocklist() {
 }
 
 #[tokio::test]
-async fn get_redirect_url_honours_robots() {
+async fn get_redirect_url_honors_robots() {
     let server = MockServer::start_async().await;
     let dir = common::tmp_dir();
     let robots = server

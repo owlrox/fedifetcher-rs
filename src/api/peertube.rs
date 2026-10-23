@@ -126,7 +126,7 @@ impl PeerTubeApi {
         limit: i64,
     ) -> Option<Vec<Post>> {
         // a channel and the account that owns it are different things here,
-        // and they are asked for separately. Anything we do not recognise is
+        // and they are asked for separately. Anything we do not recognize is
         // tried as an account, which is what every URL used to be treated as.
         let collection = if CHANNEL_PATH.is_match(profile_url) {
             "video-channels"

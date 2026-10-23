@@ -164,7 +164,7 @@ pub async fn add_user_posts(
 ) {
     let home_server = ctx.home.server.clone();
     for user in followings {
-        if ctx.cancel.is_cancelled() {
+        if ctx.cancel.is_canceled() {
             break;
         }
         if (!ctx.state.all_known_users.contains(&user.acct) || force)
@@ -185,7 +185,7 @@ pub async fn add_user_posts(
                 let mut count = 0;
                 let mut failed = 0;
                 for post in posts {
-                    if ctx.cancel.is_cancelled() {
+                    if ctx.cancel.is_canceled() {
                         break;
                     }
                     if !post.is_boost() && !ctx.state.seen_urls.contains(&post.url) {

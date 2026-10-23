@@ -164,7 +164,7 @@ async fn a_lock_held_by_a_dead_process_is_reclaimed() {
 }
 
 #[tokio::test]
-async fn a_cancelled_run_stops_before_doing_anything() {
+async fn a_canceled_run_stops_before_doing_anything() {
     let dir = common::tmp_dir();
     // a task is enabled, and the server is unreachable: the cancellation
     // check comes first, so no request is ever made

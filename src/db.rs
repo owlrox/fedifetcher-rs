@@ -207,6 +207,7 @@ pub async fn open(config: &Config) -> Result<SqlitePool> {
     // databases written by earlier versions get their tables reshaped here
     migrate_trigger_posts(&pool).await?;
     migrate_seen_hosts(&pool).await?;
+    migrate_config_keys(&pool).await?;
     Ok(pool)
 }
 
@@ -285,6 +286,16 @@ async fn migrate_seen_hosts(pool: &SqlitePool) -> Result<()> {
         insert_host_row(pool, &HostRow::from_state_value(&host, &value)).await?;
     }
     sqlx::query("DROP TABLE seen_hosts_legacy")
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(())
+}
+
+/// Rename stored config keys whose spelling changed, so an existing
+/// database keeps its settings.
+async fn migrate_config_keys(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("UPDATE config SET key = 'max_favorites' WHERE key = 'max_favourites'")
         .execute(pool)
         .await
         .map_err(db_error)?;
@@ -655,7 +666,7 @@ pub async fn is_private_post(pool: &SqlitePool, uri: &str) -> Result<bool> {
     Ok(found.is_some())
 }
 
-/// Record an account as opted out, so later runs recognise the skip without
+/// Record an account as opted out, so later runs recognize the skip without
 /// logging it again. Returns whether this call is the one that recorded it.
 pub async fn mark_opted_out_account(pool: &SqlitePool, acct: &str, reason: &str) -> Result<bool> {
     let result = sqlx::query(
@@ -745,7 +756,7 @@ pub struct TriggerPost {
     /// The accounts the post mentions, `name@host` each, comma-separated.
     pub mentions: Option<String>,
     /// Which task first scanned it: home timeline, replies, bookmarks,
-    /// favourites, lists, backfill, or a manual fetch.
+    /// favorites, lists, backfill, or a manual fetch.
     pub source: String,
 }
 
@@ -2181,6 +2192,24 @@ mod tests {
         );
         save_config(&pool, &cleared).await.unwrap();
         assert_eq!(load_config(&pool).await.unwrap(), cleared);
+    }
+
+    /// A database written by an older version keeps its setting when the
+    /// option's name is re-spelled: the stored key is renamed on open.
+    #[tokio::test]
+    async fn the_max_favorites_option_keeps_its_value_across_the_rename() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        sqlx::query("INSERT INTO config (key, value) VALUES ('max_favourites', '5')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        drop(pool);
+
+        let pool = open(&config).await.unwrap();
+        let values = load_config(&pool).await.unwrap();
+        assert_eq!(values.get("max_favorites"), Some(&Value::from(5)));
+        assert!(!values.contains_key("max_favourites"));
     }
 
     #[tokio::test]

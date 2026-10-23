@@ -26,7 +26,7 @@ const KNOWN_CONTEXT_RECHECK: Duration = Duration::days(1);
 ///
 /// A post the home server reports as non-public can never have its context
 /// fetched, so it is recorded in the database the first time it is seen —
-/// and only then logged — and recognised without another word afterwards.
+/// and only then logged — and recognized without another word afterwards.
 /// A post recorded by an earlier run is skipped outright, whatever this
 /// run's copy of it says. Both skips are silent at the default log level;
 /// at DEBUG each one leaves a line.
@@ -87,7 +87,7 @@ pub async fn known_context_urls(
     let mut triggers: Vec<TriggerPost> = Vec::with_capacity(reply_toots.len());
 
     for toot in reply_toots {
-        if ctx.cancel.is_cancelled() {
+        if ctx.cancel.is_canceled() {
             break;
         }
         triggers.push(TriggerPost::from_post(toot, source));
@@ -269,7 +269,7 @@ pub async fn replied_toot_server_ids(
 ) -> Vec<RepliedToot> {
     let mut replied = Vec::new();
     for toot in reply_toots {
-        if cancel.is_cancelled() {
+        if cancel.is_canceled() {
             break;
         }
         if let Some(entry) = replied_toot_server_id(server, toot, http, state).await {
@@ -335,7 +335,7 @@ pub async fn context_urls(
     // our server never needs fetching from anywhere
     let prefix = format!("https://{server}/");
     for entry in replied_toot_ids {
-        if cancel.is_cancelled() {
+        if cancel.is_canceled() {
             break;
         }
         let RepliedToot { url, post_ref } = entry;
@@ -382,7 +382,7 @@ pub async fn add_context_urls(
     let mut failed = 0;
     let mut already_seen = 0;
     for url in context_urls {
-        if cancel.is_cancelled() {
+        if cancel.is_canceled() {
             break;
         }
         if !state.seen_urls.contains(&url) {

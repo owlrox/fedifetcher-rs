@@ -1,7 +1,7 @@
 //! FediFetcher: pull missing posts and profiles into your Mastodon instance.
 //!
 //! Fetches from the accounts your users follow, reply to, list, bookmark,
-//! favourite, or get notified about. Originally ported from the Python
+//! favorite, or get notified about. Originally ported from the Python
 //! FediFetcher (v8.2.3), with an optional server-rendered web UI.
 
 pub mod api;

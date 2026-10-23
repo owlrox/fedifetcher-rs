@@ -142,19 +142,19 @@ impl RobotFileParser {
         }
         // Drop the scheme, netloc and fragment, keeping path and query.
         let path_query = extract_path_query(url);
-        let normalised = normalize_uri(&path_query);
-        let normalised = if normalised.is_empty() {
+        let normalized = normalize_uri(&path_query);
+        let normalized = if normalized.is_empty() {
             "/".to_string()
         } else {
-            normalised
+            normalized
         };
-        if normalised == "/robots.txt" {
+        if normalized == "/robots.txt" {
             // The /robots.txt URI is implicitly allowed.
             return true;
         }
         match self.find_entry(useragent) {
             None => true,
-            Some(entry) => entry.allowance(&normalised),
+            Some(entry) => entry.allowance(&normalized),
         }
     }
 }
@@ -369,23 +369,23 @@ fn normalize_uri(path: &str) -> String {
         Some((path, query)) => {
             // re.sub(r'[^=&]+', normalize, query): every run of characters that
             // are not '=' or '&' is normalized, and the separators are kept
-            let mut normalised = String::new();
+            let mut normalized = String::new();
             let mut run = String::new();
             for c in query.chars() {
                 if c == '=' || c == '&' {
                     if !run.is_empty() {
-                        normalised.push_str(&normalize(&run));
+                        normalized.push_str(&normalize(&run));
                         run.clear();
                     }
-                    normalised.push(c);
+                    normalized.push(c);
                 } else {
                     run.push(c);
                 }
             }
             if !run.is_empty() {
-                normalised.push_str(&normalize(&run));
+                normalized.push_str(&normalize(&run));
             }
-            format!("{}?{normalised}", normalize(path))
+            format!("{}?{normalized}", normalize(path))
         }
         None => normalize(path),
     }

@@ -76,8 +76,8 @@ pub struct Config {
     pub max_follow_requests: i64,
     /// Fetch remote replies to the API key owner's bookmarks, at most this many
     pub max_bookmarks: i64,
-    /// Fetch remote replies to the API key owner's favourites, at most this many
-    pub max_favourites: i64,
+    /// Fetch remote replies to the API key owner's favorites, at most this many
+    pub max_favorites: i64,
     /// Backfill accounts of anyone appearing in your notifications, during
     /// the last hours
     pub from_notifications: i64,
@@ -144,7 +144,7 @@ impl Default for Config {
             max_followers: 0,
             max_follow_requests: 0,
             max_bookmarks: 0,
-            max_favourites: 0,
+            max_favorites: 0,
             from_notifications: 0,
             from_lists: false,
             max_list_length: 100,
@@ -221,8 +221,8 @@ impl Config {
         if self.max_bookmarks > 0 {
             tasks.push("bookmarks");
         }
-        if self.max_favourites > 0 {
-            tasks.push("favourites");
+        if self.max_favorites > 0 {
+            tasks.push("favorites");
         }
         tasks
     }
@@ -266,7 +266,7 @@ impl Config {
         put("max_followers", Value::from(self.max_followers));
         put("max_follow_requests", Value::from(self.max_follow_requests));
         put("max_bookmarks", Value::from(self.max_bookmarks));
-        put("max_favourites", Value::from(self.max_favourites));
+        put("max_favorites", Value::from(self.max_favorites));
         put("from_notifications", Value::from(self.from_notifications));
         put("from_lists", Value::Bool(self.from_lists));
         put("max_list_length", Value::from(self.max_list_length));
@@ -401,7 +401,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "max_followers"
             | "max_follow_requests"
             | "max_bookmarks"
-            | "max_favourites"
+            | "max_favorites"
             | "from_notifications"
             | "from_lists"
             | "max_list_length"
@@ -441,7 +441,7 @@ pub fn option_description(name: &str) -> Option<&'static str> {
         "max_followers" => "Backfill posts for new accounts following user. At most this many followers' posts",
         "max_follow_requests" => "Backfill posts of the API key owners' pending follow requests. At most this many requesters' posts",
         "max_bookmarks" => "Fetch remote replies to the API key owners' bookmarks. At most this many bookmarks",
-        "max_favourites" => "Fetch remote replies to the API key owners' favourites. At most this many favourites",
+        "max_favorites" => "Fetch remote replies to the API key owners' favorites. At most this many favorites",
         "from_notifications" => "Backfill accounts of anyone appearing in your notifications, during the last hours",
         "from_lists" => "Fetch missing replies and/or backfill accounts from your lists. Disabled by default",
         "max_list_length" => "How many posts to fetch replies for in each list. Ignored unless from_lists is set. Set to 0 to only backfill profiles in lists",
@@ -483,7 +483,7 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<(), ConfigError> {
             "max_followers" => coerce_int(value).map(|v| config.max_followers = v),
             "max_follow_requests" => coerce_int(value).map(|v| config.max_follow_requests = v),
             "max_bookmarks" => coerce_int(value).map(|v| config.max_bookmarks = v),
-            "max_favourites" => coerce_int(value).map(|v| config.max_favourites = v),
+            "max_favorites" => coerce_int(value).map(|v| config.max_favorites = v),
             "from_notifications" => coerce_int(value).map(|v| config.from_notifications = v),
             "from_lists" => coerce_bool(value).map(|v| config.from_lists = v),
             "max_list_length" => coerce_int(value).map(|v| config.max_list_length = v),
@@ -687,7 +687,7 @@ mod tests {
             "max_followers",
             "max_follow_requests",
             "max_bookmarks",
-            "max_favourites",
+            "max_favorites",
             "from_notifications",
             "from_lists",
             "max_list_length",

@@ -62,30 +62,30 @@ pub fn parse(value: &str) -> Option<OffsetDateTime> {
         return Some(local_naive_to_utc(date));
     }
 
-    // Normalise the separators RFC 3339 allows, then try the Python shape.
-    let mut normalised = text.replace('T', " ");
-    if let Some(stripped) = normalised.strip_suffix('Z') {
-        normalised = format!("{stripped}+00:00");
+    // Normalize the separators RFC 3339 allows, then try the Python shape.
+    let mut normalized = text.replace('T', " ");
+    if let Some(stripped) = normalized.strip_suffix('Z') {
+        normalized = format!("{stripped}+00:00");
     }
     // An offset without a colon, e.g. +0000.
-    if normalised.len() > 5 {
-        let tail = &normalised[normalised.len() - 5..];
+    if normalized.len() > 5 {
+        let tail = &normalized[normalized.len() - 5..];
         if (tail.starts_with('+') || tail.starts_with('-'))
             && tail[1..].bytes().all(|b| b.is_ascii_digit())
         {
-            normalised = format!(
+            normalized = format!(
                 "{}{}:{}",
-                &normalised[..normalised.len() - 5],
+                &normalized[..normalized.len() - 5],
                 &tail[..1],
                 &tail[1..]
             );
         }
     }
 
-    if let Ok(dt) = OffsetDateTime::parse(&normalised, PY_TS_AWARE) {
+    if let Ok(dt) = OffsetDateTime::parse(&normalized, PY_TS_AWARE) {
         return Some(dt);
     }
-    if let Ok(dt) = PrimitiveDateTime::parse(&normalised, PY_TS_NAIVE) {
+    if let Ok(dt) = PrimitiveDateTime::parse(&normalized, PY_TS_NAIVE) {
         return Some(local_naive_to_utc(dt));
     }
     OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()

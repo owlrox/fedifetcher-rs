@@ -398,7 +398,7 @@ pub enum StopAt {
 /// Follow a Mastodon collection across pages.
 ///
 /// The header our server sends is the only way through most of these: a
-/// bookmark, favourite or follow is paged by the id of the record that made
+/// bookmark, favorite or follow is paged by the id of the record that made
 /// it, which is an internal number the entries themselves never mention.
 /// That is why this asks to be pointed at the next page rather than working
 /// it out of what it has, as we have to for other people's servers.
@@ -555,7 +555,7 @@ impl HomeServer {
             .await
     }
 
-    pub async fn favourites(&self, limit: i64) -> Result<Vec<Post>> {
+    pub async fn favorites(&self, limit: i64) -> Result<Vec<Post>> {
         self.posts("/api/v1/favourites", StopAt::Count(limit), "")
             .await
     }

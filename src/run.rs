@@ -89,7 +89,7 @@ impl Notifier {
 /// within one request, bounded by the configured http timeout.
 #[derive(Clone, Default)]
 pub struct CancelToken {
-    cancelled: Arc<AtomicBool>,
+    canceled: Arc<AtomicBool>,
 }
 
 impl CancelToken {
@@ -98,16 +98,16 @@ impl CancelToken {
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        self.canceled.store(true, Ordering::Relaxed);
     }
 
     /// Clear the flag, so the next run starts un-stopped.
     pub fn reset(&self) {
-        self.cancelled.store(false, Ordering::Relaxed);
+        self.canceled.store(false, Ordering::Relaxed);
     }
 
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+    pub fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Relaxed)
     }
 }
 
@@ -172,7 +172,7 @@ pub async fn run_once(config: Config, cancel: CancelToken, db: &SqlitePool) -> R
     }
     drop(lock);
 
-    if cancel.is_cancelled() {
+    if cancel.is_canceled() {
         let message = "Stopped.".to_string();
         notifier.done(&message).await;
         info!("{message}");
@@ -207,7 +207,7 @@ async fn run_tasks(
     cancel: &CancelToken,
     db: &SqlitePool,
 ) -> Result<()> {
-    if cancel.is_cancelled() {
+    if cancel.is_canceled() {
         return Ok(());
     }
     let tasks = config.enabled_tasks();
@@ -217,7 +217,7 @@ async fn run_tasks(
         debug!("Enabled tasks: {}", tasks.join(", "));
     }
     for token in &config.access_tokens {
-        if cancel.is_cancelled() {
+        if cancel.is_canceled() {
             break;
         }
         let home = HomeServer::new(&config.server, token, http.clone());
@@ -249,14 +249,14 @@ mod tests {
     #[test]
     fn cancel_token_starts_unset_and_shares_its_flag() {
         let token = CancelToken::new();
-        assert!(!token.is_cancelled());
+        assert!(!token.is_canceled());
 
         let clone = token.clone();
         token.cancel();
-        assert!(token.is_cancelled());
-        assert!(clone.is_cancelled(), "clones share the flag");
+        assert!(token.is_canceled());
+        assert!(clone.is_canceled(), "clones share the flag");
 
         token.reset();
-        assert!(!clone.is_cancelled(), "reset clears it for all clones");
+        assert!(!clone.is_canceled(), "reset clears it for all clones");
     }
 }

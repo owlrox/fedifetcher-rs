@@ -664,7 +664,7 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
             let outcome = run_once(config.clone(), cancel.clone(), &state.db).await;
             let finished = timeutil::now();
             let (outcome_label, message) = match &outcome {
-                Ok(message) if cancel.is_cancelled() => ("stopped".to_string(), message.clone()),
+                Ok(message) if cancel.is_canceled() => ("stopped".to_string(), message.clone()),
                 Ok(message) => ("ok".to_string(), message.clone()),
                 Err(ex) => ("error".to_string(), ex.to_string()),
             };
@@ -1595,7 +1595,7 @@ fn ConfigPage(state: Arc<AppState>) -> impl IntoView {
     rows.push(int_row("max_followers", config.max_followers));
     rows.push(int_row("max_follow_requests", config.max_follow_requests));
     rows.push(int_row("max_bookmarks", config.max_bookmarks));
-    rows.push(int_row("max_favourites", config.max_favourites));
+    rows.push(int_row("max_favorites", config.max_favorites));
     rows.push(int_row("from_notifications", config.from_notifications));
     rows.push(bool_row("from_lists", config.from_lists));
     rows.push(int_row("max_list_length", config.max_list_length));
@@ -1824,7 +1824,7 @@ fn debug_result_view(outcome: &DebugOutcome) -> AnyView {
                                         <th>"Visibility"</th>
                                         <th>"Replies"</th>
                                         <th>"Boosts"</th>
-                                        <th>"Favourites"</th>
+                                        <th>"Favorites"</th>
                                         <th>"Post"</th>
                                     </tr>
                                 </thead>
