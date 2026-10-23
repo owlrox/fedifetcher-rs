@@ -1,11 +1,12 @@
 //! Fetching the posts of accounts we do not follow yet.
 
+use sqlx::SqlitePool;
 use tracing::{debug, error, info};
 
 use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
 use crate::config::Config;
-use crate::context::{add_context_urls, get_all_known_context_urls};
+use crate::context::{add_context_urls, get_all_known_context_urls, toot_context_can_be_fetched};
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::CancelToken;
@@ -111,10 +112,15 @@ pub async fn add_post_with_context(
     config: &Config,
     cancel: &CancelToken,
     state: &mut State,
+    db: &SqlitePool,
 ) -> bool {
     if home.resolve(&post.url).await {
         state.seen_urls.add(&post.url, None);
         if post.may_have_context() && config.backfill_with_context {
+            // a private post is skipped before its URL is even resolved
+            if !toot_context_can_be_fetched(post, db).await {
+                return true;
+            }
             if find_post(&post.url, &mut state.parsed_urls, &mut state.seen_hosts, http)
                 .await
                 .is_none()
@@ -127,6 +133,7 @@ pub async fn add_post_with_context(
                 http,
                 cancel,
                 state,
+                db,
             )
             .await;
             add_context_urls(home, known_context_urls, cancel, state).await;
@@ -145,6 +152,7 @@ pub async fn add_user_posts(
     config: &Config,
     cancel: &CancelToken,
     state: &mut State,
+    db: &SqlitePool,
 ) {
     let home_server = home.server.clone();
     for user in followings {
@@ -164,7 +172,10 @@ pub async fn add_user_posts(
                         break;
                     }
                     if !post.is_boost() && !state.seen_urls.contains(&post.url) {
-                        if add_post_with_context(&post, home, http, config, cancel, state).await {
+                        let added =
+                            add_post_with_context(&post, home, http, config, cancel, state, db)
+                                .await;
+                        if added {
                             state.seen_urls.add(&post.url, None);
                             count += 1;
                         } else {

@@ -1,21 +1,41 @@
 //! Finding the posts around the posts we already have.
 
 use indexmap::IndexSet;
-use tracing::{debug, error, info};
+use sqlx::SqlitePool;
+use tracing::{debug, error, info, warn};
 
 use crate::api::mastodon::HomeServer;
 use crate::api::{client_for, find_post};
+use crate::db::{is_private_post, mark_private_post};
 use crate::http::HttpClient;
 use crate::posts::Post;
 use crate::run::CancelToken;
 use crate::servers::get_server_info;
 use crate::store::{RepliedToot, State};
 
-pub fn toot_context_can_be_fetched(toot: &Post) -> bool {
+/// Whether the toot's context may be fetched, recording private toots.
+///
+/// A post the home server reports as non-public can never have its context
+/// fetched, so it is recorded in the database the first time it is seen —
+/// and only then logged — and recognised without another word afterwards.
+/// A post recorded by an earlier run is skipped outright, whatever this
+/// run's copy of it says.
+pub async fn toot_context_can_be_fetched(toot: &Post, db: &SqlitePool) -> bool {
     if !toot.is_public {
-        debug!("Cannot fetch context of private toot {}", toot.uri);
+        match mark_private_post(db, &toot.uri).await {
+            Ok(true) => debug!("Cannot fetch context of private toot {}", toot.uri),
+            Ok(false) => {}
+            Err(ex) => warn!("Could not record private toot {}: {ex}", toot.uri),
+        }
+        return false;
     }
-    toot.is_public
+    match is_private_post(db, &toot.uri).await {
+        Ok(known_private) => !known_private,
+        Err(ex) => {
+            warn!("Could not check the private toots for {}: {ex}", toot.uri);
+            true
+        }
+    }
 }
 
 /// Get the context toots of the given toots from their original server.
@@ -25,6 +45,7 @@ pub async fn get_all_known_context_urls(
     http: &HttpClient,
     cancel: &CancelToken,
     state: &mut State,
+    db: &SqlitePool,
 ) -> Vec<String> {
     let mut known_context_urls: IndexSet<String> = IndexSet::new();
 
@@ -32,16 +53,21 @@ pub async fn get_all_known_context_urls(
         if cancel.is_cancelled() {
             break;
         }
+        // a private toot is skipped before its URL is even resolved: its
+        // context can never be fetched, and remembering it saves later runs
+        // the ask
+        if !toot_context_can_be_fetched(toot, db).await {
+            continue;
+        }
         // a boost is only ever a pointer: the replies are on the original
         let url = toot.original().url.clone();
         let Some(parsed_url) = find_post(&url, &mut state.parsed_urls, &mut state.seen_hosts, http).await
         else {
             continue;
         };
-        if toot_context_can_be_fetched(toot)
-            && state
-                .recently_checked_context
-                .should_fetch(&toot.uri, toot.created_at)
+        if state
+            .recently_checked_context
+            .should_fetch(&toot.uri, toot.created_at)
         {
             state
                 .recently_checked_context

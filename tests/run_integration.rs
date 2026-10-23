@@ -11,8 +11,9 @@ use httpmock::Method;
 async fn a_run_with_nothing_enabled_still_succeeds() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, CancelToken::new())
+    let message = run_once(config, CancelToken::new(), &db)
         .await
         .ok()
         .expect("a run with nothing enabled should succeed");
@@ -51,8 +52,9 @@ async fn a_held_lock_stops_the_run() {
     .unwrap();
     let mut config = common::test_config(&dir, "example.social");
     config.on_fail = Some(format!("{}/fail", server.base_url()));
+    let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let err = run_once(config, CancelToken::new())
+    let err = run_once(config, CancelToken::new(), &db)
         .await
         .err()
         .expect("a held lock must stop the run");
@@ -80,8 +82,9 @@ async fn a_legacy_lock_without_a_recorded_process_is_reclaimed() {
         timeutil::fmt_lock_ts(timeutil::now()),
     )
     .unwrap();
+    let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, CancelToken::new())
+    let message = run_once(config, CancelToken::new(), &db)
         .await
         .ok()
         .expect("a lock that names no live process must not block the run");
@@ -119,8 +122,9 @@ async fn a_run_fires_the_lifecycle_callbacks() {
     let mut config = common::test_config(&dir, "example.social");
     config.on_start = Some(format!("{}/start", server.base_url()));
     config.on_done = Some(format!("{}/done", server.base_url()));
+    let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, CancelToken::new())
+    let message = run_once(config, CancelToken::new(), &db)
         .await
         .ok()
         .expect("the run should succeed");
@@ -151,8 +155,9 @@ async fn a_lock_held_by_a_dead_process_is_reclaimed() {
             .to_string(),
     )
     .unwrap();
+    let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, CancelToken::new())
+    let message = run_once(config, CancelToken::new(), &db)
         .await
         .ok()
         .expect("a dead holder's lock must not block the run");
@@ -177,8 +182,9 @@ async fn a_cancelled_run_stops_before_doing_anything() {
 
     let cancel = CancelToken::new();
     cancel.cancel();
+    let db = fedifetcher::db::open(&config).await.unwrap();
 
-    let message = run_once(config, cancel)
+    let message = run_once(config, cancel, &db)
         .await
         .ok()
         .expect("a stopped run is not a failure");

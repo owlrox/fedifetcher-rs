@@ -40,7 +40,8 @@ struct AppState {
     config: Mutex<Config>,
     /// Where the config page writes; TOML, or JSON when it ends in .json.
     config_file: PathBuf,
-    /// The database the log lines and the run history are written to.
+    /// The database the log lines and run history are written to, and the
+    /// posts found private are recorded in.
     db: SqlitePool,
     ui: Mutex<UiState>,
     /// Held for the duration of a web-triggered run, so two clicks cannot
@@ -445,7 +446,7 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
 
             let config = state.config.lock().unwrap().clone();
             let cancel = state.cancel.clone();
-            let outcome = run_once(config.clone(), cancel.clone()).await;
+            let outcome = run_once(config.clone(), cancel.clone(), &state.db).await;
             let finished = timeutil::now();
             let (outcome_label, message) = match &outcome {
                 Ok(message) if cancel.is_cancelled() => ("stopped".to_string(), message.clone()),

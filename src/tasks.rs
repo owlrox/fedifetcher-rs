@@ -1,6 +1,7 @@
 //! The things a run does: pulling context for posts, and backfilling
 //! accounts, each only when its setting asks for it.
 
+use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 use tracing::{debug, error, info};
 
@@ -27,6 +28,7 @@ pub struct Context<'a> {
     pub http: &'a HttpClient,
     pub home: &'a HomeServer,
     pub cancel: CancelToken,
+    pub db: &'a SqlitePool,
 }
 
 /// Get all replies to other users by the given users in the last day.
@@ -91,9 +93,10 @@ async fn fetch_timeline_context(
     config: &Config,
     cancel: &CancelToken,
     state: &mut State,
+    db: &SqlitePool,
 ) {
     let known_context_urls =
-        get_all_known_context_urls(&config.server, &timeline_posts, http, cancel, state).await;
+        get_all_known_context_urls(&config.server, &timeline_posts, http, cancel, state, db).await;
     add_context_urls(home, known_context_urls, cancel, state).await;
 
     // Backfill any post authors, and any mentioned users
@@ -125,6 +128,7 @@ async fn fetch_timeline_context(
             config,
             cancel,
             state,
+            db,
         )
         .await;
     }
@@ -163,6 +167,7 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 ctx.config,
                 &ctx.cancel,
                 ctx.state,
+                ctx.db,
             )
             .await;
         }
@@ -185,6 +190,7 @@ async fn fetch_from_lists(ctx: &mut Context<'_>) -> Result<()> {
                 ctx.config,
                 &ctx.cancel,
                 ctx.state,
+                ctx.db,
             )
             .await;
         }
@@ -212,6 +218,7 @@ async fn fetch_reply_context(ctx: &mut Context<'_>) -> Result<()> {
         ctx.http,
         &ctx.cancel,
         ctx.state,
+        ctx.db,
     )
     .await;
     ctx.state.seen_urls.update(known_context_urls);
@@ -246,6 +253,7 @@ async fn fetch_home_timeline(ctx: &mut Context<'_>) -> Result<()> {
         ctx.config,
         &ctx.cancel,
         ctx.state,
+        ctx.db,
     )
     .await;
     Ok(())
@@ -271,6 +279,7 @@ async fn backfill_followings(ctx: &mut Context<'_>) -> Result<()> {
         ctx.config,
         &ctx.cancel,
         ctx.state,
+        ctx.db,
     )
     .await;
     Ok(())
@@ -293,6 +302,7 @@ async fn backfill_followers(ctx: &mut Context<'_>) -> Result<()> {
         ctx.config,
         &ctx.cancel,
         ctx.state,
+        ctx.db,
     )
     .await;
     Ok(())
@@ -320,6 +330,7 @@ async fn backfill_follow_requests(ctx: &mut Context<'_>) -> Result<()> {
         ctx.config,
         &ctx.cancel,
         ctx.state,
+        ctx.db,
     )
     .await;
     Ok(())
@@ -345,6 +356,7 @@ async fn backfill_from_notifications(ctx: &mut Context<'_>) -> Result<()> {
         ctx.config,
         &ctx.cancel,
         ctx.state,
+        ctx.db,
     )
     .await;
     Ok(())
@@ -376,6 +388,7 @@ async fn pull_context_for(ctx: &mut Context<'_>, posts: Vec<Post>) {
         ctx.http,
         &ctx.cancel,
         ctx.state,
+        ctx.db,
     )
     .await;
     add_context_urls(ctx.home, known_context_urls, &ctx.cancel, ctx.state).await;

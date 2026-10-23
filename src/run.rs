@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -114,8 +115,9 @@ impl CancelToken {
 ///
 /// The state is written back even when a task fails part way through, and the
 /// lock is released either way. A run whose `cancel` was set finishes early
-/// and reports "Stopped.".
-pub async fn run_once(config: Config, cancel: CancelToken) -> Result<String> {
+/// and reports "Stopped.". Posts found private are recorded in `db`, so
+/// later runs skip them without asking again.
+pub async fn run_once(config: Config, cancel: CancelToken, db: &SqlitePool) -> Result<String> {
     info!("Starting FediFetcher v{VERSION}");
     if !config.respect_robots_txt {
         warn!("respect_robots_txt is disabled: remote servers' robots.txt will not be respected");
@@ -144,7 +146,7 @@ pub async fn run_once(config: Config, cancel: CancelToken) -> Result<String> {
     // Delete any old robots.txt files so we can re-download them
     http.robots().discard_stale_files(ROBOTS_MAX_AGE);
 
-    let result = run_tasks(&config, &http, &mut session, &cancel).await;
+    let result = run_tasks(&config, &http, &mut session, &cancel, db).await;
 
     // the session saves the state on drop, failures included
     drop(session);
@@ -183,6 +185,7 @@ async fn run_tasks(
     http: &HttpClient,
     session: &mut Session,
     cancel: &CancelToken,
+    db: &SqlitePool,
 ) -> Result<()> {
     if cancel.is_cancelled() {
         return Ok(());
@@ -204,6 +207,7 @@ async fn run_tasks(
             http,
             home: &home,
             cancel: cancel.clone(),
+            db,
         };
         run_enabled_tasks(&mut ctx).await?;
     }
