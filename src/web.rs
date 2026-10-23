@@ -49,6 +49,10 @@ const STATE_TABLE_COUNTS: &[(&str, &str)] = &[
 /// The most log lines shown on /logs.
 const LOG_LINES_SHOWN: usize = 200;
 
+/// The log levels the /logs page's filter pills offer, in the order they
+/// are shown. These are the levels `logging::level_name` writes.
+const LOG_LEVELS: &[&str] = &["DEBUG", "INFO", "WARNING", "ERROR"];
+
 /// The cookie the top bar's live-updates toggle sets: `ff_live=1` (the
 /// default when no cookie is there) or `ff_live=0`. A cookie, not a query
 /// parameter, so the choice outlives the page — there is no JavaScript to
@@ -448,12 +452,15 @@ async fn data_redirect(uri: Uri) -> Redirect {
     Redirect::permanent(&target)
 }
 
-/// The /logs page's query string: which column to sort by, and which way.
-/// Unknown values fall back to the defaults: newest first.
+/// The /logs page's query string: which column to sort by, which way, and
+/// which levels to show. Unknown values fall back to the defaults: newest
+/// first, every level.
 #[derive(serde::Deserialize)]
 struct LogsQuery {
     sort: Option<String>,
     dir: Option<String>,
+    /// The levels to show, comma-separated; absent means every level.
+    levels: Option<String>,
 }
 
 async fn logs(
@@ -467,20 +474,62 @@ async fn logs(
         Some("asc") => LogOrder::Asc,
         _ => LogOrder::Desc,
     };
+    let levels = parse_levels(query.levels.as_deref());
     let live = live_updates(&headers);
-    let rows = match db::recent_logs(&state.db, LOG_LINES_SHOWN, sort, order).await {
-        Ok(rows) => rows,
-        Err(ex) => {
-            tracing::warn!("Could not read the log: {ex}");
-            Vec::new()
-        }
-    };
+    let rows =
+        match db::recent_logs(&state.db, LOG_LINES_SHOWN, sort, order, levels.as_deref()).await {
+            Ok(rows) => rows,
+            Err(ex) => {
+                tracing::warn!("Could not read the log: {ex}");
+                Vec::new()
+            }
+        };
     let running = run_in_progress(&state).await;
     render(move || {
         view! {
-            <LogsPage state=state running=running rows=rows sort=sort order=order live=live />
+            <LogsPage state=state running=running rows=rows sort=sort order=order live=live levels=levels />
         }
     })
+}
+
+/// The levels the /logs page shows, from the query string's comma-separated
+/// `levels` parameter. Absent means every level (`None`); names the
+/// database never holds are dropped, and the rest come back in the pills'
+/// order.
+fn parse_levels(param: Option<&str>) -> Option<Vec<String>> {
+    let requested: Vec<String> = param?
+        .split(',')
+        .map(str::trim)
+        .map(str::to_ascii_uppercase)
+        .collect();
+    let mut levels = Vec::new();
+    for level in LOG_LEVELS.iter().copied() {
+        if requested.iter().any(|name| name.as_str() == level) {
+            levels.push(level.to_string());
+        }
+    }
+    Some(levels)
+}
+
+/// The /logs URL with the level filter in it: the base the sort links and
+/// the filter pills build on.
+fn logs_base(levels: Option<&[String]>) -> String {
+    match levels {
+        Some(levels) => format!("/logs?levels={}", levels.join(",")),
+        None => "/logs".to_string(),
+    }
+}
+
+/// The /logs URL for the given level filter and sort: what the filter
+/// pills link to.
+fn logs_url(levels: Option<&[String]>, sort: LogSort, order: LogOrder) -> String {
+    let separator = if levels.is_some() { "&" } else { "?" };
+    format!(
+        "{}{separator}sort={}&dir={}",
+        logs_base(levels),
+        sort.param(),
+        order.param(),
+    )
 }
 
 /// The /live query string: whether live updates are on.
@@ -1265,6 +1314,16 @@ form.run { margin: 0.25rem 0; }
 .badge.info { background: #48c; }
 .badge.warning { background: #c83; }
 .badge.unknown { background: #777; }
+.levels { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin: 0.5rem 0 1rem; }
+.levels a { text-decoration: none; }
+.levels .label { color: #888; }
+.badge.all { background: #06c; }
+.badge.off { background: transparent; }
+.badge.off.debug { color: #777; box-shadow: inset 0 0 0 1px #777; }
+.badge.off.info { color: #48c; box-shadow: inset 0 0 0 1px #48c; }
+.badge.off.warning { color: #c83; box-shadow: inset 0 0 0 1px #c83; }
+.badge.off.error { color: #c44; box-shadow: inset 0 0 0 1px #c44; }
+.badge.off.all { color: #888; box-shadow: inset 0 0 0 1px #8888; }
 .muted { color: #888; }
 "#;
 
@@ -1866,6 +1925,9 @@ fn LogsPage(
     sort: LogSort,
     order: LogOrder,
     live: bool,
+    /// The levels shown, or `None` for every level — the query string's
+    /// `levels` parameter.
+    levels: Option<Vec<String>>,
 ) -> impl IntoView {
     let refresh = if live {
         Some(LIVE_REFRESH_SECONDS)
@@ -1877,26 +1939,69 @@ fn LogsPage(
     } else {
         String::new()
     };
+    // built before the view: the macro's template must not borrow locals
+    let base = logs_base(levels.as_deref());
+    let all_shown = levels
+        .as_ref()
+        .is_none_or(|set| set.len() == LOG_LEVELS.len());
+    let all_pill = all_levels_pill(levels.as_deref(), sort, order);
+    let level_pills: Vec<AnyView> = LOG_LEVELS
+        .iter()
+        .map(|level| level_filter_pill(level, levels.as_deref(), sort, order))
+        .collect();
+    let time_link = sort_link(
+        "Time",
+        LogSort::Time.param(),
+        sort.param(),
+        order,
+        &base,
+        LogOrder::Desc,
+    );
+    let level_link = sort_link(
+        "Level",
+        LogSort::Level.param(),
+        sort.param(),
+        order,
+        &base,
+        LogOrder::Desc,
+    );
+    let message_link = sort_link(
+        "Message",
+        LogSort::Message.param(),
+        sort.param(),
+        order,
+        &base,
+        LogOrder::Desc,
+    );
     view! {
         <Page state=state running=running title="Logs".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Recent log"</h2>
                 <p class="muted">
-                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction." {live_note}
+                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction. Click a level to show only that level's lines." {live_note}
+                </p>
+                <p class="levels">
+                    <span class="label">"Levels:"</span>
+                    {all_pill}
+                    {level_pills}
                 </p>
                 <form method="post" action="/logs/clear">
                     <button type="submit">"Clear log"</button>
                 </form>
                 {if rows.is_empty() {
-                    view! { <p class="muted">"No log entries yet."</p> }.into_any()
+                    if all_shown {
+                        view! { <p class="muted">"No log entries yet."</p> }.into_any()
+                    } else {
+                        view! { <p class="muted">"No log entries at the selected levels."</p> }.into_any()
+                    }
                 } else {
                     view! {
                         <table>
                             <thead>
                                 <tr>
-                                    <th>{sort_link("Time", LogSort::Time.param(), sort.param(), order, "/logs", LogOrder::Desc)}</th>
-                                    <th>{sort_link("Level", LogSort::Level.param(), sort.param(), order, "/logs", LogOrder::Desc)}</th>
-                                    <th>{sort_link("Message", LogSort::Message.param(), sort.param(), order, "/logs", LogOrder::Desc)}</th>
+                                    <th>{time_link}</th>
+                                    <th>{level_link}</th>
+                                    <th>{message_link}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1921,19 +2026,86 @@ fn LogsPage(
     }
 }
 
+/// The filter row's "All" pill: back to every level, keeping the sort.
+/// Solid while every level is shown, an outline while a level is hidden.
+fn all_levels_pill(levels: Option<&[String]>, sort: LogSort, order: LogOrder) -> AnyView {
+    let shown = levels.is_none_or(|set| set.len() == LOG_LEVELS.len());
+    let class = if shown {
+        "badge all".to_string()
+    } else {
+        "badge off all".to_string()
+    };
+    let title = if shown {
+        "Every level is shown".to_string()
+    } else {
+        "Show every level".to_string()
+    };
+    view! { <a class={class} href={logs_url(None, sort, order)} title={title}>"All"</a> }.into_any()
+}
+
+/// One level's filter pill: a link that flips the level in the query
+/// string, keeping the sort. The level's color while it is shown, an
+/// outline of it while it is hidden.
+fn level_filter_pill(
+    level: &str,
+    levels: Option<&[String]>,
+    sort: LogSort,
+    order: LogOrder,
+) -> AnyView {
+    let on = levels.is_none_or(|set| set.iter().any(|enabled| enabled == level));
+    // the levels the link leaves on: this one flipped
+    let mut next: Vec<String> = match levels {
+        Some(set) => set.to_vec(),
+        None => LOG_LEVELS
+            .iter()
+            .map(|candidate| candidate.to_string())
+            .collect(),
+    };
+    if on {
+        next.retain(|enabled| enabled != level);
+    } else {
+        next.push(level.to_string());
+        // keep the pills' order when a level comes back
+        next = LOG_LEVELS
+            .iter()
+            .filter(|candidate| next.contains(&candidate.to_string()))
+            .map(|candidate| candidate.to_string())
+            .collect();
+    }
+    let class = level_class(level);
+    let class = if on {
+        format!("badge {class}")
+    } else {
+        format!("badge off {class}")
+    };
+    let title = if on {
+        format!("Hide {level} lines")
+    } else {
+        format!("Show {level} lines")
+    };
+    view! { <a class={class} href={logs_url(Some(&next), sort, order)} title={title}>{level}</a> }
+        .into_any()
+}
+
 /// The log level as a pill, colored by severity: gray for DEBUG, blue for
 /// INFO, amber for WARNING, red for ERROR. A level the database should never
 /// hold falls back to gray.
 fn level_pill(level: &str) -> AnyView {
-    let class = match level.to_ascii_uppercase().as_str() {
+    let class = level_class(level);
+    let level = level.to_string();
+    view! { <span class=format!("badge {class}")>{level}</span> }.into_any()
+}
+
+/// The badge class for a log level, as [`level_pill`] and the /logs page's
+/// filter pills color it.
+fn level_class(level: &str) -> &'static str {
+    match level.to_ascii_uppercase().as_str() {
         "DEBUG" => "debug",
         "INFO" => "info",
         "WARNING" | "WARN" => "warning",
         "ERROR" | "CRITICAL" => "error",
         _ => "unknown",
-    };
-    let level = level.to_string();
-    view! { <span class=format!("badge {class}")>{level}</span> }.into_any()
+    }
 }
 
 /// A column heading that links to the same page sorted by that column.

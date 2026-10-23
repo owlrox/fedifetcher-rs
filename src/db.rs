@@ -419,19 +419,50 @@ pub enum LogOrder {
     Desc,
 }
 
+impl LogOrder {
+    /// The query string's name for the direction.
+    pub fn param(self) -> &'static str {
+        match self {
+            LogOrder::Asc => "asc",
+            LogOrder::Desc => "desc",
+        }
+    }
+}
+
 /// The most recent log lines, sorted as the /logs page asks. The newest
 /// `max` lines are fetched, then that page is sorted by `sort`; lines equal
 /// on the sorted column keep their newest-first order.
+///
+/// `levels` narrows the lines to those levels before the `max` is applied:
+/// `None` shows every level, and `Some(&[])` shows none.
 pub async fn recent_logs(
     pool: &SqlitePool,
     max: usize,
     sort: LogSort,
     order: LogOrder,
+    levels: Option<&[String]>,
 ) -> Result<Vec<LogRow>> {
-    let rows = sqlx::query("SELECT ts, level, target, message FROM logs ORDER BY id DESC LIMIT ?")
-        .bind(max as i64)
-        .fetch_all(pool)
-        .await?;
+    let rows = match levels {
+        Some([]) => return Ok(Vec::new()),
+        Some(levels) => {
+            let mut query = sqlx::QueryBuilder::new(
+                "SELECT ts, level, target, message FROM logs WHERE level IN (",
+            );
+            let mut separated = query.separated(", ");
+            for level in levels {
+                separated.push_bind(level);
+            }
+            separated.push_unseparated(") ORDER BY id DESC LIMIT ");
+            query.push_bind(max as i64);
+            query.build().fetch_all(pool).await?
+        }
+        None => {
+            sqlx::query("SELECT ts, level, target, message FROM logs ORDER BY id DESC LIMIT ?")
+                .bind(max as i64)
+                .fetch_all(pool)
+                .await?
+        }
+    };
     // newest first
     let mut lines: Vec<LogRow> = rows
         .iter()
@@ -1245,7 +1276,7 @@ mod tests {
         insert_log(&pool, &log_row("second")).await.unwrap();
         insert_log(&pool, &log_row("third")).await.unwrap();
 
-        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
             .await
             .unwrap();
         let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
@@ -1261,7 +1292,7 @@ mod tests {
         for message in ["first", "second", "third"] {
             insert_log(&pool, &log_row(message)).await.unwrap();
         }
-        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Asc)
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Asc, None)
             .await
             .unwrap();
         let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
@@ -1277,7 +1308,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let lines = recent_logs(&pool, 2, LogSort::Time, LogOrder::Desc)
+        let lines = recent_logs(&pool, 2, LogSort::Time, LogOrder::Desc, None)
             .await
             .unwrap();
         let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
@@ -1293,12 +1324,12 @@ mod tests {
             row.level = level.to_string();
             insert_log(&pool, &row).await.unwrap();
         }
-        let ascending = recent_logs(&pool, 10, LogSort::Level, LogOrder::Asc)
+        let ascending = recent_logs(&pool, 10, LogSort::Level, LogOrder::Asc, None)
             .await
             .unwrap();
         let messages: Vec<&str> = ascending.iter().map(|row| row.message.as_str()).collect();
         assert_eq!(messages, ["b", "c", "a"], "DEBUG, ERROR, INFO");
-        let descending = recent_logs(&pool, 10, LogSort::Level, LogOrder::Desc)
+        let descending = recent_logs(&pool, 10, LogSort::Level, LogOrder::Desc, None)
             .await
             .unwrap();
         let messages: Vec<&str> = descending.iter().map(|row| row.message.as_str()).collect();
@@ -1312,11 +1343,99 @@ mod tests {
         for message in ["zebra", "apple", "mango"] {
             insert_log(&pool, &log_row(message)).await.unwrap();
         }
-        let lines = recent_logs(&pool, 10, LogSort::Message, LogOrder::Asc)
+        let lines = recent_logs(&pool, 10, LogSort::Message, LogOrder::Asc, None)
             .await
             .unwrap();
         let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
         assert_eq!(messages, ["apple", "mango", "zebra"]);
+    }
+
+    /// Insert one log line per level, oldest first.
+    async fn insert_lines_per_level(pool: &SqlitePool) {
+        for (level, message) in [
+            ("DEBUG", "a debug line"),
+            ("INFO", "an info line"),
+            ("WARNING", "a warning line"),
+            ("ERROR", "an error line"),
+        ] {
+            let mut row = log_row(message);
+            row.level = level.to_string();
+            insert_log(pool, &row).await.unwrap();
+        }
+    }
+
+    fn levels(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn recent_logs_filters_by_level() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        insert_lines_per_level(&pool).await;
+
+        let lines = recent_logs(
+            &pool,
+            10,
+            LogSort::Time,
+            LogOrder::Desc,
+            Some(&levels(&["WARNING", "ERROR"])),
+        )
+        .await
+        .unwrap();
+        let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
+        assert_eq!(messages, ["an error line", "a warning line"]);
+
+        // no level selected: nothing
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, Some(&[]))
+            .await
+            .unwrap();
+        assert!(lines.is_empty());
+
+        // no filter: every level, newest first
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
+            .await
+            .unwrap();
+        let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "an error line",
+                "a warning line",
+                "an info line",
+                "a debug line"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_level_filter_applies_before_the_line_limit() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        // the ERROR lines are the oldest; a limit applied before the
+        // filter would never reach them
+        for message in ["the first error line", "the second error line"] {
+            let mut row = log_row(message);
+            row.level = "ERROR".to_string();
+            insert_log(&pool, &row).await.unwrap();
+        }
+        for n in 0..3 {
+            insert_log(&pool, &log_row(&format!("info line {n}")))
+                .await
+                .unwrap();
+        }
+
+        let lines = recent_logs(
+            &pool,
+            2,
+            LogSort::Time,
+            LogOrder::Desc,
+            Some(&levels(&["ERROR"])),
+        )
+        .await
+        .unwrap();
+        let messages: Vec<&str> = lines.iter().map(|row| row.message.as_str()).collect();
+        assert_eq!(messages, ["the second error line", "the first error line"]);
     }
 
     #[tokio::test]
@@ -1329,14 +1448,14 @@ mod tests {
                 .unwrap();
         }
         clear_logs(&pool).await.unwrap();
-        assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+        assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
             .await
             .unwrap()
             .is_empty());
         // clearing an empty log is fine, and new lines still arrive
         clear_logs(&pool).await.unwrap();
         insert_log(&pool, &log_row("after clearing")).await.unwrap();
-        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
             .await
             .unwrap();
         assert_eq!(lines.len(), 1);
@@ -1353,7 +1472,7 @@ mod tests {
                 .unwrap();
         }
         prune_logs(&pool, 1).await.unwrap();
-        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
             .await
             .unwrap();
         assert_eq!(lines.len(), 1);
@@ -1365,7 +1484,7 @@ mod tests {
         let (config, _dir) = test_config();
         let pool = open(&config).await.unwrap();
         prune_logs(&pool, 100).await.unwrap();
-        assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+        assert!(recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
             .await
             .unwrap()
             .is_empty());
@@ -2124,7 +2243,7 @@ mod tests {
         drop(pool);
 
         let pool = open(&config).await.unwrap();
-        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc)
+        let lines = recent_logs(&pool, 10, LogSort::Time, LogOrder::Desc, None)
             .await
             .unwrap();
         assert_eq!(lines.len(), 1);

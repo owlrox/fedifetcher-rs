@@ -531,6 +531,144 @@ async fn the_logs_page_sorts_by_the_clicked_column() {
     assert!(body.contains("(desc)"), "the fallback sort is newest first");
 }
 
+/// Insert one log line per level, oldest first.
+async fn insert_lines_per_level(dir: &std::path::Path) {
+    for (n, (level, message)) in [
+        ("DEBUG", "a debug line"),
+        ("INFO", "an info line"),
+        ("WARNING", "a warning line"),
+        ("ERROR", "an error line"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        insert_log(
+            dir,
+            &format!("2026-10-22 16:05:0{n} -05:00"),
+            level,
+            message,
+        )
+        .await;
+    }
+}
+
+/// The /logs page's level pills filter the lines: only the selected levels
+/// render, and each pill links to the view with that level flipped.
+#[tokio::test]
+async fn the_logs_page_filters_lines_by_level() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    insert_lines_per_level(&dir).await;
+
+    // every level by default, every pill on
+    let (status, body) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+    for message in [
+        "a debug line",
+        "an info line",
+        "a warning line",
+        "an error line",
+    ] {
+        assert!(body.contains(message), "the default view shows {message:?}");
+    }
+    assert!(
+        !body.contains("badge off"),
+        "every pill is on when no level is filtered out"
+    );
+    assert!(
+        body.contains("<a href=\"/logs?sort=ts&amp;dir=desc\" title=\"Every level is shown\" class=\"badge all\">All</a>"),
+        "the All pill is on: {body}"
+    );
+
+    // only WARNING and ERROR
+    let (status, body) = get(&format!("{base}/logs?levels=WARNING,ERROR")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("a warning line"), "WARNING is selected");
+    assert!(body.contains("an error line"), "ERROR is selected");
+    assert!(!body.contains("a debug line"), "DEBUG is filtered out");
+    assert!(!body.contains("an info line"), "INFO is filtered out");
+    // the selected levels' pills keep their color, the hidden ones are
+    // outlines of it
+    assert!(
+        body.contains("<a href=\"/logs?levels=ERROR&amp;sort=ts&amp;dir=desc\" title=\"Hide WARNING lines\" class=\"badge warning\">WARNING</a>"),
+        "the WARNING pill is on and hides WARNING: {body}"
+    );
+    assert!(
+        body.contains("<a href=\"/logs?levels=DEBUG,WARNING,ERROR&amp;sort=ts&amp;dir=desc\" title=\"Show DEBUG lines\" class=\"badge off debug\">DEBUG</a>"),
+        "the DEBUG pill is off and shows DEBUG: {body}"
+    );
+    assert!(
+        body.contains("<a href=\"/logs?levels=INFO,WARNING,ERROR&amp;sort=ts&amp;dir=desc\" title=\"Show INFO lines\" class=\"badge off info\">INFO</a>"),
+        "the INFO pill is off and shows INFO: {body}"
+    );
+    // the All pill resets the filter, keeping the sort
+    assert!(
+        body.contains("<a href=\"/logs?sort=ts&amp;dir=desc\" title=\"Show every level\" class=\"badge off all\">All</a>"),
+        "the All pill is off and shows every level: {body}"
+    );
+    // the sort links keep the filter
+    assert!(
+        body.contains("/logs?levels=WARNING,ERROR&amp;sort=level&amp;dir=desc"),
+        "the sort links keep the level filter"
+    );
+
+    // the filter composes with the sort
+    let (status, body) = get(&format!(
+        "{base}/logs?levels=WARNING,ERROR&sort=level&dir=asc"
+    ))
+    .await;
+    assert_eq!(status, 200);
+    let error = body.find("an error line").unwrap();
+    let warning = body.find("a warning line").unwrap();
+    assert!(error < warning, "ERROR sorts before WARNING ascending");
+
+    // unknown level names are dropped; the rest still apply
+    let (_, body) = get(&format!("{base}/logs?levels=TRACE,INFO")).await;
+    assert!(body.contains("an info line"));
+    assert!(!body.contains("a debug line"));
+    assert!(!body.contains("a warning line"));
+    assert!(!body.contains("an error line"));
+
+    // level names are case-insensitive
+    let (_, body) = get(&format!("{base}/logs?levels=error")).await;
+    assert!(body.contains("an error line"));
+    assert!(!body.contains("an info line"));
+}
+
+/// Unchecking every level shows nothing, and the page says why.
+#[tokio::test]
+async fn the_logs_page_with_no_level_selected_shows_no_lines() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    insert_lines_per_level(&dir).await;
+
+    let (status, body) = get(&format!("{base}/logs?levels=")).await;
+    assert_eq!(status, 200);
+    assert!(!body.contains("a debug line"), "no level is selected");
+    assert!(!body.contains("an info line"), "no level is selected");
+    assert!(!body.contains("a warning line"), "no level is selected");
+    assert!(!body.contains("an error line"), "no level is selected");
+    assert!(
+        body.contains("No log entries at the selected levels."),
+        "the empty view says why it is empty"
+    );
+    for (level, class) in [
+        ("DEBUG", "debug"),
+        ("INFO", "info"),
+        ("WARNING", "warning"),
+        ("ERROR", "error"),
+    ] {
+        assert!(
+            body.contains(&format!(
+                "<a href=\"/logs?levels={level}&amp;sort=ts&amp;dir=desc\" title=\"Show {level} lines\" class=\"badge off {class}\">{level}</a>"
+            )),
+            "the {level} pill is off and shows {level}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn posting_clear_log_empties_the_database() {
     let dir = common::tmp_dir();
@@ -559,6 +697,7 @@ async fn posting_clear_log_empties_the_database() {
         10,
         fedifetcher::db::LogSort::Time,
         fedifetcher::db::LogOrder::Desc,
+        None,
     )
     .await
     .unwrap();
