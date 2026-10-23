@@ -58,6 +58,12 @@ pub async fn get_all_known_context_urls(
     db: &SqlitePool,
 ) -> Vec<String> {
     let mut known_context_urls: IndexSet<String> = IndexSet::new();
+    // what became of the toots the scan was given, so the summary line can
+    // say why it found what it found
+    let mut scan = ContextScan {
+        total: reply_toots.len(),
+        ..Default::default()
+    };
 
     for toot in reply_toots {
         if cancel.is_cancelled() {
@@ -67,12 +73,14 @@ pub async fn get_all_known_context_urls(
         // context can never be fetched, and remembering it saves later runs
         // the ask
         if !toot_context_can_be_fetched(toot, db).await {
+            scan.private += 1;
             continue;
         }
         // a boost is only ever a pointer: the replies are on the original
         let url = toot.original().url.clone();
         let Some(parsed_url) = find_post(&url, &mut state.parsed_urls, &mut state.seen_hosts, http).await
         else {
+            scan.unresolved += 1;
             continue;
         };
         if state
@@ -82,33 +90,69 @@ pub async fn get_all_known_context_urls(
             state
                 .recently_checked_context
                 .mark_fetched(&toot.uri, toot.created_at);
+            scan.fetched += 1;
             let context = get_toot_context(&parsed_url.0, &parsed_url.1, &url, http, state).await;
             for item in context {
                 known_context_urls.insert(item);
             }
+        } else {
+            scan.recently_checked += 1;
         }
     }
 
     let prefix = format!("https://{server}/");
     let known_context_urls: Vec<String> = known_context_urls
         .into_iter()
-        .filter(|url| !url.starts_with(&prefix))
+        .filter(|url| {
+            if url.starts_with(&prefix) {
+                scan.local += 1;
+                false
+            } else {
+                true
+            }
+        })
         .collect();
-    info!("{}", known_context_found_line(&known_context_urls));
+    info!("{}", known_context_found_line(&known_context_urls, &scan));
 
     known_context_urls
 }
 
+/// What became of the toots a context scan was given, so the summary line
+/// can say why it found what it found.
+#[derive(Default)]
+struct ContextScan {
+    /// The toots the scan was given.
+    total: usize,
+    /// Skipped as private, or recorded as private by an earlier run.
+    private: usize,
+    /// Skipped because their original URL could not be resolved.
+    unresolved: usize,
+    /// Skipped because their context was fetched recently.
+    recently_checked: usize,
+    /// Whose context was fetched.
+    fetched: usize,
+    /// Context URLs dropped because they are on our own server.
+    local: usize,
+}
+
 /// The "Found N known context toots" line: the count, and the URLs of the
-/// toots found, comma separated. An empty set gets the bare count.
-fn known_context_found_line(urls: &[String]) -> String {
-    if urls.is_empty() {
-        return "Found 0 known context toots".to_string();
-    }
+/// toots found, comma separated. An empty set gets the bare count. What the
+/// scan did with its toots follows, so a bare "Found 0" says why; URLs on
+/// our own server are counted separately, as they are dropped, not found.
+fn known_context_found_line(urls: &[String], scan: &ContextScan) -> String {
+    let found = if urls.is_empty() {
+        "Found 0 known context toots".to_string()
+    } else {
+        format!("Found {} known context toots: {}", urls.len(), urls.join(", "))
+    };
+    let local = if scan.local > 0 {
+        format!("; {} on our server", scan.local)
+    } else {
+        String::new()
+    };
     format!(
-        "Found {} known context toots: {}",
-        urls.len(),
-        urls.join(", ")
+        "{found} (from {} toots: {} private, {} unresolved, {} already checked recently, {} fetched{local})",
+        scan.total, scan.private, scan.unresolved, scan.recently_checked, scan.fetched
     )
 }
 
@@ -227,8 +271,10 @@ pub async fn add_context_urls(
     cancel: &CancelToken,
     state: &mut State,
 ) {
+    let total = context_urls.len();
     let mut count = 0;
     let mut failed = 0;
+    let mut already_seen = 0;
     for url in context_urls {
         if cancel.is_cancelled() {
             break;
@@ -240,10 +286,21 @@ pub async fn add_context_urls(
             } else {
                 failed += 1;
             }
+        } else {
+            already_seen += 1;
         }
     }
 
-    info!("Added {count} new context toots (with {failed} failures)");
+    info!("{}", added_context_line(count, failed, total, already_seen));
+}
+
+/// The "Added N new context toots" line: what was added, what failed, and
+/// what became of the URLs given — already-seen URLs are why a run can add
+/// nothing at all.
+fn added_context_line(count: usize, failed: usize, total: usize, already_seen: usize) -> String {
+    format!(
+        "Added {count} new context toots (with {failed} failures) from {total} context urls ({already_seen} already seen)"
+    )
 }
 
 #[cfg(test)]
@@ -251,22 +308,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_known_context_line_lists_the_urls() {
+    fn the_known_context_line_lists_the_urls_and_the_scan() {
         let urls = vec![
             "https://remote.example/@alice/1".to_string(),
             "https://other.example/@bob/2".to_string(),
         ];
+        let scan = ContextScan {
+            total: 5,
+            recently_checked: 2,
+            fetched: 3,
+            ..Default::default()
+        };
         assert_eq!(
-            known_context_found_line(&urls),
-            "Found 2 known context toots: https://remote.example/@alice/1, https://other.example/@bob/2"
+            known_context_found_line(&urls, &scan),
+            "Found 2 known context toots: https://remote.example/@alice/1, https://other.example/@bob/2 (from 5 toots: 0 private, 0 unresolved, 2 already checked recently, 3 fetched)"
         );
     }
 
     #[test]
-    fn the_known_context_line_without_toots_is_the_bare_count() {
+    fn the_known_context_line_without_toots_says_why() {
+        let scan = ContextScan {
+            total: 3,
+            private: 1,
+            unresolved: 1,
+            recently_checked: 1,
+            ..Default::default()
+        };
         assert_eq!(
-            known_context_found_line(&[]),
-            "Found 0 known context toots"
+            known_context_found_line(&[], &scan),
+            "Found 0 known context toots (from 3 toots: 1 private, 1 unresolved, 1 already checked recently, 0 fetched)"
+        );
+        // no toots given at all
+        assert_eq!(
+            known_context_found_line(&[], &ContextScan::default()),
+            "Found 0 known context toots (from 0 toots: 0 private, 0 unresolved, 0 already checked recently, 0 fetched)"
+        );
+    }
+
+    #[test]
+    fn the_known_context_line_counts_urls_on_our_own_server() {
+        let scan = ContextScan {
+            total: 1,
+            fetched: 1,
+            local: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            known_context_found_line(&[], &scan),
+            "Found 0 known context toots (from 1 toots: 0 private, 0 unresolved, 0 already checked recently, 1 fetched; 2 on our server)"
+        );
+    }
+
+    #[test]
+    fn the_added_context_line_says_what_became_of_the_urls() {
+        assert_eq!(
+            added_context_line(2, 1, 5, 2),
+            "Added 2 new context toots (with 1 failures) from 5 context urls (2 already seen)"
+        );
+        // nothing given at all
+        assert_eq!(
+            added_context_line(0, 0, 0, 0),
+            "Added 0 new context toots (with 0 failures) from 0 context urls (0 already seen)"
+        );
+        // everything was already seen
+        assert_eq!(
+            added_context_line(0, 0, 3, 3),
+            "Added 0 new context toots (with 0 failures) from 3 context urls (3 already seen)"
         );
     }
 }

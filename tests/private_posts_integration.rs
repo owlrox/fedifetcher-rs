@@ -128,3 +128,38 @@ async fn a_public_post_is_still_resolved() {
         "a public post is not recorded as private"
     );
 }
+
+/// The summary line says what became of the toots, so a bare "Found 0"
+/// explains itself: this one was skipped as private, that one's URL could
+/// not be resolved.
+#[tokio::test]
+async fn the_summary_line_says_why_nothing_was_found() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "home.example");
+    let db = db::open(&config).await.unwrap();
+    let http = HttpClient::new(config);
+    let mut state = State::default();
+
+    let logs = common::LogCapture::new();
+    let guard = logs.install();
+
+    let private_toot = post("10", false);
+    assert!(context_urls(&private_toot, &http, &mut state, &db).await.is_empty());
+    let public_toot = post("11", true);
+    assert!(context_urls(&public_toot, &http, &mut state, &db).await.is_empty());
+
+    drop(guard);
+    let log = logs.text();
+    assert!(
+        log.contains(
+            "Found 0 known context toots (from 1 toots: 1 private, 0 unresolved, 0 already checked recently, 0 fetched)"
+        ),
+        "{log}"
+    );
+    assert!(
+        log.contains(
+            "Found 0 known context toots (from 1 toots: 0 private, 1 unresolved, 0 already checked recently, 0 fetched)"
+        ),
+        "{log}"
+    );
+}
