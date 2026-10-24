@@ -197,3 +197,29 @@ fn a_post_ref_reads_back_as_server_and_id() {
         r#"["example.social","12345"]"#
     );
 }
+
+/// A post on a server that is known but speaks none of our APIs cannot be
+/// looked up, and the failure names the software it runs.
+#[tokio::test]
+async fn a_post_on_a_server_with_no_known_api_is_not_looked_up() {
+    let dir = common::tmp_dir();
+    let http = http(&dir);
+    let mut state = State::default();
+    let known = ServerInfo::from_nodeinfo(
+        "remote.invalid",
+        &json!({"software": {"name": "something-new", "version": "1"}}),
+    )
+    .unwrap();
+    state
+        .seen_hosts_mut()
+        .add("remote.invalid", known.to_state());
+
+    let found = find_post("https://remote.invalid/@alice/1", &mut state, &http).await;
+
+    assert_eq!(found, None);
+    // the answer is remembered, so the next scan does not ask again
+    assert_eq!(
+        state.parsed_urls().get("https://remote.invalid/@alice/1"),
+        Some(&None)
+    );
+}

@@ -726,4 +726,58 @@ mod tests {
             "web.example"
         );
     }
+
+    #[test]
+    fn host_meta_without_an_lrdd_link_is_an_error() {
+        let host_meta = r#"<?xml version="1.0" encoding="UTF-8"?>
+<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
+  <Link rel="other" template="https://web.example/other?q={uri}"/>
+</XRD>"#;
+        let err = parse_host_meta(host_meta, "display.example").unwrap_err();
+        assert_eq!(err.to_string(), "no lrdd link");
+    }
+
+    #[test]
+    fn an_lrdd_link_without_a_template_is_an_error() {
+        let host_meta = r#"<?xml version="1.0" encoding="UTF-8"?>
+<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
+  <Link rel="lrdd"/>
+</XRD>"#;
+        let err = parse_host_meta(host_meta, "display.example").unwrap_err();
+        assert_eq!(err.to_string(), "lrdd link has no template");
+    }
+
+    #[test]
+    fn a_template_without_a_server_is_an_error() {
+        let host_meta = r#"<?xml version="1.0" encoding="UTF-8"?>
+<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
+  <Link rel="lrdd" template="/webfinger?q={uri}"/>
+</XRD>"#;
+        let err = parse_host_meta(host_meta, "display.example").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "server not found in lrdd for display.example"
+        );
+    }
+
+    #[test]
+    fn host_meta_that_is_not_xml_is_an_error() {
+        let err = parse_host_meta("not xml at all", "display.example").unwrap_err();
+        assert!(
+            !err.to_string().is_empty(),
+            "the parser's complaint is kept: {err}"
+        );
+    }
+
+    #[test]
+    fn each_flavor_names_its_state_key_and_itself() {
+        assert_eq!(ApiFlavor::Mastodon.state_key(), "mastodonApiSupport");
+        assert_eq!(ApiFlavor::Misskey.state_key(), "misskeyApiSupport");
+        assert_eq!(ApiFlavor::Lemmy.state_key(), "lemmyApiSupport");
+        assert_eq!(ApiFlavor::PeerTube.state_key(), "peertubeApiSupport");
+        assert_eq!(ApiFlavor::Mastodon.as_str(), "mastodon");
+        assert_eq!(ApiFlavor::Misskey.as_str(), "misskey");
+        assert_eq!(ApiFlavor::Lemmy.as_str(), "lemmy");
+        assert_eq!(ApiFlavor::PeerTube.as_str(), "peertube");
+    }
 }

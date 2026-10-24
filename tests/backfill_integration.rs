@@ -6,6 +6,7 @@ mod common;
 use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::backfill::{UserSet, user_posts};
 use fedifetcher::http::HttpClient;
+use fedifetcher::posts::Post;
 use fedifetcher::store::State;
 use fedifetcher::users::User;
 use httpmock::Method;
@@ -199,5 +200,173 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
             .unwrap(),
         Some("it is not indexable".to_string()),
         "the account is recorded with its reason"
+    );
+}
+
+/// An account whose profile URL cannot be read is recorded as checked, so
+/// it is not retried every run.
+#[tokio::test]
+async fn an_unparseable_profile_url_is_recorded_as_checked() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
+    let mut state = State::default();
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+
+    let user = User::new("alice", "not a url");
+
+    let logs = common::LogCapture::new();
+    let guard = logs.install();
+    let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
+    drop(guard);
+
+    assert!(posts.is_none(), "nothing can be fetched for the account");
+    assert!(
+        logs.text().contains("Error parsing Profile URL not a url"),
+        "the unreadable URL is logged: {}",
+        logs.text()
+    );
+    assert!(
+        state.recently_checked_users().contains("alice"),
+        "the account is recorded as checked"
+    );
+}
+
+/// An account on a server that speaks none of our APIs is not fetched, and
+/// not recorded either: nothing about it was learned.
+#[tokio::test]
+async fn a_server_with_no_known_api_is_not_backfilled() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
+    let mut state = State::default();
+    // the server is already known, so no lookup happens
+    let known = fedifetcher::servers::ServerInfo::from_nodeinfo(
+        "remote.invalid",
+        &serde_json::json!({"software": {"name": "something-new", "version": "1"}}),
+    )
+    .unwrap();
+    state
+        .seen_hosts_mut()
+        .add("remote.invalid", known.to_state());
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+
+    let user = User::new("alice@remote.invalid", "https://remote.invalid/@alice");
+
+    let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
+
+    assert!(
+        posts.is_none(),
+        "a server we cannot talk to yields no posts"
+    );
+    assert!(
+        !state
+            .recently_checked_users()
+            .contains("alice@remote.invalid"),
+        "nothing was learned about the account, so it is not recorded"
+    );
+}
+
+/// An account on a known server whose profile URL the server's client cannot
+/// read is recorded as checked, like an unparseable one.
+#[tokio::test]
+async fn a_profile_shape_the_client_cannot_read_is_recorded_as_checked() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
+    let mut state = State::default();
+    let known = fedifetcher::servers::ServerInfo::from_nodeinfo(
+        "remote.invalid",
+        &serde_json::json!({"software": {"name": "mastodon", "version": "4"}}),
+    )
+    .unwrap();
+    state
+        .seen_hosts_mut()
+        .add("remote.invalid", known.to_state());
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+
+    // not one of the Mastodon client's profile shapes
+    let user = User::new(
+        "alice@remote.invalid",
+        "https://remote.invalid/profiles/alice",
+    );
+
+    let logs = common::LogCapture::new();
+    let guard = logs.install();
+    let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
+    drop(guard);
+
+    assert!(posts.is_none(), "nothing can be fetched for the account");
+    assert!(
+        logs.text().contains("Error parsing Profile URL"),
+        "the unreadable URL is logged: {}",
+        logs.text()
+    );
+    assert!(
+        state
+            .recently_checked_users()
+            .contains("alice@remote.invalid"),
+        "the account is recorded as checked"
+    );
+}
+
+/// A post with no context to fetch is resolved on our server and remembered,
+/// without any context being asked for.
+#[tokio::test]
+async fn a_post_without_possible_context_is_resolved_and_remembered() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
+    let home = HomeServer::with_scheme(
+        server.base_url().trim_start_matches("http://"),
+        "http",
+        "secret-token",
+        client.clone(),
+    );
+    let mut state = State::default();
+    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+
+    let url = "https://remote.example/@alice/1";
+    let search = server
+        .mock_async(move |when, then| {
+            when.method(Method::GET)
+                .path("/api/v2/search")
+                .query_param("q", url);
+            then.status(200);
+        })
+        .await;
+
+    // no reply count and no reply: there is no context to ask for
+    let post = Post {
+        url: url.to_string(),
+        uri: url.to_string(),
+        created_at: fedifetcher::timeutil::now(),
+        is_public: true,
+        reblog: None,
+        in_reply_to_id: None,
+        in_reply_to_account_id: None,
+        reply_count: None,
+        account: Some(User::new(
+            "alice@remote.example",
+            "https://remote.example/@alice",
+        )),
+        mentions: vec![],
+    };
+
+    let added = fedifetcher::backfill::add_post_with_context(&mut ctx, &post).await;
+
+    assert!(added, "the post resolves on our server");
+    assert_eq!(search.calls(), 1, "the post itself is resolved");
+    assert!(
+        state.seen_urls().contains(url),
+        "the post is remembered as seen"
     );
 }
