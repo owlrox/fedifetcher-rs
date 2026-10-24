@@ -619,7 +619,7 @@ fn coerce_int(value: &Value) -> Result<i64> {
         Value::Number(n) => n
             .as_i64()
             .ok_or_else(|| Error::Config(format!("{value} is not an integer"))),
-        Value::Bool(b) => Ok(*b as i64),
+        Value::Bool(b) => Ok(i64::from(*b)),
         Value::String(text) => text
             .trim()
             .parse::<i64>()

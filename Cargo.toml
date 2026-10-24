@@ -1,6 +1,6 @@
 [package]
 name = "fedifetcher"
-version = "1.2.6"
+version = "1.2.7"
 edition = "2024"
 rust-version = "1.99.1"
 description = "Pull missing posts and profiles into your Mastodon instance (Rust port with web UI)"
@@ -9,6 +9,28 @@ license = "GPL-3.0-only"
 [lib]
 name = "fedifetcher"
 path = "src/lib.rs"
+
+# Strictness beyond the defaults: leftover debug macros fail the build,
+# and the lossy-cast and time-subtraction lints fire on silent-bug shapes
+# (an `as` cast that could truncate, a wall-clock subtraction that could
+# underflow). Wider lints stay off, with their cost today: missing_docs
+# (~190 undocumented pub fields, variants and methods), the possible_
+# truncation/wrap/sign_loss cast group (~28 sites, audited), indexing_
+# slicing (25 sites, incl. deliberate byte slicing in robots/http),
+# print_stderr (the two eprintln fallbacks in logging.rs, for when the
+# database write itself has failed) and unwrap_used/expect_used (locks
+# and compiled-in regex patterns, plus unit tests).
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+cast_lossless = "warn"
+unchecked_time_subtraction = "warn"
+
+# The deployed binary panics on arithmetic overflow instead of wrapping
+# silently; the runtime cost is a few percent on a background job.
+[profile.release]
+overflow-checks = true
 
 [[bin]]
 name = "fedifetcher"
