@@ -2766,6 +2766,10 @@ async fn the_cleanup_button_cleans_and_reports() {
     let mut config = common::test_config(&dir, "example.social");
     config.access_tokens = vec![TOKEN.to_string()];
     let (base, db) = spawn_ui_with(config).await;
+    sqlx::query("INSERT INTO config (key, value) VALUES ('server', 'example.social')")
+        .execute(&db)
+        .await
+        .unwrap();
     for i in 0..5 {
         fedifetcher::db::insert_log(
             &db,
@@ -2786,6 +2790,23 @@ async fn the_cleanup_button_cleans_and_reports() {
     assert!(
         page.contains("Cleaned up the database"),
         "the cleanup is reported: {page}"
+    );
+    assert!(
+        page.contains("log lines"),
+        "the report counts what each emptied table held: {page}"
+    );
+    let (status, _) = get(&format!("{base}/debug")).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        fedifetcher::db::table_count(&db, "logs").await.unwrap(),
+        0,
+        "the logs were emptied"
+    );
+    // the config page's own records survive a cleanup
+    assert_eq!(
+        fedifetcher::db::table_count(&db, "config").await.unwrap(),
+        1,
+        "the config records stay"
     );
     let (status, page) = get(&format!("{base}/debug")).await;
     assert_eq!(status, 200);

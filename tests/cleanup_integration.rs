@@ -1,20 +1,13 @@
-//! Cleaning the database from the debug page: only what the app's own
-//! retention rules would remove is removed, and the records that matter —
-//! the configuration, the OAuth rows, the run history, the accounts'
-//! recorded wishes — are kept.
+//! Cleaning the database from the debug page: everything but the
+//! configuration and the OAuth rows is emptied, and the freed space is
+//! returned to the filesystem.
 
 mod common;
 
 use fedifetcher::config::Config;
 use fedifetcher::db;
-use fedifetcher::store::StateStore;
 use fedifetcher::timeutil;
 use sqlx::Row;
-
-/// A timestamp well in the past, as the state spells it.
-fn old_ts() -> String {
-    "2026-01-01 00:00:00+00:00".to_string()
-}
 
 /// A timestamp right now, as the state spells it.
 fn now_ts() -> String {
@@ -25,8 +18,7 @@ async fn count(pool: &sqlx::SqlitePool, table: &str) -> i64 {
     db::table_count(pool, table).await.unwrap()
 }
 
-/// A fresh database with one row in every table cleanup may touch or must
-/// keep.
+/// A fresh database with one row in every table.
 async fn seeded_db(config: &Config) -> sqlx::SqlitePool {
     let pool = db::open(config).await.unwrap();
     sqlx::query("INSERT INTO config (key, value) VALUES ('server', 'example.social')")
@@ -51,6 +43,17 @@ async fn seeded_db(config: &Config) -> sqlx::SqlitePool {
         "INSERT INTO runs (started, finished, outcome, message) VALUES ('s', 'f', 'ok', 'm')",
     )
     .execute(&pool)
+    .await
+    .unwrap();
+    db::insert_log(
+        &pool,
+        &db::LogRow {
+            ts: now_ts(),
+            level: "INFO".to_string(),
+            target: "t".to_string(),
+            message: "a line".to_string(),
+        },
+    )
     .await
     .unwrap();
     sqlx::query(
@@ -87,176 +90,95 @@ async fn seeded_db(config: &Config) -> sqlx::SqlitePool {
         .await
         .unwrap();
     sqlx::query("INSERT INTO seen_urls (uri, first_seen) VALUES ('u1', ?1)")
-        .bind(old_ts())
+        .bind(now_ts())
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO recently_checked_users (acct, first_seen) VALUES ('me', ?1)")
+        .bind(now_ts())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO context_cache (uri, last_seen, created_at) VALUES ('u1', ?1, ?1)")
+        .bind(now_ts())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO robots_cache (url, text, fetched_at) VALUES ('r.txt', '', ?1)")
+        .bind(now_ts())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO seen_hosts (host, webserver, software, version, mastodon_api,
+         misskey_api, lemmy_api, peertube_api, last_checked, error, raw_nodeinfo)
+         VALUES ('h.example', 'h.example', 'mastodon', '4', 1, 0, 0, 0, ?1, NULL, '{}')",
+    )
+    .bind(now_ts())
+    .execute(&pool)
+    .await
+    .unwrap();
     pool
 }
 
-/// Log lines beyond the retention are pruned, the newest kept.
+/// Every table but the configuration's and the OAuth ones is emptied, and
+/// the report says how much each held.
 #[tokio::test]
-async fn cleanup_prunes_the_logs_to_the_retention() {
+async fn cleanup_empties_every_table_but_the_kept_three() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
     let pool = seeded_db(&config).await;
-    for i in 0..10 {
-        db::insert_log(
-            &pool,
-            &db::LogRow {
-                ts: now_ts(),
-                level: "INFO".to_string(),
-                target: "t".to_string(),
-                message: format!("line {i}"),
-            },
-        )
-        .await
-        .unwrap();
+
+    let report = db::cleanup(&pool).await.unwrap();
+
+    for table in [
+        "logs",
+        "runs",
+        "private_posts",
+        "opted_out_accounts",
+        "known_context_posts",
+        "trigger_posts",
+        "seen_urls",
+        "known_followings",
+        "recently_checked_users",
+        "context_cache",
+        "replied_toots",
+        "robots_cache",
+        "seen_hosts",
+    ] {
+        assert_eq!(count(&pool, table).await, 0, "the {table} table is emptied");
     }
+    assert_eq!(count(&pool, "config").await, 1, "the config records stay");
+    assert_eq!(
+        count(&pool, "oauth_accounts").await,
+        1,
+        "the connected accounts stay"
+    );
+    assert_eq!(
+        count(&pool, "oauth_apps").await,
+        1,
+        "the registered OAuth apps stay"
+    );
 
-    let report = StateStore::new(config.clone())
-        .cleanup(&pool, 3)
-        .await
-        .unwrap();
-
-    assert_eq!(count(&pool, "logs").await, 3);
-    assert_eq!(report.logs, 7, "the report says how many lines were pruned");
-    let rows = db::recent_logs(&pool, 10, db::LogSort::Message, db::LogOrder::Asc, None)
-        .await
-        .unwrap();
+    let removed: Vec<(&str, u64)> = report.removed;
     assert!(
-        rows.iter().any(|row| row.message == "line 9"),
-        "the newest lines are the ones kept"
+        removed.contains(&("log line", 1)) && removed.contains(&("seen URL", 1)),
+        "the report counts what each emptied table held: {removed:?}"
     );
     assert!(
-        !rows.iter().any(|row| row.message == "line 0"),
-        "the oldest lines are the ones pruned"
+        !removed.iter().any(|(label, _)| *label == "config record"),
+        "the kept tables are not in the report: {removed:?}"
     );
 }
 
-/// Stale hosts, robots.txt entries, context entries and recently checked
-/// users are expired by the same rules a run's load applies; fresh ones
-/// stay, and seen_urls and known_followings are never touched.
+/// The kept rows survive with their content intact.
 #[tokio::test]
-async fn cleanup_expires_stale_state_by_the_load_rules() {
+async fn the_kept_rows_survive_intact() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
     let pool = seeded_db(&config).await;
 
-    for (host, checked) in [("old.example", old_ts()), ("fresh.example", now_ts())] {
-        sqlx::query(
-            "INSERT INTO seen_hosts (host, webserver, software, version, mastodon_api,
-             misskey_api, lemmy_api, peertube_api, last_checked, error, raw_nodeinfo)
-             VALUES (?1, ?1, 'mastodon', '4', 1, 0, 0, 0, ?2, NULL, '{}')",
-        )
-        .bind(host)
-        .bind(&checked)
-        .execute(&pool)
-        .await
-        .unwrap();
-    }
-    for (url, fetched) in [("old.txt", old_ts()), ("fresh.txt", now_ts())] {
-        sqlx::query("INSERT INTO robots_cache (url, text, fetched_at) VALUES (?1, '', ?2)")
-            .bind(url)
-            .bind(fetched)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    for (uri, seen) in [("old-ctx", old_ts()), ("fresh-ctx", now_ts())] {
-        sqlx::query("INSERT INTO context_cache (uri, last_seen, created_at) VALUES (?1, ?2, ?2)")
-            .bind(uri)
-            .bind(seen)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    for (acct, seen) in [("old-user", old_ts()), ("fresh-user", now_ts())] {
-        sqlx::query("INSERT INTO recently_checked_users (acct, first_seen) VALUES (?1, ?2)")
-            .bind(acct)
-            .bind(seen)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-
-    let report = StateStore::new(config.clone())
-        .cleanup(&pool, 100_000)
-        .await
-        .unwrap();
-
-    assert_eq!(count(&pool, "seen_hosts").await, 1, "the fresh host stays");
-    let hosts: Vec<String> = sqlx::query("SELECT host FROM seen_hosts")
-        .fetch_all(&pool)
-        .await
-        .unwrap()
-        .iter()
-        .map(|row| row.get::<String, _>("host"))
-        .collect();
-    assert!(hosts.contains(&"fresh.example".to_string()));
-    assert_eq!(report.hosts, 1, "the stale host is expired");
-
-    assert_eq!(
-        count(&pool, "robots_cache").await,
-        1,
-        "the fresh entry stays"
-    );
-    assert_eq!(report.robots, 1);
-
-    let ctx: Vec<String> = sqlx::query("SELECT uri FROM context_cache")
-        .fetch_all(&pool)
-        .await
-        .unwrap()
-        .iter()
-        .map(|row| row.get::<String, _>("uri"))
-        .collect();
-    assert_eq!(ctx, vec!["fresh-ctx".to_string()]);
-    assert_eq!(report.context, 1);
-
-    let users: Vec<String> = sqlx::query("SELECT acct FROM recently_checked_users")
-        .fetch_all(&pool)
-        .await
-        .unwrap()
-        .iter()
-        .map(|row| row.get::<String, _>("acct"))
-        .collect();
-    assert_eq!(users, vec!["fresh-user".to_string()]);
-    assert_eq!(report.users, 1);
-
-    assert_eq!(
-        count(&pool, "seen_urls").await,
-        1,
-        "seen_urls has no expiry"
-    );
-    assert_eq!(
-        count(&pool, "known_followings").await,
-        1,
-        "known_followings has no expiry"
-    );
-}
-
-/// The configuration, the OAuth rows, the run history and the accounts'
-/// recorded wishes survive a cleanup untouched.
-#[tokio::test]
-async fn cleanup_keeps_the_records_that_matter() {
-    let dir = common::tmp_dir();
-    let config = common::test_config(&dir, "example.social");
-    let pool = seeded_db(&config).await;
-
-    StateStore::new(config.clone())
-        .cleanup(&pool, 0)
-        .await
-        .unwrap();
-
-    assert_eq!(count(&pool, "config").await, 1);
-    assert_eq!(count(&pool, "oauth_accounts").await, 1);
-    assert_eq!(count(&pool, "oauth_apps").await, 1);
-    assert_eq!(count(&pool, "runs").await, 1);
-    assert_eq!(count(&pool, "opted_out_accounts").await, 1);
-    assert_eq!(count(&pool, "private_posts").await, 1);
-    assert_eq!(count(&pool, "trigger_posts").await, 1);
-    assert_eq!(count(&pool, "known_context_posts").await, 1);
-    assert_eq!(count(&pool, "replied_toots").await, 1);
+    db::cleanup(&pool).await.unwrap();
 
     let server: String = sqlx::query("SELECT value FROM config WHERE key = 'server'")
         .fetch_one(&pool)
@@ -264,4 +186,22 @@ async fn cleanup_keeps_the_records_that_matter() {
         .unwrap()
         .get("value");
     assert_eq!(server, "example.social");
+    let acct: String = sqlx::query("SELECT acct FROM oauth_accounts WHERE token = 'tok'")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("acct");
+    assert_eq!(acct, "me");
+}
+
+/// A cleanup on an empty database is a success that removed nothing.
+#[tokio::test]
+async fn cleaning_an_empty_database_removes_nothing() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let pool = db::open(&config).await.unwrap();
+
+    let report = db::cleanup(&pool).await.unwrap();
+
+    assert!(report.removed.is_empty(), "{:?}", report.removed);
 }

@@ -9,9 +9,9 @@
 use serde_json::Value;
 
 use crate::api::mastodon::{masked, report_mastodon_error};
+use crate::db::CleanupReport;
 use crate::error::{Error, Result};
 use crate::http::HttpClient;
-use crate::store::CleanupReport;
 
 /// What a debug action found, as the page shows it.
 #[derive(Clone, Debug)]

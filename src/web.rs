@@ -22,14 +22,13 @@ use crate::VERSION;
 use crate::api::mastodon::{HomeServer, masked};
 use crate::backfill::UserSet;
 use crate::config::{Config, RawValues, is_known_option, option_description};
-use crate::db::{self, LogOrder, LogRow, LogSort, OauthAccountRow, RunRow};
+use crate::db::{self, CleanupReport, LogOrder, LogRow, LogSort, OauthAccountRow, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
-use crate::logging;
 use crate::oauth;
 use crate::run::{CancelToken, Context, Pause, run_once};
-use crate::store::{CleanupReport, State, StateStore, lock};
+use crate::store::{State, StateStore, lock};
 use crate::stream;
 use crate::timeutil;
 
@@ -1193,19 +1192,20 @@ async fn debug_page(
     })
 }
 
-/// The tables the debug page's database section counts, with their labels:
-/// first the ones a cleanup shrinks, then the ones it keeps.
+/// The tables the debug page's database section counts, with the singular
+/// label the page pluralizes: first the ones a cleanup empties, then the
+/// ones it keeps.
 const DB_USAGE_TABLES: &[(&str, &str)] = &[
-    ("logs", "log lines"),
-    ("seen_urls", "seen URLs"),
-    ("seen_hosts", "known hosts"),
-    ("context_cache", "context entries"),
-    ("robots_cache", "robots.txt entries"),
-    ("trigger_posts", "scanned posts"),
-    ("opted_out_accounts", "opted-out accounts"),
-    ("config", "config records"),
-    ("oauth_accounts", "connected accounts"),
-    ("runs", "runs"),
+    ("logs", "log line"),
+    ("seen_urls", "seen URL"),
+    ("seen_hosts", "known host"),
+    ("context_cache", "context entry"),
+    ("robots_cache", "robots.txt entry"),
+    ("trigger_posts", "scanned post"),
+    ("opted_out_accounts", "opted-out record"),
+    ("config", "config record"),
+    ("oauth_accounts", "connected account"),
+    ("runs", "run"),
 ];
 
 /// The database's size on disk and row counts, as the debug page's database
@@ -1226,7 +1226,7 @@ impl DbUsage {
         let counts = self
             .counts
             .iter()
-            .map(|(label, count)| format!("{count} {label}"))
+            .map(|(label, count)| plural(*count as u64, label))
             .collect::<Vec<_>>()
             .join(", ");
         if self.wal > 0 {
@@ -1277,26 +1277,24 @@ fn format_bytes(bytes: u64) -> String {
 
 /// What a cleanup did, as the page reports it.
 fn cleanup_report_line(report: &CleanupReport) -> String {
-    let mut parts = Vec::new();
-    if report.logs > 0 {
-        parts.push(format!("{} log lines", report.logs));
+    if report.removed.is_empty() {
+        return "Cleaned up the database: there was nothing to remove.".to_string();
     }
-    if report.robots > 0 {
-        parts.push(format!("{} robots.txt entries", report.robots));
-    }
-    if report.hosts > 0 {
-        parts.push(format!("{} stale host entries", report.hosts));
-    }
-    if report.context > 0 {
-        parts.push(format!("{} expired context entries", report.context));
-    }
-    if report.users > 0 {
-        parts.push(format!("{} long-unseen users", report.users));
-    }
-    if parts.is_empty() {
-        "Cleaned up the database: there was nothing to remove.".to_string()
+    let parts = report
+        .removed
+        .iter()
+        .map(|(label, count)| plural(*count, label))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Cleaned up the database: removed {parts}.")
+}
+
+/// A count with its label, pluralized when it is not one.
+fn plural(count: u64, label: &str) -> String {
+    if count == 1 {
+        format!("1 {label}")
     } else {
-        format!("Cleaned up the database: removed {}.", parts.join(", "))
+        format!("{count} {label}s")
     }
 }
 
@@ -1373,11 +1371,14 @@ async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> Debug
     let action = field("action");
     if action == "cleanup" {
         tracing::info!("POST /debug: clean up the database");
-        let config = state.config.lock().unwrap().clone();
-        return match StateStore::new(config)
-            .cleanup(&state.db, logging::LOG_RETENTION)
-            .await
-        {
+        // a run that is holding its state in memory would write it back
+        // over the emptied tables the moment it finished
+        if run_in_progress(state).await.is_some() {
+            return DebugOutcome::Failed {
+                message: "A run is in progress — clean up after it finishes.".to_string(),
+            };
+        }
+        return match db::cleanup(&state.db).await {
             Ok(report) => DebugOutcome::Cleaned { report },
             Err(ex) => DebugOutcome::Failed {
                 message: ex.to_string(),
@@ -2963,7 +2964,7 @@ fn DebugPage(
                 <h2>"Database"</h2>
                 <p class="muted">{usage_line}</p>
                 <p class="muted">
-                    "Clean up removes only what the app's own retention rules would remove: log lines beyond the retention, host info past the configured remember window, robots.txt entries past their refetch age, context entries past their week, and long-unseen recently checked users. The configuration, the connected accounts, the run history, and every account's recorded wishes are kept."
+                    "Clean up empties every table except the configuration's and the OAuth ones: the log lines, the run history, the seen URLs, the host info, the caches, and the scanned-post records. FediFetcher re-fetches what it needs on its next run. The configuration, the connected accounts, and the registered OAuth apps are kept, and the freed space is returned to the filesystem."
                 </p>
                 <form method="post" action="/debug">
                     <input type="hidden" name="action" value="cleanup"/>

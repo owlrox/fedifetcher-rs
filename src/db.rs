@@ -576,6 +576,77 @@ pub async fn save_config(pool: &SqlitePool, values: &RawValues) -> Result<()> {
     Ok(())
 }
 
+/// The tables a cleanup keeps: the configuration's records, and the OAuth
+/// rows — the only data whose loss is not repaired by fetching again.
+const KEPT_TABLES: &[&str] = &["config", "oauth_accounts", "oauth_apps"];
+
+/// The tables a cleanup empties, with the singular label the report shows
+/// them by.
+const CLEANED_TABLES: &[(&str, &str)] = &[
+    ("logs", "log line"),
+    ("runs", "run"),
+    ("seen_urls", "seen URL"),
+    ("known_followings", "known following"),
+    ("recently_checked_users", "recently checked user"),
+    ("seen_hosts", "known host"),
+    ("context_cache", "context entry"),
+    ("replied_toots", "replied-toot record"),
+    ("robots_cache", "robots.txt entry"),
+    ("trigger_posts", "scanned post"),
+    ("known_context_posts", "known context post"),
+    ("private_posts", "private-post marker"),
+    ("opted_out_accounts", "opted-out record"),
+];
+
+/// What a cleanup removed: one entry per table that had rows to remove,
+/// label first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CleanupReport {
+    pub removed: Vec<(&'static str, u64)>,
+}
+
+/// Empty every table but the kept ones, then vacuum, so the freed space
+/// goes back to the filesystem. FediFetcher re-fetches what it needs on
+/// its next run; a cleanup never costs the configuration, the OAuth rows,
+/// or anything else that is not re-fetchable.
+pub async fn cleanup(pool: &SqlitePool) -> Result<CleanupReport> {
+    for table in KEPT_TABLES {
+        debug_assert!(
+            !CLEANED_TABLES.iter().any(|(name, _)| name == table),
+            "{table} is both kept and cleaned"
+        );
+    }
+    let mut removed = Vec::new();
+    // one static DELETE per table: sqlx audits dynamic SQL strings
+    for (sql, label) in [
+        ("DELETE FROM logs", "log line"),
+        ("DELETE FROM runs", "run"),
+        ("DELETE FROM seen_urls", "seen URL"),
+        ("DELETE FROM known_followings", "known following"),
+        (
+            "DELETE FROM recently_checked_users",
+            "recently checked user",
+        ),
+        ("DELETE FROM seen_hosts", "known host"),
+        ("DELETE FROM context_cache", "context entry"),
+        ("DELETE FROM replied_toots", "replied-toot record"),
+        ("DELETE FROM robots_cache", "robots.txt entry"),
+        ("DELETE FROM trigger_posts", "scanned post"),
+        ("DELETE FROM known_context_posts", "known context post"),
+        ("DELETE FROM private_posts", "private-post marker"),
+        ("DELETE FROM opted_out_accounts", "opted-out record"),
+    ] {
+        let result = sqlx::query(sql).execute(pool).await?;
+        if result.rows_affected() > 0 {
+            removed.push((label, result.rows_affected()));
+        }
+    }
+    sqlx::raw_sql("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+        .execute(pool)
+        .await?;
+    Ok(CleanupReport { removed })
+}
+
 /// Add one log line.
 pub async fn insert_log(pool: &SqlitePool, row: &LogRow) -> Result<()> {
     sqlx::query("INSERT INTO logs (ts, level, target, message) VALUES (?, ?, ?, ?)")
@@ -704,13 +775,12 @@ pub async fn clear_logs(pool: &SqlitePool) -> Result<()> {
 }
 
 /// Keep only the newest `keep` log lines.
-pub async fn prune_logs(pool: &SqlitePool, keep: i64) -> Result<u64> {
-    let result =
-        sqlx::query("DELETE FROM logs WHERE id <= (SELECT COALESCE(MAX(id), 0) - ? FROM logs)")
-            .bind(keep)
-            .execute(pool)
-            .await?;
-    Ok(result.rows_affected())
+pub async fn prune_logs(pool: &SqlitePool, keep: i64) -> Result<()> {
+    sqlx::query("DELETE FROM logs WHERE id <= (SELECT COALESCE(MAX(id), 0) - ? FROM logs)")
+        .bind(keep)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Record one finished run.
