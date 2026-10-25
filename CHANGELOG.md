@@ -1,3 +1,29 @@
+## 1.2.25
+
+Finish the OAuth onboarding: README, checkboxes, coverage.
+
+Task 5, the plan's last: the README's first-run setup leads with the
+connect flow — type the server's name, approve on the instance's own
+site, done, with the four scopes and the Disconnect/Reconnect buttons
+explained — and keeps the manual token path as the documented fallback
+for headless installs and instances that restrict OAuth applications;
+the config table's access_tokens entry names both roads. The one
+pager's assumptions are checked off with what the validation found
+(the scope list needed read:accounts; the origin question resolved for
+forwarded headers, real-proxy recheck deploy-time), and the plan's
+checkpoints record the live verification rounds.
+
+Coverage: the oauth module's error arms get one test each for the
+registration (refused, answered without the secret), the exchange, the
+who-ask, and the revoke — src/oauth.rs is now 98.2% of lines, and the
+suite is at 92.0% lines / 95.5% functions, above its bar. Along the
+way: httpmock serves the first matching mock, so sequential-behavior
+tests retire their mocks with up_to_n_times(1) — the lemmy error test
+had passed vacuously on the same semantics and its assertions stand
+unchanged.
+
+380 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.24
 
 Log the OAuth lifecycle and what each config save changed.

@@ -41,15 +41,15 @@ docs/ideas/oauth-onboarding.md
 
 ## Checkpoint: account management complete
 - [ ] Spec success criteria 1–7 each map to a passing test
-- [ ] Review with human before Phase 3
+- [x] Review with human before Phase 3 (live-tested by the user)
 
 ## Phase 3: Polish
 
-- [ ] Task 5: README, tooltips, coverage
+- [x] Task 5: README, tooltips, coverage
   - Acceptance: README documents the flow; tooltip discipline held;
     coverage above 92% of lines
   - Verify: gates + `cargo llvm-cov --summary-only`
   - Files: README.md, src/web.rs, docs/ideas/oauth-onboarding.md
 
 ## Checkpoint: complete
-- [ ] All acceptance criteria met; ready for review
+- [x] All acceptance criteria met; ready for review

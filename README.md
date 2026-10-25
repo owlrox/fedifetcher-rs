@@ -90,7 +90,13 @@ FediFetcher has two modes: `run` performs one pass and exits, `serve` runs the w
 
 Then open <http://127.0.0.1:8080>.
 
-First-run setup:
+First-run setup — the easy way, no token to copy:
+
+1. Open the **Config** page (`/config`) in the web UI and type your server's name under **Connected accounts**, e.g. `mstdn.thms.uk`.
+2. Press **Connect your Mastodon account**. FediFetcher registers itself on your instance and sends you to its own authorization page; approve it there and you land back on the config page with the account connected. The scopes it asks for are `read:search`, `read:statuses`, `admin:read:accounts`, and `read:accounts` (the last one is only how it learns which account it just connected). Connected accounts are listed on the page with a **Disconnect** button — which revokes the token on your instance — and a **Reconnect** button appears on any account whose token your instance has stopped accepting.
+3. Choose the tasks you want to run (see [Configuration](#configuration)), then press **Run** on the dashboard (`/`).
+
+The manual way, unchanged — for headless installs, or instances that restrict OAuth applications:
 
 1. Create an application for your account at `https://<your-server>/settings/applications`. The access token needs the `read:search`, `read:statuses`, and `admin:read:accounts` scopes.
 2. Open the **Config** page (`/config`) in the web UI and fill in:
@@ -99,7 +105,7 @@ First-run setup:
    - the tasks you want to run (see [Configuration](#configuration))
 3. Save, then press **Run** on the dashboard (`/`).
 
-Configuration lives in the database and is edited through the web UI — there is no config file, no environment variables, and no command-line flags.
+Configuration lives in the database and is edited through the web UI — there is no config file, no environment variables, and no command-line flags. Every save logs what it changed (tokens by masked hint only), and the OAuth lifecycle — connected, disconnected, reconnect prompts — is on the Logs page like the run history is.
 
 ### Run once from the command line
 
@@ -154,7 +160,7 @@ The configuration is stored in the database and edited through the web UI's conf
 | Option | Default | Description |
 | --- | --- | --- |
 | `server` | *(required)* | Your server's name, e.g. `mstdn.thms.uk` |
-| `access_tokens` | *(required)* | One token per user, created at `https://<server>/settings/applications` with `read:search`, `read:statuses`, and `admin:read:accounts` scopes |
+| `access_tokens` | *(required)* | One token per user — connected through the config page's **Connect your Mastodon account** (which asks for `read:search`, `read:statuses`, `admin:read:accounts`, and `read:accounts`), or created by hand at `https://<server>/settings/applications` with `read:search`, `read:statuses`, and `admin:read:accounts` scopes |
 | `reply_interval_in_hours` | `0` (off) | Fetch remote replies to posts that received replies from users on your instance in this period |
 | `home_timeline_length` | `0` (off) | Look for replies to posts in the API key owner's home timeline, up to this many posts |
 | `streaming` | `false` | Stream the home timeline over a long-lived connection and fetch context for new posts as they arrive, instead of waiting for the next run. Serve mode only, with the first access token; applies on restart |

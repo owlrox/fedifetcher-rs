@@ -39,13 +39,16 @@ authorization round.
 
 ## Key Assumptions to Validate
 
-- [ ] Public origin derivable consistently from proxy headers at both
-      moments — validate behind the deployed reverse proxy; fallback is
-      an explicit public-URL field
-- [ ] The README's three scopes are exactly what the APIs need —
-      validate with one real round-trip
-- [ ] `/api/v1/apps` registration is open on target servers (stock
-      Mastodon: yes; wafrn-style gated layers: out of scope)
+- [x] Public origin derivable consistently from proxy headers at both
+      moments — validated with forwarded headers in the oauth suite
+      (both ends of the dance name the public origin); a real
+      reverse-proxy recheck remains a deploy-time step
+- [x] The README's three scopes are exactly what the APIs need —
+      validated in live rounds, and found one short: the dance itself
+      needs `read:accounts` for verify_credentials; the ask carries four
+- [x] `/api/v1/apps` registration is open on target servers — validated
+      live on a stock Mastodon instance; wafrn-style gated layers remain
+      out of scope
 
 ## MVP Scope
 

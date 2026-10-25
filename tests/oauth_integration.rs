@@ -619,3 +619,104 @@ async fn the_oauth_lifecycle_is_logged_into_the_logs_table() {
         rows.iter().map(|row| &row.message).collect::<Vec<_>>()
     );
 }
+
+/// Each way the dance's asks can fail is reported with its step named:
+/// the registration, the exchange, the who-ask, and the revoke.
+#[tokio::test]
+async fn each_way_the_dance_can_fail_is_reported_with_its_step() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, &host(&server));
+    let db = fixture::test_db(&config).await;
+    let http = http(&config, &db);
+    let origin = format!("http://{}", host(&server));
+    let host_string = host(&server);
+
+    // the registration: refused once, then the mock retires (httpmock
+    // matches the first mock that fits) and the next answer serves
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/api/v1/apps");
+            then.status(500).up_to_n_times(1);
+        })
+        .await;
+    let err = oauth::registered_app(&db, &host_string, &http, &origin)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("registering the app on") && err.to_string().contains("500"),
+        "{err}"
+    );
+
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/api/v1/apps");
+            then.status(200)
+                .json_body(serde_json::json!({ "client_id": "x" }))
+                .up_to_n_times(1);
+        })
+        .await;
+    let err = oauth::registered_app(&db, &host_string, &http, &origin)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("no client_secret"),
+        "an answer without the secret is refused: {err}"
+    );
+
+    // a good registration, then the exchange and the who-ask failing
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/api/v1/apps");
+            then.status(200).json_body(registration());
+        })
+        .await;
+    let app = oauth::registered_app(&db, &host_string, &http, &origin)
+        .await
+        .expect("the registration answers");
+
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/oauth/token");
+            then.status(400).up_to_n_times(1);
+        })
+        .await;
+    let err = oauth::exchange_code(&http, &app, &origin, "the-dance-code")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("trading the approval code"),
+        "{err}"
+    );
+
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/oauth/token");
+            then.status(200)
+                .json_body(serde_json::json!({ "access_token": "t" }));
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/accounts/verify_credentials");
+            then.status(403);
+        })
+        .await;
+    let err = oauth::exchange_code(&http, &app, &origin, "the-dance-code")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("checking whose token"), "{err}");
+
+    // the revoke, refused
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/oauth/revoke");
+            then.status(400);
+        })
+        .await;
+    let err = oauth::revoke_token(&http, &app, "some-token")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("revoking the token"), "{err}");
+}
