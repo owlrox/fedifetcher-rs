@@ -22,7 +22,7 @@ use crate::VERSION;
 use crate::api::mastodon::{HomeServer, masked};
 use crate::backfill::UserSet;
 use crate::config::{Config, RawValues, is_known_option, option_description};
-use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
+use crate::db::{self, LogOrder, LogRow, LogSort, OauthAccountRow, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
@@ -161,6 +161,7 @@ pub fn app_with_scheme(config: Config, db: SqlitePool, scheme: &'static str) -> 
         .route("/config", get(config_page).post(save_config))
         .route("/oauth/connect", post(oauth_connect))
         .route("/oauth/callback", get(oauth_callback))
+        .route("/oauth/disconnect", post(oauth_disconnect))
         .route("/debug", get(debug_page).post(debug_post))
         .route("/about", get(about))
         .route("/healthz", get(healthz))
@@ -648,11 +649,48 @@ async fn clear_logs(AxumState(state): AxumState<Arc<AppState>>) -> Redirect {
 async fn config_page(
     AxumState(state): AxumState<Arc<AppState>>,
     headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Html<String> {
     page_load(&state, "GET /config");
     let live = live_updates(&headers);
     let running = run_in_progress(&state).await;
-    render(move || view! { <ConfigPage state=state running=running live=live /> })
+    let accounts = db::oauth_accounts(&state.db).await.unwrap_or_else(|ex| {
+        tracing::warn!("GET /config: could not read the connected accounts: {ex}");
+        Vec::new()
+    });
+    let oauth_message = params
+        .get("oauth")
+        .map(String::as_str)
+        .and_then(dance_message);
+    render(move || {
+        view! {
+            <ConfigPage
+                state=state
+                running=running
+                live=live
+                accounts=accounts
+                oauth_message=oauth_message
+            />
+        }
+    })
+}
+
+/// What the dance's return query string says to the user, in plain words.
+fn dance_message(what: &str) -> Option<&'static str> {
+    match what {
+        "connected" => Some("Account connected."),
+        "denied" => {
+            Some("The instance reported that the connection was denied, and nothing was changed.")
+        }
+        "expired" => Some(
+            "That connection attempt was not started here or has expired, and nothing was changed.",
+        ),
+        "failed" => {
+            Some("The instance did not return an authorization code, and nothing was changed.")
+        }
+        "disconnected" => Some("Account disconnected."),
+        _ => None,
+    }
 }
 
 /// Save the config page's form: apply the fields to the effective config,
@@ -706,6 +744,13 @@ async fn save_config(
         return Err(save_error(&state, StatusCode::BAD_REQUEST, &ex.to_string(), live).await);
     }
     if !remove_tokens.is_empty() || !new_token.is_empty() {
+        let removed: Vec<String> = config
+            .access_tokens
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| remove_tokens.contains(index))
+            .map(|(_, token)| token.clone())
+            .collect();
         let mut tokens: Vec<String> = config
             .access_tokens
             .iter()
@@ -717,6 +762,11 @@ async fn save_config(
             tokens.push(new_token);
         }
         config.access_tokens = tokens;
+        if !removed.is_empty()
+            && let Err(ex) = db::delete_oauth_accounts(&state.db, &removed).await
+        {
+            tracing::warn!("POST /config: could not drop the removed accounts' rows: {ex}");
+        }
     }
 
     if let Err(ex) = db::save_config(&state.db, &config.to_raw_values()).await {
@@ -888,6 +938,86 @@ async fn oauth_callback(
     *state.config.lock().unwrap() = config;
 
     Ok(back("connected"))
+}
+
+/// Disconnect an account: revoke its token(s) upstream — a refused revoke
+/// is logged, not obeyed, since the token is being discarded anyway —
+/// remove them from the config, and drop the rows. The mechanical form
+/// path (the index checkboxes) lands in the same state.
+async fn oauth_disconnect(
+    AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Redirect, (StatusCode, Html<String>)> {
+    let live = live_updates(&headers);
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let field = |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.trim().to_lowercase())
+            .unwrap_or_default()
+    };
+    let (acct, server) = (field("acct"), field("server"));
+    if acct.is_empty() || server.is_empty() {
+        return Err(save_error(
+            &state,
+            StatusCode::BAD_REQUEST,
+            "the account to disconnect is missing",
+            live,
+        )
+        .await);
+    }
+
+    let rows = db::oauth_accounts_by_acct(&state.db, &acct, &server)
+        .await
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return Err(save_error(
+            &state,
+            StatusCode::BAD_REQUEST,
+            &format!("@{acct} on {server} is not a connected account"),
+            live,
+        )
+        .await);
+    }
+
+    let origin = oauth::public_origin(&headers);
+    let http = state.http.ignoring_robots();
+    for row in rows {
+        match oauth::registered_app(&state.db, &row.server, &http, &origin).await {
+            Ok(app) => {
+                if let Err(ex) = oauth::revoke_token(&http, &app, &row.token).await {
+                    tracing::warn!("Disconnecting @{acct}: the instance refused the revoke: {ex}");
+                }
+            }
+            Err(ex) => {
+                tracing::warn!(
+                    "Disconnecting @{acct}: could not ask {server_of} to revoke: {ex}",
+                    server_of = row.server
+                )
+            }
+        }
+        if let Err(ex) = db::delete_oauth_account(&state.db, &row.token).await {
+            tracing::warn!("Disconnecting @{acct}: could not drop the account row: {ex}");
+        }
+        let mut config = state.config.lock().unwrap().clone();
+        config.access_tokens.retain(|token| token != &row.token);
+        if let Err(ex) = db::save_config(&state.db, &config.to_raw_values()).await {
+            return Err(save_error(
+                &state,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &ex.to_string(),
+                live,
+            )
+            .await);
+        }
+        *state.config.lock().unwrap() = config;
+    }
+
+    Ok(Redirect::to("/config?oauth=disconnected"))
 }
 
 /// Options whose empty form field means "unset".
@@ -2303,7 +2433,13 @@ fn sort_link(
 }
 
 #[component]
-fn ConfigPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl IntoView {
+fn ConfigPage(
+    state: Arc<AppState>,
+    running: Option<String>,
+    live: bool,
+    accounts: Vec<OauthAccountRow>,
+    oauth_message: Option<&'static str>,
+) -> impl IntoView {
     let config = state.config.lock().unwrap().clone();
     let db_path = config
         .state_dir
@@ -2394,6 +2530,50 @@ fn ConfigPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl
     rows.push(bool_row("log_page_loads", config.log_page_loads));
     view! {
         <Page state=state running=running title="Config".to_string() live=live refresh=None>
+            {oauth_message.map(|message| {
+                view! { <p class="muted">{message}</p> }
+            })}
+            <section>
+                <h2>"Connected accounts"</h2>
+                <p class="muted">
+                    "The accounts whose timelines FediFetcher fetches, connected on their instance's own site — no token to copy by hand."
+                </p>
+                {accounts.is_empty().then(|| {
+                    view! { <p class="muted">"No accounts are connected yet."</p> }
+                })}
+                <ul>
+                    {accounts.iter().map(|account| {
+                        let acct = account.acct.clone();
+                        let server = account.server.clone();
+                        view! {
+                            <li>
+                                <img src={account.avatar.clone()} alt="" width="24" height="24"/>
+                                " "
+                                <code>{acct.clone()}</code>
+                                " on "
+                                <code>{server.clone()}</code>
+                                " (connected " <code>{account.connected_at.clone()}</code> ")"
+                                <form method="post" action="/oauth/disconnect">
+                                    <input type="hidden" name="acct" value={acct}/>
+                                    <input type="hidden" name="server" value={server}/>
+                                    <button type="submit">"Disconnect"</button>
+                                </form>
+                            </li>
+                        }
+                    }).collect::<Vec<_>>()}
+                </ul>
+                <form method="post" action="/oauth/connect">
+                    <p>
+                        <input
+                            type="text"
+                            name="server"
+                            placeholder="example.social"
+                            title="Required: the name of your instance, e.g. example.social. FediFetcher registers itself there and you approve it on the instance's own site."
+                        />
+                        <button type="submit">"Connect your Mastodon account"</button>
+                    </p>
+                </form>
+            </section>
             <section>
                 <h2>"Edit configuration"</h2>
                 <p class="muted">

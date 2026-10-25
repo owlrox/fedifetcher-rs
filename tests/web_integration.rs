@@ -93,7 +93,8 @@ async fn post_debug(base: &str, form: &str) -> (u16, String) {
 /// Read the saved configuration back from the database into a Config.
 async fn saved_config(pool: &sqlx::SqlitePool) -> fedifetcher::config::Config {
     let raw = fedifetcher::db::load_config(pool).await.unwrap();
-    fedifetcher::config::Config::from_values(raw).unwrap()
+    // lenient: a readback after a disconnect legitimately has no tokens
+    fedifetcher::config::Config::from_values_lenient(raw).unwrap()
 }
 
 /// Every log line the process emits, for the page-load logging test. The
@@ -1903,4 +1904,178 @@ async fn the_dashboard_counts_the_databases_tables() {
             "the State section counts {label}: {body}"
         );
     }
+}
+
+/// POST a urlencoded form to an arbitrary path: (status, Location, body).
+async fn post_config_form(base: &str, path: &str, form: &str) -> (u16, Option<String>, String) {
+    let resp = client()
+        .post(format!("{base}{path}"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let location = resp
+        .headers()
+        .get("Location")
+        .map(|value| value.to_str().unwrap().to_string());
+    let body = resp.text().await.unwrap();
+    (status, location, body)
+}
+
+/// An account connected through OAuth is listed on the config page: its
+/// acct, its avatar, a Disconnect button — and the connect form above the
+/// manual token field, which stays.
+#[tokio::test]
+async fn the_config_page_lists_the_connected_accounts() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec!["oauth-token-aaaa".to_string()];
+    let (base, pool) = spawn_ui_with(config).await;
+    fedifetcher::db::save_oauth_account(
+        &pool,
+        "oauth-token-aaaa",
+        "example.social",
+        "alice",
+        "http://example.social/avatar/alice.png",
+    )
+    .await
+    .unwrap();
+
+    let (status, body) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("alice"), "the account's acct renders: {body}");
+    assert!(
+        body.contains("http://example.social/avatar/alice.png"),
+        "the avatar renders"
+    );
+    assert!(
+        body.contains("Disconnect"),
+        "the row offers to disconnect: {body}"
+    );
+    assert!(
+        body.contains("action=\"/oauth/connect\""),
+        "the connect form is on the page"
+    );
+    assert!(
+        body.contains("new_access_token"),
+        "the manual paste field stays: {body}"
+    );
+    assert!(
+        !body.contains("<script"),
+        "the config page stays script-free: {body}"
+    );
+}
+
+/// A config page arriving back from the dance says what happened.
+#[tokio::test]
+async fn the_config_page_reports_what_the_oauth_dance_said() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, _pool) = spawn_ui_with(config).await;
+
+    let (status, body) = get(&format!("{base}/config?oauth=denied")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("denied"),
+        "the denial is spelled out on the page: {body}"
+    );
+}
+
+/// Disconnecting revokes the token upstream, removes it from the config,
+/// and drops the account's row. The instance is a mock, so the revoke is
+/// witnessed.
+#[tokio::test]
+async fn disconnecting_revokes_the_token_and_removes_the_account() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let instance_host = server.base_url().trim_start_matches("http://").to_string();
+    let mut config = common::test_config(&dir, &instance_host);
+    config.access_tokens = vec!["oauth-token-aaaa".to_string()];
+    let pool = fedifetcher::db::open(&config).await.unwrap();
+    fedifetcher::db::save_oauth_account(
+        &pool,
+        "oauth-token-aaaa",
+        &instance_host,
+        "alice",
+        "http://avatar.example/alice.png",
+    )
+    .await
+    .unwrap();
+    let revoke = server
+        .mock_async(|when, then| {
+            when.method(Method::POST)
+                .path("/oauth/revoke")
+                .body_includes("token=oauth-token-aaaa");
+            then.status(200);
+        })
+        .await;
+    // the app registration the revoke needs, answered from the cache
+    fedifetcher::db::save_oauth_app(&pool, &instance_host, "the-client-id", "the-secret")
+        .await
+        .unwrap();
+
+    let app = fedifetcher::web::app_with_scheme(config, pool.clone(), "http");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let base = format!("http://{addr}");
+
+    let (status, _, _) = post_config_form(
+        &base,
+        "/oauth/disconnect",
+        &format!("acct=alice&server={instance_host}"),
+    )
+    .await;
+    assert_eq!(status, 303);
+    assert_eq!(revoke.calls(), 1, "the token is revoked upstream");
+
+    let saved = saved_config(&pool).await;
+    assert!(
+        !saved
+            .access_tokens
+            .contains(&"oauth-token-aaaa".to_string()),
+        "the token left the config: {:?}",
+        saved.access_tokens
+    );
+    assert!(
+        fedifetcher::db::oauth_account(&pool, "oauth-token-aaaa")
+            .await
+            .unwrap()
+            .is_none(),
+        "the account's row is gone"
+    );
+}
+
+/// A token removed through the form's index checkbox drops the account's
+/// OAuth row too: the two paths cannot disagree.
+#[tokio::test]
+async fn removing_a_token_by_index_drops_its_oauth_row() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec!["oauth-token-aaaa".to_string()];
+    let (base, pool) = spawn_ui_with(config).await;
+    fedifetcher::db::save_oauth_account(
+        &pool,
+        "oauth-token-aaaa",
+        "example.social",
+        "alice",
+        "http://avatar.example/alice.png",
+    )
+    .await
+    .unwrap();
+
+    let (status, _, _) = post_config(&base, "remove_access_token=0").await;
+    assert_eq!(status, 303);
+
+    assert!(
+        fedifetcher::db::oauth_account(&pool, "oauth-token-aaaa")
+            .await
+            .unwrap()
+            .is_none(),
+        "the account's row went with the token"
+    );
 }

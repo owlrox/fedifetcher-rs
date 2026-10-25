@@ -26,7 +26,7 @@ docs/ideas/oauth-onboarding.md
 
 ## Phase 2: Account management
 
-- [ ] Task 3: Account list, Disconnect, manual-path consistency
+- [x] Task 3: Account list, Disconnect, manual-path consistency
   - Acceptance: list renders acct+avatar; Disconnect revokes, removes,
     drops; index-path removal drops too; manual field unchanged; no
     `<script>`

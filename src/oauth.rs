@@ -151,6 +151,29 @@ pub async fn exchange_code(
     ))
 }
 
+/// Tell the instance to stop honoring a token: the disconnect button's
+/// other half.
+pub async fn revoke_token(http: &HttpClient, app: &RegisteredApp, token: &str) -> Result<()> {
+    let form = [
+        ("client_id".to_string(), app.client_id.clone()),
+        ("client_secret".to_string(), app.client_secret.clone()),
+        ("token".to_string(), token.to_string()),
+    ];
+    let url = format!(
+        "{scheme}://{server}/oauth/revoke",
+        scheme = http.scheme(),
+        server = app.server
+    );
+    let resp = http.post_form(&url, &form, None).await?;
+    if resp.status != 200 {
+        return Err(Error::Fetch(format!(
+            "revoking the token failed with status {}",
+            resp.status
+        )));
+    }
+    Ok(())
+}
+
 /// The instance's own consent screen, pointed at with everything the dance
 /// needs. The scheme is the http client's: https in production, and http
 /// when the tests play the instance.

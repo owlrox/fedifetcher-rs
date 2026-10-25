@@ -1,3 +1,37 @@
+## 1.2.19
+
+Add the connected-accounts section and Disconnect.
+
+Task 3 of the OAuth onboarding plan, TDD: the config page becomes
+account management.
+
+A Connected accounts section sits above Edit configuration: each row
+shows the acct, the avatar, the connected date, and a Disconnect
+button; the Connect form (server field with the tooltip discipline,
+Connect your Mastodon account) sits beneath; and the dance's return
+query string (?oauth=connected|denied|expired|failed|disconnected) is
+answered in plain words on the page. The manual paste field and its
+tooltips are untouched.
+
+POST /oauth/disconnect finds every row for the account (the same
+account may hold more than one token), revokes each token upstream — a
+refused revoke is logged and not obeyed, because the token is being
+discarded anyway — removes the tokens from the config, and drops the
+rows. The mechanical path stays honest too: save_config's index
+checkboxes now delete the removed tokens' rows, so the form's
+remove_access_token and the Disconnect button cannot disagree about
+which accounts are connected.
+
+The oauth_accounts table gains its id column and the row its
+connected_at; list, lookup-by-acct, and delete accessors join. The
+first cut's swallowed lookup error (unwrap_or_default over a broken
+ORDER BY) is what hid the missing column — the config page now warns
+when it cannot read the accounts instead of rendering an empty list.
+saved_config, the web tests' readback helper, reads leniently: a
+config with zero tokens is legitimate after a disconnect.
+
+372 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.18
 
 Add the OAuth callback: the code is traded and the account connects.

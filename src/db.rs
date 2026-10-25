@@ -160,7 +160,8 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
     .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS oauth_accounts (
-            token TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT NOT NULL UNIQUE,
             server TEXT NOT NULL,
             acct TEXT NOT NULL,
             avatar TEXT NOT NULL,
@@ -431,25 +432,78 @@ pub struct OauthAccountRow {
     pub server: String,
     pub acct: String,
     pub avatar: String,
+    pub connected_at: String,
     pub needs_reconnect: bool,
 }
 
 /// The connected account a token belongs to, if it was connected by OAuth.
 pub async fn oauth_account(pool: &SqlitePool, token: &str) -> Result<Option<OauthAccountRow>> {
     let row = sqlx::query(
-        "SELECT token, server, acct, avatar, needs_reconnect
+        "SELECT token, server, acct, avatar, connected_at, needs_reconnect
          FROM oauth_accounts WHERE token = ?",
     )
     .bind(token)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|row| OauthAccountRow {
+    Ok(row.as_ref().map(connected_account_row))
+}
+
+/// Every connected account, oldest first.
+pub async fn oauth_accounts(pool: &SqlitePool) -> Result<Vec<OauthAccountRow>> {
+    let rows = sqlx::query(
+        "SELECT token, server, acct, avatar, connected_at, needs_reconnect
+         FROM oauth_accounts ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(connected_account_row).collect())
+}
+
+/// The connected accounts for one account on one server: the same account
+/// may hold more than one token.
+pub async fn oauth_accounts_by_acct(
+    pool: &SqlitePool,
+    acct: &str,
+    server: &str,
+) -> Result<Vec<OauthAccountRow>> {
+    let rows = sqlx::query(
+        "SELECT token, server, acct, avatar, connected_at, needs_reconnect
+         FROM oauth_accounts WHERE acct = ? AND server = ? ORDER BY id",
+    )
+    .bind(acct)
+    .bind(server)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(connected_account_row).collect())
+}
+
+/// Forget a connected account's row; its token is being removed.
+pub async fn delete_oauth_account(pool: &SqlitePool, token: &str) -> Result<()> {
+    sqlx::query("DELETE FROM oauth_accounts WHERE token = ?")
+        .bind(token)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Forget the rows of several removed tokens, the config form's index
+/// checkboxes having spoken.
+pub async fn delete_oauth_accounts(pool: &SqlitePool, tokens: &[String]) -> Result<()> {
+    for token in tokens {
+        delete_oauth_account(pool, token).await?;
+    }
+    Ok(())
+}
+
+fn connected_account_row(row: &sqlx::sqlite::SqliteRow) -> OauthAccountRow {
+    OauthAccountRow {
         token: row.get("token"),
         server: row.get("server"),
         acct: row.get("acct"),
         avatar: row.get("avatar"),
+        connected_at: row.get("connected_at"),
         needs_reconnect: row.get::<i64, _>("needs_reconnect") != 0,
-    }))
+    }
 }
 
 /// Record a freshly connected account.
