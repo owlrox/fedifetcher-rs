@@ -2913,3 +2913,80 @@ async fn the_trim_button_trims_the_oldest_tenth_and_reports() {
         "one of the ten log lines went"
     );
 }
+
+/// Saving the config applies the log level and format right away: the page
+/// no longer says a restart is needed.
+#[tokio::test]
+async fn the_log_settings_apply_without_a_restart() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, _db) = spawn_ui_with(config).await;
+
+    let (status, page) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(
+        !page.contains("apply on restart"),
+        "no restart needed any more: {page}"
+    );
+
+    // saving a new level and format succeeds, and the running logger takes
+    // them (the logging module's own test pins the logger side)
+    let (status, _, _) = post_config(
+        base.as_str(),
+        "server=example.social&access_tokens=smoke-secret-token-123&log_level=WARNING&log_format=%25%28levelname%29s%3A+%25%28message%29s",
+    )
+    .await;
+    assert_eq!(status, 303);
+}
+
+/// The instructional sentences the pages used to carry are gone; what is
+/// left says only what the thing is.
+#[tokio::test]
+async fn the_how_to_use_the_page_sentences_are_gone() {
+    let dir = common::tmp_dir();
+    seed_hosts(
+        &dir,
+        serde_json::json!({
+            "alpha.example": host_entry("Mastodon", "4.2.0", &["mastodon"], 3),
+        }),
+    )
+    .await;
+    seed_db(&dir).await;
+    let base = spawn_ui(&dir).await;
+
+    for path in ["/config", "/data", "/logs", "/data?tab=runs"] {
+        let (status, page) = get(&format!("{base}{path}")).await;
+        assert_eq!(status, 200, "{path}");
+        for gone in [
+            "no token to copy by hand",
+            "Click a column heading to sort by it",
+            "The last column fetches that one thing now",
+            "The page refreshes itself every",
+        ] {
+            assert!(
+                !page.contains(gone),
+                "{path} no longer says {gone:?}: {page}"
+            );
+        }
+    }
+    let (_, page) = get(&format!("{base}/logs")).await;
+    assert!(
+        page.contains("entries from the database"),
+        "the logs page still says what it shows: {page}"
+    );
+}
+
+/// The remove-token checkbox sits inside its row, not past its edge.
+#[tokio::test]
+async fn the_remove_token_checkbox_stays_inside_its_row() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, _db) = spawn_ui_with(config).await;
+
+    let (status, page) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("label.token-remove { margin-left: auto; margin-right: 0.25rem;"),
+        "the checkbox is pulled inside the row's edge: {page}"
+    );
+}

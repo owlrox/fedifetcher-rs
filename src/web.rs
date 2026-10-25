@@ -26,6 +26,7 @@ use crate::db::{self, CleanupReport, LogOrder, LogRow, LogSort, OauthAccountRow,
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
+use crate::logging;
 use crate::oauth;
 use crate::run::{CancelToken, Context, Pause, run_once};
 use crate::store::{State, StateStore, lock};
@@ -879,8 +880,17 @@ async fn save_config(
             summary.join(", ")
         }
     );
-    *state.config.lock().unwrap() = config;
+    replace_config(&state, config);
     Ok(Redirect::to("/config"))
+}
+
+/// Replace the app's config, and take the log settings live: a saved
+/// level or format applies to the running logger without a restart.
+fn replace_config(state: &AppState, config: Config) {
+    if let Err(ex) = logging::apply(&config) {
+        tracing::warn!("could not apply the new log settings: {ex}");
+    }
+    *state.config.lock().unwrap() = config;
 }
 
 /// The cookie the OAuth dance's state rides in: set when connect sends the
@@ -1053,7 +1063,7 @@ async fn oauth_callback(
         )
         .await);
     }
-    *state.config.lock().unwrap() = config;
+    replace_config(&state, config);
     tracing::info!(
         "Connected @{acct} on {server} (token {hint})",
         acct = account.acct,
@@ -1149,7 +1159,7 @@ async fn oauth_disconnect(
             )
             .await);
         }
-        *state.config.lock().unwrap() = config;
+        replace_config(&state, config);
     }
 
     Ok(Redirect::to("/config?oauth=disconnected"))
@@ -1950,7 +1960,7 @@ pre { white-space: pre-wrap; }
 ul.tokens { margin: 0.2rem 0; padding-left: 1.2rem; }
 ul.tokens label { color: #888; }
 ul.tokens li.token-row { display: flex; align-items: center; gap: 0.75rem; }
-ul.tokens li.token-row label.token-remove { margin-left: auto; white-space: nowrap; }
+ul.tokens li.token-row label.token-remove { margin-left: auto; margin-right: 0.25rem; white-space: nowrap; }
 li.account { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 li.account form.account-actions { margin: 0; }
 li.account form.account-actions:first-of-type { margin-left: auto; }
@@ -2417,7 +2427,7 @@ fn hosts_tab(
         <section>
             <h2>"Seen hosts"</h2>
             <p class="muted">
-                "Every server FediFetcher has contacted, and what it found. Click a column heading to sort by it; click it again to flip the direction."
+                "Every server FediFetcher has contacted, and what it found."
             </p>
             {if rows.is_empty() {
                 view! { <p class="muted">"No hosts seen yet."</p> }.into_any()
@@ -2486,17 +2496,11 @@ fn table_tab(
     } else {
         format!("{count} row(s).")
     };
-    let action_note = if action.is_some() {
-        " The last column fetches that one thing now, in the background."
-    } else {
-        ""
-    };
     view! {
         <section>
             <h2>{name.clone()}</h2>
             <p class="muted">
                 "Table " <code>{name.clone()}</code> " in the database. " {summary}
-                " Click a column heading to sort by it; click it again to flip the direction." {action_note}
             </p>
             {if rows.is_empty() {
                 view! { <p class="muted">"No rows yet."</p> }.into_any()
@@ -2594,11 +2598,6 @@ fn LogsPage(
     } else {
         None
     };
-    let live_note = if live {
-        format!(" The page refreshes itself every {LIVE_REFRESH_SECONDS} seconds.")
-    } else {
-        String::new()
-    };
     // built before the view: the macro's template must not borrow locals
     let base = logs_base(levels.as_deref());
     let all_shown = levels
@@ -2638,7 +2637,7 @@ fn LogsPage(
             <section>
                 <h2>"Recent log"</h2>
                 <p class="muted">
-                    "The last " {LOG_LINES_SHOWN} " entries from the database in the state directory, newest first. Click a column heading to sort by it; click it again to flip the direction. Click a level pill to hide or show that level's lines; All shows every level, or none." {live_note}
+                    "The last " {LOG_LINES_SHOWN} " entries from the database, newest first."
                 </p>
                 <p class="levels">
                     <span class="label">"Levels:"</span>
@@ -2916,7 +2915,7 @@ fn ConfigPage(
             <section>
                 <h2>"Connected accounts"</h2>
                 <p class="muted">
-                    "The accounts whose timelines FediFetcher fetches, connected on their instance's own site — no token to copy by hand."
+                    "The accounts whose timelines FediFetcher fetches, connected on their instance's own site."
                 </p>
                 {accounts.is_empty().then(|| {
                     view! { <p class="muted">"No accounts are connected yet."</p> }
@@ -2972,7 +2971,7 @@ fn ConfigPage(
                 <h2>"Edit configuration"</h2>
                 <p class="muted">
                     "Saved to " <code>{db_path}</code>
-                    ". Runs use the saved values; log level and format apply on restart."
+                    ". Runs use the saved values."
                 </p>
                 <form method="post" action="/config">
                     <p class="muted">

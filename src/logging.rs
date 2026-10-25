@@ -6,7 +6,7 @@
 //! /logs page reads.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use sqlx::SqlitePool;
 use time::{OffsetDateTime, UtcOffset};
@@ -14,11 +14,13 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::Registry;
 use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
@@ -68,13 +70,16 @@ impl LogDb {
     }
 }
 
-/// Configure logging from the config and start writing log lines to the
-/// database. Returns the handle that stops the writer on shutdown.
-///
-/// The configured format goes to stderr, and a layer sends every line to
-/// the database (which the /logs page reads).
-pub fn setup(config: &Config, pool: SqlitePool) -> Result<LogDb> {
-    let level = match config.log_level.to_uppercase().as_str() {
+/// The level filter's reload handle, and the format the stderr layer
+/// renders with, both installed by [`setup`] and swapped by [`apply`].
+static FILTER_RELOAD: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+static FORMAT: OnceLock<Arc<RwLock<String>>> = OnceLock::new();
+
+/// The filter one log level names: the level itself, with the noisy
+/// dependencies quieted (the Python original quieted urllib3; the HTTP
+/// stack is reqwest here, and sqlx logs every query at debug).
+fn env_filter(level: &str) -> Result<EnvFilter> {
+    let level = match level.to_uppercase().as_str() {
         "DEBUG" => "debug",
         "INFO" => "info",
         "WARNING" | "WARN" => "warn",
@@ -85,13 +90,36 @@ pub fn setup(config: &Config, pool: SqlitePool) -> Result<LogDb> {
             )));
         }
     };
-
-    // the Python original quiets urllib3; the HTTP stack is reqwest here,
-    // and sqlx logs every query at debug
-    let filter = EnvFilter::try_new(format!(
+    Ok(EnvFilter::try_new(format!(
         "{level},reqwest=warn,hyper=warn,hyper_util=warn,h2=warn,tower_http=warn,sqlx=warn"
     ))
-    .unwrap_or_else(|_| EnvFilter::new("info"));
+    .unwrap_or_else(|_| EnvFilter::new("info")))
+}
+
+/// Apply a saved config's log level and format to the running logger, so a
+/// change on the config page takes effect without a restart. A no-op when
+/// logging was never set up.
+pub fn apply(config: &Config) -> Result<()> {
+    let filter = env_filter(&config.log_level)?;
+    if let Some(handle) = FILTER_RELOAD.get() {
+        handle
+            .modify(|current| *current = filter)
+            .map_err(|ex| Error::Config(format!("could not apply the log level: {ex}")))?;
+    }
+    if let Some(format) = FORMAT.get() {
+        *format.write().unwrap() = config.log_format.clone();
+    }
+    Ok(())
+}
+
+/// Configure logging from the config and start writing log lines to the
+/// database. Returns the handle that stops the writer on shutdown.
+///
+/// The configured format goes to stderr, and a layer sends every line to
+/// the database (which the /logs page reads). A later [`apply`] swaps the
+/// level and the format in place.
+pub fn setup(config: &Config, pool: SqlitePool) -> Result<LogDb> {
+    let filter = env_filter(&config.log_level)?;
 
     let (tx, rx) = unbounded_channel::<LogRow>();
     let shared_tx: Arc<Mutex<Option<UnboundedSender<LogRow>>>> = Arc::new(Mutex::new(Some(tx)));
@@ -100,17 +128,21 @@ pub fn setup(config: &Config, pool: SqlitePool) -> Result<LogDb> {
         writer: Mutex::new(Some(spawn_writer(pool, rx))),
     };
 
+    let format = Arc::new(RwLock::new(config.log_format.clone()));
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .event_format(ConfiguredFormat {
-            format: config.log_format.clone(),
+            format: format.clone(),
         });
 
+    let (filter_layer, filter_handle) = reload::Layer::new(filter);
     tracing_subscriber::registry()
-        .with(filter)
+        .with(filter_layer)
         .with(DbLayer { tx: shared_tx })
         .with(fmt_layer)
         .init();
+    let _ = FILTER_RELOAD.set(filter_handle);
+    let _ = FORMAT.set(format);
     Ok(log_db)
 }
 
@@ -133,9 +165,10 @@ fn spawn_writer(pool: SqlitePool, mut rx: UnboundedReceiver<LogRow>) -> JoinHand
     })
 }
 
-/// Render one event in the configured `log_format`.
+/// Render one event in the configured `log_format`. The format is shared
+/// with [`apply`], so a saved change takes effect on the next line.
 struct ConfiguredFormat {
-    format: String,
+    format: Arc<RwLock<String>>,
 }
 
 impl<S, N> FormatEvent<S, N> for ConfiguredFormat
@@ -149,7 +182,8 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
-        let line = format_line(&self.format, event.metadata().level(), &message_of(event));
+        let format = self.format.read().unwrap().clone();
+        let line = format_line(&format, event.metadata().level(), &message_of(event));
         writeln!(writer, "{line}")
     }
 }
@@ -244,6 +278,41 @@ fn asctime(now: OffsetDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_saved_level_and_format_apply_without_a_restart() {
+        let config = Config {
+            log_level: "INFO".to_string(),
+            log_format: "%(levelname)s %(message)s".to_string(),
+            ..Config::default()
+        };
+        let _log_db = setup(&config, crate::db::memory_pool()).expect("setup works");
+
+        // applying the same settings is a no-op that works
+        apply(&config).expect("the same settings apply");
+
+        // different saved settings take effect in place
+        let changed = Config {
+            log_level: "ERROR".to_string(),
+            log_format: "%(message)s".to_string(),
+            ..Config::default()
+        };
+        apply(&changed).expect("the saved settings apply right away");
+        let format = FORMAT.get().unwrap().read().unwrap().clone();
+        assert_eq!(format, "%(message)s", "the format was swapped in place");
+        // the level was swapped too: the reload handle took the new filter
+        // (modify succeeded, which is the swap), and the stderr layer
+        // renders through the format that was just verified
+
+        // an unknown level is refused, leaving the old settings alone
+        let bad = Config {
+            log_level: "LOUD".to_string(),
+            ..Config::default()
+        };
+        assert!(apply(&bad).is_err());
+        let format = FORMAT.get().unwrap().read().unwrap().clone();
+        assert_eq!(format, "%(message)s", "the refused apply changed nothing");
+    }
 
     #[test]
     fn format_line_substitutes_the_configured_fields() {
