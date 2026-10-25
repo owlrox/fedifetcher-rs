@@ -51,6 +51,8 @@ SYSTEMD_DIR=${SYSTEMD_DIR:-/etc/systemd/system}
 INITD_DIR=${INITD_DIR:-/etc/init.d}
 SERVICE=fedifetcher
 USER=fedifetcher
+# the executable's file name; the service and user keep the bare name
+BIN=fedifetcher-rs
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
@@ -171,19 +173,19 @@ log "using $(command -v cargo) ($(rustc --version))"
 
 step "building (cargo build --release --locked)"
 ( cd "$INSTALL_DIR" && cargo build --release --locked )
-[ -x "$INSTALL_DIR/target/release/$SERVICE" ] \
-    || die "build did not produce target/release/$SERVICE"
+[ -x "$INSTALL_DIR/target/release/$BIN" ] \
+    || die "build did not produce target/release/$BIN"
 
-step "installing binary to $BIN_DIR/$SERVICE"
+step "installing binary to $BIN_DIR/$BIN"
 mkdir -p "$BIN_DIR"
-if [ -f "$BIN_DIR/$SERVICE" ] && cmp -s "$INSTALL_DIR/target/release/$SERVICE" "$BIN_DIR/$SERVICE"; then
+if [ -f "$BIN_DIR/$BIN" ] && cmp -s "$INSTALL_DIR/target/release/$BIN" "$BIN_DIR/$BIN"; then
     CHANGED=0
 else
     CHANGED=1
 fi
-cp "$INSTALL_DIR/target/release/$SERVICE" "$BIN_DIR/$SERVICE"
-chmod 0755 "$BIN_DIR/$SERVICE"
-"$BIN_DIR/$SERVICE" --version
+cp "$INSTALL_DIR/target/release/$BIN" "$BIN_DIR/$BIN"
+chmod 0755 "$BIN_DIR/$BIN"
+"$BIN_DIR/$BIN" --version
 
 # --- 5. User and state directory ---------------------------------------------
 
@@ -235,7 +237,7 @@ Type=simple
 User=$USER
 Group=$USER
 WorkingDirectory=$STATE_DIR
-ExecStart=$BIN_DIR/$SERVICE serve --bind $BIND --port $PORT
+ExecStart=$BIN_DIR/$BIN serve --bind $BIND --port $PORT
 Restart=on-failure
 RestartSec=10s
 
@@ -271,7 +273,7 @@ openrc)
 name="$SERVICE"
 description="FediFetcher - pull missing posts and profiles into your Mastodon instance"
 
-command="$BIN_DIR/$SERVICE"
+command="$BIN_DIR/$BIN"
 command_args="serve --bind $BIND --port $PORT"
 command_user="$USER:$USER"
 directory="$STATE_DIR"
@@ -316,7 +318,7 @@ cat <<EOF
 
 FediFetcher is installed.
 
-  Binary:    $BIN_DIR/$SERVICE
+  Binary:    $BIN_DIR/$BIN
   State dir: $STATE_DIR/artifacts  (fedifetcher.db lives here - back it up)
   Web UI:    http://$BIND:$PORT/    (open /config to set your server and
              access tokens, then press Run on the dashboard)
@@ -330,11 +332,11 @@ none)
 No init system was detected, so nothing was started. To run the web UI in
 the foreground as $USER:
 
-  su -s /bin/sh -c 'cd $STATE_DIR && $BIN_DIR/$SERVICE serve --bind $BIND --port $PORT' $USER
+  su -s /bin/sh -c 'cd $STATE_DIR && $BIN_DIR/$BIN serve --bind $BIND --port $PORT' $USER
 
 Or run one pass, e.g. from $USER's crontab:
 
-  0 * * * * cd $STATE_DIR && $BIN_DIR/$SERVICE run
+  0 * * * * cd $STATE_DIR && $BIN_DIR/$BIN run
 EOF
     ;;
 esac

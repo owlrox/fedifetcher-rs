@@ -48,7 +48,7 @@ async fn state_db(tmp: &std::path::Path) -> (Config, sqlx::SqlitePool) {
 /// ~/.local/state/fedifetcher when XDG_STATE_HOME is not honored, and that
 /// fallback must land in the test's own directory, never in the real one.
 fn child(tmp: &std::path::Path, args: &[&str]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_fedifetcher"));
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_fedifetcher-rs"));
     command
         .args(args)
         .env("XDG_STATE_HOME", tmp.join("xdg"))

@@ -1,6 +1,6 @@
 [package]
-name = "fedifetcher"
-version = "1.3.26"
+name = "fedifetcher-rs"
+version = "1.3.27"
 edition = "2024"
 rust-version = "1.99.1"
 description = "Pull missing posts and profiles into your Mastodon instance (Rust port with web UI)"
@@ -33,7 +33,7 @@ unchecked_time_subtraction = "warn"
 overflow-checks = true
 
 [[bin]]
-name = "fedifetcher"
+name = "fedifetcher-rs"
 path = "src/main.rs"
 
 [dependencies]

@@ -31,7 +31,7 @@ cd fedifetcher-rs
 cargo build --release
 ```
 
-The executable is at `target/release/fedifetcher`. To install it onto your `PATH`:
+The executable is at `target/release/fedifetcher-rs`. To install it onto your `PATH`:
 
 ```sh
 cargo install --path .
@@ -45,7 +45,7 @@ cargo test
 
 ## Deployment
 
-For a fresh server or LXC container — Alpine, Arch, Debian, or Fedora — `deploy.sh` does the whole setup: it detects the package manager (apk, pacman, apt, or dnf/yum), installs the build dependencies, fetches the source into `/opt/fedifetcher`, installs a Rust toolchain via rustup if the system one is older than the `rust-version` in `Cargo.toml`, builds with `cargo build --release --locked`, installs the binary to `/usr/local/bin/fedifetcher`, creates a `fedifetcher` system user, and sets up a service that runs the web UI (systemd where available, OpenRC on Alpine without systemd).
+For a fresh server or LXC container — Alpine, Arch, Debian, or Fedora — `deploy.sh` does the whole setup: it detects the package manager (apk, pacman, apt, or dnf/yum), installs the build dependencies, fetches the source into `/opt/fedifetcher`, installs a Rust toolchain via rustup if the system one is older than the `rust-version` in `Cargo.toml`, builds with `cargo build --release --locked`, installs the binary to `/usr/local/bin/fedifetcher-rs`, creates a `fedifetcher` system user, and sets up a service that runs the web UI (systemd where available, OpenRC on Alpine without systemd).
 
 ```sh
 sudo ./deploy.sh <repo-url> [branch]   # branch defaults to main
@@ -72,7 +72,7 @@ To update a server by hand instead:
 cd /opt/fedifetcher
 git fetch origin && git reset --hard origin/main
 cargo build --release --locked
-sudo cp target/release/fedifetcher /usr/local/bin/fedifetcher
+sudo cp target/release/fedifetcher-rs /usr/local/bin/fedifetcher-rs
 sudo systemctl restart fedifetcher    # or: sudo rc-service fedifetcher restart
 ```
 
@@ -85,7 +85,7 @@ FediFetcher has two modes: `run` performs one pass and exits, `serve` runs the w
 ### Start the web UI
 
 ```sh
-./target/release/fedifetcher serve --bind 127.0.0.1 --port 8080
+./target/release/fedifetcher-rs serve --bind 127.0.0.1 --port 8080
 ```
 
 Then open <http://127.0.0.1:8080>.
@@ -110,13 +110,13 @@ Configuration lives in the database and is edited through the web UI — there i
 ### Run once from the command line
 
 ```sh
-./target/release/fedifetcher run
+./target/release/fedifetcher-rs run
 ```
 
 This is also the default when no subcommand is given:
 
 ```sh
-./target/release/fedifetcher
+./target/release/fedifetcher-rs
 ```
 
 A run takes a lock, performs the configured tasks, and exits. The exit status is 0 on success, 1 on failure. Without a configured server and access token, it exits 1 immediately with a `CRITICAL` message.
@@ -126,7 +126,7 @@ A run takes a lock, performs the configured tasks, and exits. The exit status is
 The usual deployment is a cron job, e.g. hourly:
 
 ```cron
-0 * * * * /path/to/fedifetcher run
+0 * * * * /path/to/fedifetcher-rs run
 ```
 
 Log lines go to stderr and to the database, where the web UI's **Logs** page shows them. Keep `serve` running (under systemd, Docker, or similar) if you want the dashboard, the run/pause/stop controls, and the logs — the **Run** button triggers the same run in the background. With `serve` running, the optional `streaming` setting also connects to your server's home timeline stream and fetches new posts' context as they arrive, so the cron interval matters less.
