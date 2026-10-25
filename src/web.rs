@@ -1275,10 +1275,10 @@ fn format_bytes(bytes: u64) -> String {
     format!("{bytes} B")
 }
 
-/// What a cleanup did, as the page reports it.
-fn cleanup_report_line(report: &CleanupReport) -> String {
+/// What a cleanup or a trim did, as the page reports it.
+fn removal_report_line(lead: &str, report: &CleanupReport) -> String {
     if report.removed.is_empty() {
-        return "Cleaned up the database: there was nothing to remove.".to_string();
+        return format!("{lead}: there was nothing to remove.");
     }
     let parts = report
         .removed
@@ -1286,7 +1286,7 @@ fn cleanup_report_line(report: &CleanupReport) -> String {
         .map(|(label, count)| plural(*count, label))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("Cleaned up the database: removed {parts}.")
+    format!("{lead}: removed {parts}.")
 }
 
 /// A count with its label, pluralized when it is not one.
@@ -1369,8 +1369,8 @@ async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> Debug
             .unwrap_or_default()
     };
     let action = field("action");
-    if action == "cleanup" {
-        tracing::info!("POST /debug: clean up the database");
+    if action == "cleanup" || action == "trim" {
+        tracing::info!("POST /debug: {action} the database");
         // a run that is holding its state in memory would write it back
         // over the emptied tables the moment it finished
         if run_in_progress(state).await.is_some() {
@@ -1378,8 +1378,14 @@ async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> Debug
                 message: "A run is in progress — clean up after it finishes.".to_string(),
             };
         }
-        return match db::cleanup(&state.db).await {
-            Ok(report) => DebugOutcome::Cleaned { report },
+        let result = if action == "cleanup" {
+            db::cleanup(&state.db).await
+        } else {
+            db::trim(&state.db).await
+        };
+        return match result {
+            Ok(report) if action == "cleanup" => DebugOutcome::Cleaned { report },
+            Ok(report) => DebugOutcome::Trimmed { report },
             Err(ex) => DebugOutcome::Failed {
                 message: ex.to_string(),
             },
@@ -2964,11 +2970,13 @@ fn DebugPage(
                 <h2>"Database"</h2>
                 <p class="muted">{usage_line}</p>
                 <p class="muted">
-                    "Clean up empties every table except the configuration's and the OAuth ones: the log lines, the run history, the seen URLs, the host info, the caches, and the scanned-post records. FediFetcher re-fetches what it needs on its next run. The configuration, the connected accounts, and the registered OAuth apps are kept, and the freed space is returned to the filesystem."
+                    "Clean up empties every table except the configuration's and the OAuth ones: the log lines, the run history, the seen URLs, the host info, the caches, and the scanned-post records. Trim 10% does the same to the oldest tenth of each of those tables, keeping the newest records. FediFetcher re-fetches what it needs on its next run. The configuration, the connected accounts, and the registered OAuth apps are always kept, and the freed space is returned to the filesystem."
                 </p>
                 <form method="post" action="/debug">
-                    <input type="hidden" name="action" value="cleanup"/>
-                    <p><button type="submit">"Clean up DB"</button></p>
+                    <p>
+                        <button type="submit" name="action" value="cleanup">"Clean up DB"</button>
+                        <button type="submit" name="action" value="trim">"Trim 10%"</button>
+                    </p>
                 </form>
             </section>
             <section>
@@ -3041,7 +3049,17 @@ fn debug_result_view(outcome: &DebugOutcome) -> AnyView {
                 <h2>"Database"</h2>
                 <p>
                     <span class="badge ok">"ok"</span>
-                    {cleanup_report_line(report)}
+                    {removal_report_line("Cleaned up the database", report)}
+                </p>
+            </section>
+        }
+        .into_any(),
+        DebugOutcome::Trimmed { report } => view! {
+            <section class="result">
+                <h2>"Database"</h2>
+                <p>
+                    <span class="badge ok">"ok"</span>
+                    {removal_report_line("Trimmed the oldest 10%", report)}
                 </p>
             </section>
         }

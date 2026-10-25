@@ -605,6 +605,10 @@ pub struct CleanupReport {
     pub removed: Vec<(&'static str, u64)>,
 }
 
+/// How much of each table a trim takes: the oldest tenth, rounded down.
+const TRIM_FRACTION_NUMERATOR: i64 = 1;
+const TRIM_FRACTION_DENOMINATOR: i64 = 10;
+
 /// Empty every table but the kept ones, then vacuum, so the freed space
 /// goes back to the filesystem. FediFetcher re-fetches what it needs on
 /// its next run; a cleanup never costs the configuration, the OAuth rows,
@@ -637,6 +641,98 @@ pub async fn cleanup(pool: &SqlitePool) -> Result<CleanupReport> {
         ("DELETE FROM opted_out_accounts", "opted-out record"),
     ] {
         let result = sqlx::query(sql).execute(pool).await?;
+        if result.rows_affected() > 0 {
+            removed.push((label, result.rows_affected()));
+        }
+    }
+    sqlx::raw_sql("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+        .execute(pool)
+        .await?;
+    Ok(CleanupReport { removed })
+}
+
+/// Remove the oldest tenth of each cleanable table — the same tables a
+/// cleanup empties, but only their oldest tenth of rows, so the
+/// newest records (and the kept tables) stay. Rows whose age column is
+/// unreadable count as the oldest.
+pub async fn trim(pool: &SqlitePool) -> Result<CleanupReport> {
+    let mut removed = Vec::new();
+    // one static pair per table — a count, and a delete of the oldest
+    // rows by that table's age column (rowid where it has none) — because
+    // sqlx audits dynamic SQL strings
+    for (count_sql, delete_sql, label) in [
+        (
+            "SELECT COUNT(*) AS n FROM logs",
+            "DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY id LIMIT ?1)",
+            "log line",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM runs",
+            "DELETE FROM runs WHERE id IN (SELECT id FROM runs ORDER BY id LIMIT ?1)",
+            "run",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM seen_urls",
+            "DELETE FROM seen_urls WHERE uri IN (SELECT uri FROM seen_urls ORDER BY first_seen LIMIT ?1)",
+            "seen URL",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM known_followings",
+            "DELETE FROM known_followings WHERE acct IN (SELECT acct FROM known_followings ORDER BY first_seen LIMIT ?1)",
+            "known following",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM recently_checked_users",
+            "DELETE FROM recently_checked_users WHERE acct IN (SELECT acct FROM recently_checked_users ORDER BY first_seen LIMIT ?1)",
+            "recently checked user",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM seen_hosts",
+            "DELETE FROM seen_hosts WHERE host IN (SELECT host FROM seen_hosts ORDER BY last_checked LIMIT ?1)",
+            "known host",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM context_cache",
+            "DELETE FROM context_cache WHERE uri IN (SELECT uri FROM context_cache ORDER BY last_seen LIMIT ?1)",
+            "context entry",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM replied_toots",
+            "DELETE FROM replied_toots WHERE rowid IN (SELECT rowid FROM replied_toots ORDER BY rowid LIMIT ?1)",
+            "replied-toot record",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM robots_cache",
+            "DELETE FROM robots_cache WHERE url IN (SELECT url FROM robots_cache ORDER BY fetched_at LIMIT ?1)",
+            "robots.txt entry",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM trigger_posts",
+            "DELETE FROM trigger_posts WHERE uri IN (SELECT uri FROM trigger_posts ORDER BY first_seen LIMIT ?1)",
+            "scanned post",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM known_context_posts",
+            "DELETE FROM known_context_posts WHERE uri IN (SELECT uri FROM known_context_posts ORDER BY first_seen LIMIT ?1)",
+            "known context post",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM private_posts",
+            "DELETE FROM private_posts WHERE uri IN (SELECT uri FROM private_posts ORDER BY first_marked LIMIT ?1)",
+            "private-post marker",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM opted_out_accounts",
+            "DELETE FROM opted_out_accounts WHERE acct IN (SELECT acct FROM opted_out_accounts ORDER BY first_seen LIMIT ?1)",
+            "opted-out record",
+        ),
+    ] {
+        let total: i64 = sqlx::query_scalar(count_sql).fetch_one(pool).await?;
+        let tenth = total * TRIM_FRACTION_NUMERATOR / TRIM_FRACTION_DENOMINATOR;
+        if tenth <= 0 {
+            continue;
+        }
+        let result = sqlx::query(delete_sql).bind(tenth).execute(pool).await?;
         if result.rows_affected() > 0 {
             removed.push((label, result.rows_affected()));
         }

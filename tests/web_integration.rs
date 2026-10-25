@@ -2815,3 +2815,47 @@ async fn the_cleanup_button_cleans_and_reports() {
         "the page offers the button again: {page}"
     );
 }
+
+/// The Trim 10% button sits next to Clean up DB, and removes only the
+/// oldest tenth of each cleanable table.
+#[tokio::test]
+async fn the_trim_button_trims_the_oldest_tenth_and_reports() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let (base, db) = spawn_ui_with(config).await;
+    for i in 0..10 {
+        fedifetcher::db::insert_log(
+            &db,
+            &fedifetcher::db::LogRow {
+                ts: fedifetcher::timeutil::fmt_state_ts(
+                    fedifetcher::timeutil::now() - time::Duration::minutes(100 - i),
+                ),
+                level: "INFO".to_string(),
+                target: "t".to_string(),
+                message: format!("line {i}"),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let (_, page) = get(&format!("{base}/debug")).await;
+    assert!(
+        page.contains("Trim 10%"),
+        "the page offers the trim next to the clear: {page}"
+    );
+
+    let (status, page) = post_debug(base.as_str(), "action=trim").await;
+
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("Trimmed the oldest 10%"),
+        "the trim is reported: {page}"
+    );
+    assert_eq!(
+        fedifetcher::db::table_count(&db, "logs").await.unwrap(),
+        9,
+        "one of the ten log lines went"
+    );
+}

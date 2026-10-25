@@ -30,6 +30,9 @@ pub enum DebugOutcome {
     Failed { message: String },
     /// The database was cleaned up; the report says what went.
     Cleaned { report: CleanupReport },
+    /// The oldest tenth of each cleanable table was trimmed away; the
+    /// report says what went.
+    Trimmed { report: CleanupReport },
 }
 
 /// The connection test: what the server says it is, and whether it accepts
