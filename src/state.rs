@@ -364,4 +364,50 @@ mod tests {
         assert!(!cache.contains("failed"));
         assert!(!cache.contains("legacy"));
     }
+
+    #[test]
+    fn update_adds_every_item_untimestamped() {
+        let mut set = TimestampedSet::new();
+        set.update(["a".to_string(), "b".to_string()]);
+        assert_eq!(set.len(), 2);
+        assert!(set.get("a").is_some() && set.get("b").is_some());
+    }
+
+    #[test]
+    fn expire_drops_odd_entries_and_keeps_uncheckable_ones() {
+        let mut cache = ServerCache::new();
+        // not an object at all: dropped whatever its age
+        cache.add("garbage", serde_json::json!("just a string"));
+        // no last_checked: kept, there is nothing to age
+        cache.add(
+            "no-timestamp",
+            serde_json::json!({"peertubeApiSupport": false}),
+        );
+        // an unparseable last_checked: kept rather than guessed about
+        cache.add(
+            "bad-timestamp",
+            serde_json::json!({"peertubeApiSupport": false, "last_checked": "not a date"}),
+        );
+        let dropped = cache.expire(Duration::days(30), Duration::hours(1));
+        assert_eq!(dropped, 1, "only the non-object goes");
+        assert!(cache.contains("no-timestamp"));
+        assert!(cache.contains("bad-timestamp"));
+    }
+
+    #[test]
+    fn an_old_post_is_refetched_at_most_hourly() {
+        let now = timeutil::now();
+        let mut cache = ContextCache::new();
+        assert!(cache.is_empty());
+        // fetched two days ago, last seen two hours ago: the hourly cadence
+        cache.entries.insert(
+            "https://example.com/post/1".to_string(),
+            ContextEntry {
+                last_seen: now - Duration::hours(2),
+                created_at: now - Duration::days(2),
+            },
+        );
+        assert!(!cache.is_empty());
+        assert!(cache.should_fetch("https://example.com/post/1", now));
+    }
 }

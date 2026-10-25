@@ -107,4 +107,23 @@ mod tests {
         let back: PostRef = serde_json::from_str(r#"["example.com","42"]"#).unwrap();
         assert_eq!(back, post);
     }
+
+    #[test]
+    fn netloc_of_reads_a_url_without_a_scheme() {
+        // scheme-less input: everything up to the first separator is the host
+        // (built at run time, or the optimizer folds the call away and the
+        // branch is never seen to run)
+        let url = format!("example{0}.com/a/b", "");
+        assert_eq!(netloc_of(&url), "example.com");
+        assert_eq!(netloc_of(&format!("example{0}.com?q", "")), "example.com");
+        assert_eq!(netloc_of(&format!("example{0}.com#x", "")), "example.com");
+        assert_eq!(netloc_of(&format!("example{0}.com", "")), "example.com");
+    }
+
+    #[test]
+    fn a_schemeless_url_has_no_scheme_even_after_the_separator() {
+        // "://x" would make an empty scheme: refused
+        let url = format!("://{0}example.com", "");
+        assert_eq!(scheme_of(&url), None);
+    }
 }

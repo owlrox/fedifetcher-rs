@@ -4,7 +4,7 @@
 mod common;
 
 use fedifetcher::http::HttpClient;
-use fedifetcher::servers::{ApiFlavor, nodeinfo, server_info};
+use fedifetcher::servers::{ApiFlavor, nodeinfo, server_from_host_meta, server_info};
 use fedifetcher::state::ServerCache;
 use httpmock::Method;
 use httpmock::prelude::*;
@@ -357,5 +357,245 @@ async fn a_well_known_404_without_a_host_meta_reports_the_well_known_status() {
     assert!(
         err.contains("no nodeinfo found for") && err.contains("404"),
         "{err}"
+    );
+}
+
+/// A well-known that fails falls through to host-meta, and when that too
+/// says nothing, the failure names the well-known's status.
+#[tokio::test]
+async fn a_failed_well_known_and_no_host_meta_is_a_failed_lookup() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/.well-known/nodeinfo");
+            then.status(500);
+        })
+        .await;
+
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let http = HttpClient::with_scheme(config, db, "http");
+    let mut cache = ServerCache::new();
+
+    let outcome = server_info(&host(&server), &mut cache, &http).await;
+
+    let reason = cache
+        .get(&host(&server))
+        .unwrap()
+        .get("error")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        reason.contains("no nodeinfo found for") && reason.contains("500"),
+        "{reason}"
+    );
+    assert!(outcome.is_none(), "the failed lookup yields no info");
+}
+
+/// With the host-meta fallback already spent, a failing well-known is
+/// reported with its status directly.
+#[tokio::test]
+async fn a_failed_well_known_after_the_fallback_names_the_status() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/.well-known/nodeinfo");
+            then.status(503);
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let http = HttpClient::with_scheme(config, db, "http");
+    let mut cache = ServerCache::new();
+
+    let outcome = nodeinfo(&host(&server), &mut cache, true, &http).await;
+
+    let err = outcome.unwrap_err().to_string();
+    assert!(
+        err.contains("Error getting well-known host node info") && err.contains("503"),
+        "{err}"
+    );
+}
+
+/// A well-known body that is not JSON cannot name a nodeinfo location.
+#[tokio::test]
+async fn a_well_known_body_that_is_not_json_is_a_failed_lookup() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/.well-known/nodeinfo");
+            then.status(200).body("<not json");
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let http = HttpClient::with_scheme(config, db, "http");
+    let mut cache = ServerCache::new();
+
+    let outcome = nodeinfo(&host(&server), &mut cache, true, &http).await;
+
+    let err = outcome.unwrap_err().to_string();
+    assert!(err.contains("from well-known node info"), "{err}");
+}
+
+/// A nodeinfo location that leads nowhere is a failed lookup that says so.
+#[tokio::test]
+async fn a_nodeinfo_location_that_leads_nowhere_is_a_failed_lookup() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/.well-known/nodeinfo");
+            then.status(200).json_body(json!({
+                "links": [{
+                    "rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
+                    "href": "http://127.0.0.1:9/nodeinfo/2.0",
+                }],
+            }));
+        })
+        .await;
+
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let http = HttpClient::with_scheme(config, db, "http");
+    let mut cache = ServerCache::new();
+
+    let outcome = server_info(&host(&server), &mut cache, &http).await;
+
+    let reason = cache
+        .get(&host(&server))
+        .unwrap()
+        .get("error")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reason.contains("Error getting host node info"), "{reason}");
+    assert!(outcome.is_none(), "the failed lookup yields no info");
+}
+
+/// A nodeinfo document that is not JSON is a failed lookup with its own
+/// reason.
+#[tokio::test]
+async fn a_nodeinfo_document_that_is_not_json_is_a_failed_lookup() {
+    let server = MockServer::start_async().await;
+    let mock_host = host(&server);
+    server
+        .mock_async(move |when, then| {
+            when.method(Method::GET).path("/.well-known/nodeinfo");
+            then.status(200).json_body(json!({
+                "links": [{
+                    "rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
+                    "href": format!("http://{mock_host}/nodeinfo/2.0"),
+                }],
+            }));
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/nodeinfo/2.0");
+            then.status(200).body("<this is not json");
+        })
+        .await;
+
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let http = HttpClient::with_scheme(config, db, "http");
+    let mut cache = ServerCache::new();
+
+    let outcome = server_info(&host(&server), &mut cache, &http).await;
+
+    let reason = cache
+        .get(&host(&server))
+        .unwrap()
+        .get("error")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reason.contains("info from nodeinfo"), "{reason}");
+    assert!(outcome.is_none(), "the failed lookup yields no info");
+}
+
+/// A server already in the cache in an unparseable state fails with the
+/// cached reason, without asking the network again.
+#[tokio::test]
+async fn a_cached_unparseable_state_fails_with_the_cached_reason() {
+    let server = MockServer::start_async().await;
+    let mock_host = host(&server);
+    let href_host = mock_host.clone();
+    server
+        .mock_async(move |when, then| {
+            when.method(Method::GET).path("/.well-known/nodeinfo");
+            then.status(200).json_body(json!({
+                "links": [{
+                    "rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
+                    "href": format!("http://{href_host}/nodeinfo/2.0"),
+                }],
+            }));
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let http = HttpClient::with_scheme(config, db, "http");
+    let mut cache = ServerCache::new();
+    cache.add(
+        &mock_host.clone(),
+        json!({"error": "the earlier lookup failed"}),
+    );
+
+    let outcome = nodeinfo(&mock_host, &mut cache, true, &http).await;
+
+    let err = outcome.unwrap_err().to_string();
+    assert!(
+        err.contains("the earlier lookup failed"),
+        "the cached reason is the error: {err}"
+    );
+}
+
+/// host-meta: a fetch failure, a non-200, and unparseable XML each yield
+/// None, quietly.
+#[tokio::test]
+async fn host_meta_failures_yield_none() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let http = HttpClient::new(config.clone(), db.clone());
+
+    // nothing listens on port 9
+    assert!(
+        server_from_host_meta("127.0.0.1:9", &http).await.is_none(),
+        "a fetch failure is None"
+    );
+
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/.well-known/host-meta");
+            then.status(500);
+        })
+        .await;
+    assert!(
+        server_from_host_meta(&host(&server), &http).await.is_none(),
+        "a non-200 is None"
+    );
+
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/.well-known/host-meta");
+            then.status(200).body("<not a host meta document");
+        })
+        .await;
+    assert!(
+        server_from_host_meta(&host(&server), &http).await.is_none(),
+        "unparseable XML is None"
     );
 }

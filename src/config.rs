@@ -841,6 +841,138 @@ mod tests {
     }
 
     #[test]
+    fn a_server_with_a_newline_defeats_the_normalizer() {
+        // the only shape the normalization regex refuses: it comes back as is
+        assert_eq!(Config::normalize_server("a\nb"), "a\nb");
+        assert_eq!(
+            Config::normalize_server("https://example.com/"),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn every_task_knob_lists_its_task_in_order() {
+        let config = Config {
+            from_lists: true,
+            reply_interval_in_hours: 1,
+            home_timeline_length: 1,
+            max_followings: 1,
+            max_followers: 1,
+            max_follow_requests: 1,
+            from_notifications: 1,
+            max_bookmarks: 1,
+            max_favorites: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.enabled_tasks(),
+            vec![
+                "lists",
+                "reply context",
+                "home timeline",
+                "followings",
+                "followers",
+                "follow requests",
+                "notifications",
+                "bookmarks",
+                "favorites",
+            ]
+        );
+    }
+
+    #[test]
+    fn set_optional_options_round_trip_through_the_raw_values() {
+        let config = Config {
+            lock_file: Some(std::path::PathBuf::from("/tmp/ff.lock")),
+            on_start: Some("echo start".to_string()),
+            on_done: Some("echo done".to_string()),
+            on_fail: Some("echo fail".to_string()),
+            ..Default::default()
+        };
+        let raw = config.to_raw_values();
+        assert_eq!(raw.get("lock_file"), Some(&json!("/tmp/ff.lock")));
+        assert_eq!(raw.get("on_start"), Some(&json!("echo start")));
+        assert_eq!(raw.get("on_done"), Some(&json!("echo done")));
+        assert_eq!(raw.get("on_fail"), Some(&json!("echo fail")));
+    }
+
+    #[test]
+    fn only_a_null_or_an_empty_array_is_an_empty_list() {
+        assert!(is_empty_list(&json!([])));
+        assert!(is_empty_list(&Value::Null));
+        assert!(!is_empty_list(&json!(["a"])));
+        assert!(!is_empty_list(&json!("[]")));
+    }
+
+    #[test]
+    fn coerce_bool_takes_numbers_and_rejects_the_rest() {
+        assert!(coerce_bool(&json!(1)).unwrap());
+        assert!(!coerce_bool(&json!(0)).unwrap());
+        assert!(coerce_bool(&json!("YES")).unwrap());
+        assert!(
+            coerce_bool(&json!("off")).map_err(|_| ()).is_err()
+                || !coerce_bool(&json!("off")).unwrap()
+        );
+        assert_eq!(
+            coerce_bool(&json!("maybe")).unwrap_err().to_string(),
+            "\"maybe\" is not a yes/no value"
+        );
+        assert_eq!(
+            coerce_bool(&json!([])).unwrap_err().to_string(),
+            "[] is not a yes/no value"
+        );
+    }
+
+    #[test]
+    fn coerce_int_takes_bools_and_rejects_non_integers() {
+        assert_eq!(coerce_int(&json!(true)).unwrap(), 1);
+        assert_eq!(coerce_int(&json!(false)).unwrap(), 0);
+        assert!(coerce_int(&json!("nope")).is_err());
+        assert!(coerce_int(&json!([])).is_err());
+    }
+
+    #[test]
+    fn coerce_string_stringifies_numbers_and_bools() {
+        assert_eq!(coerce_string(&json!(42)).unwrap(), "42");
+        assert_eq!(coerce_string(&json!(true)).unwrap(), "true");
+        assert!(coerce_string(&json!([])).is_err());
+        assert_eq!(coerce_optional_string(&Value::Null).unwrap(), None);
+        assert_eq!(
+            coerce_optional_string(&json!("x")).unwrap(),
+            Some("x".to_string())
+        );
+    }
+
+    #[test]
+    fn coerce_path_rejects_non_strings_and_optional_paths_take_null() {
+        assert!(coerce_path(&json!(3)).is_err());
+        assert_eq!(coerce_optional_path(&Value::Null).unwrap(), None);
+        assert_eq!(
+            coerce_optional_path(&json!("/tmp/x")).unwrap(),
+            Some(std::path::PathBuf::from("/tmp/x"))
+        );
+    }
+
+    #[test]
+    fn coerce_list_takes_a_comma_string_numbers_and_rejects_the_rest() {
+        assert_eq!(
+            coerce_list(&json!("a, b ,,c")).unwrap(),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(coerce_list(&json!(["x", 7])).unwrap(), vec!["x", "7"]);
+        assert!(coerce_list(&json!([true])).is_err());
+        assert!(coerce_list(&json!(3)).is_err());
+    }
+
+    #[test]
+    fn coerce_seconds_rejects_bad_items_and_bad_shapes() {
+        assert!(coerce_seconds(&json!([1.5, "2", -1])).is_err());
+        assert!(coerce_seconds(&json!([true])).is_err());
+        assert!(coerce_seconds(&json!(3)).is_err());
+        assert_eq!(coerce_seconds(&json!("1, 2.5")).unwrap(), vec![1.0, 2.5]);
+    }
+
+    #[test]
     fn a_cleared_number_returns_to_its_default() {
         let mut config = Config {
             reply_interval_in_hours: 10,

@@ -597,4 +597,95 @@ mod tests {
         let parser = parser("Disallow: /\nUser-agent: *\nAllow: /\n");
         assert!(parser.can_fetch(AGENT, "https://example.com/x"));
     }
+
+    #[test]
+    fn two_groups_for_one_agent_merge_their_rules() {
+        let parser = parser("User-agent: *\nDisallow: /x\n\nUser-agent: *\nDisallow: /y\n");
+        assert!(!parser.can_fetch(AGENT, "https://example.com/x/1"));
+        assert!(!parser.can_fetch(AGENT, "https://example.com/y/2"));
+        assert!(parser.can_fetch(AGENT, "https://example.com/z"));
+    }
+
+    #[test]
+    fn lines_without_a_colon_are_skipped() {
+        let parser = parser("User-agent: *\ngarbage\nDisallow: /x\n");
+        assert!(!parser.can_fetch(AGENT, "https://example.com/x/1"));
+        assert!(parser.can_fetch(AGENT, "https://example.com/y"));
+    }
+
+    #[test]
+    fn an_exact_agent_name_hits_its_group_directly() {
+        let parser = parser("User-agent: fedi\nDisallow: /x\n");
+        assert!(!parser.can_fetch("fedi", "https://example.com/x/1"));
+        assert!(parser.can_fetch("fedi", "https://example.com/y"));
+    }
+
+    #[test]
+    fn the_disallow_all_and_allow_all_switches_decide_alone() {
+        let mut parser = RobotFileParser::new();
+        parser.disallow_all = true;
+        assert!(!parser.can_fetch(AGENT, "https://example.com/robots.txt"));
+        let mut parser = RobotFileParser::new();
+        parser.allow_all = true;
+        assert!(parser.can_fetch(AGENT, "https://example.com/private"));
+    }
+
+    #[test]
+    fn a_url_with_no_path_is_the_root() {
+        let parser = parser("User-agent: *\nDisallow: /\n");
+        assert!(!parser.can_fetch(AGENT, "https://example.com"));
+    }
+
+    #[test]
+    fn default_matches_new() {
+        assert_eq!(
+            RobotFileParser::default().can_fetch(AGENT, "https://example.com/x"),
+            RobotFileParser::new().can_fetch(AGENT, "https://example.com/x")
+        );
+    }
+
+    #[test]
+    fn a_dollar_mid_pattern_makes_the_rule_unusable() {
+        // '$$' collapses to '$', and a '$' not at the end is rejected, so
+        // the rule line is dropped and the path stays allowed
+        let parser = parser("User-agent: *\nDisallow: /a$$b\n");
+        assert!(parser.can_fetch(AGENT, "https://example.com/a$b"));
+    }
+
+    #[test]
+    fn a_wildcard_pattern_missing_a_middle_literal_does_not_match() {
+        let parser = parser("User-agent: *\nDisallow: /a*b*c\n");
+        assert!(parser.can_fetch(AGENT, "https://example.com/a/x"));
+        assert!(!parser.can_fetch(AGENT, "https://example.com/a/1/b/2/c"));
+    }
+
+    #[test]
+    fn a_fullmatch_wildcard_with_an_empty_tail_matches_any_suffix() {
+        let parser = parser("User-agent: *\nDisallow: /a*$\n");
+        assert!(!parser.can_fetch(AGENT, "https://example.com/abc"));
+    }
+
+    #[test]
+    fn a_wildcard_pattern_missing_its_tail_literal_does_not_match() {
+        let parser = parser("User-agent: *\nDisallow: /a*b\n");
+        assert!(parser.can_fetch(AGENT, "https://example.com/a/x"));
+        assert!(!parser.can_fetch(AGENT, "https://example.com/a/1/b"));
+    }
+
+    #[test]
+    fn a_rule_with_a_query_matches_the_query_too() {
+        let parser = parser("User-agent: *\nDisallow: /p?a=b\n");
+        assert!(!parser.can_fetch(AGENT, "https://example.com/p?a=b"));
+        assert!(parser.can_fetch(AGENT, "https://example.com/p?c=d"));
+    }
+
+    #[test]
+    fn extract_path_query_keeps_the_query_and_drops_the_rest() {
+        assert_eq!(
+            extract_path_query("https://example.com/p?q=1#frag"),
+            "/p?q=1"
+        );
+        assert_eq!(extract_path_query("/no/scheme?q"), "/no/scheme?q");
+        assert_eq!(extract_path_query("https://example.com"), "");
+    }
 }

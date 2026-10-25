@@ -6,7 +6,7 @@
 //! when reading.
 
 use time::macros::format_description;
-use time::{Duration, OffsetDateTime, PrimitiveDateTime, UtcOffset};
+use time::{Date, Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 /// Current time, UTC.
 pub fn now() -> OffsetDateTime {
@@ -58,8 +58,8 @@ pub fn parse(value: &str) -> Option<OffsetDateTime> {
         return OffsetDateTime::from_unix_timestamp(secs).ok();
     }
 
-    if let Ok(date) = PrimitiveDateTime::parse(text, DATE_ONLY) {
-        return Some(local_naive_to_utc(date));
+    if let Ok(date) = Date::parse(text, DATE_ONLY) {
+        return Some(local_naive_to_utc(date.with_time(Time::MIDNIGHT)));
     }
 
     // The standard shape first — what the APIs send — needing no rewriting.
@@ -78,11 +78,12 @@ pub fn parse(value: &str) -> Option<OffsetDateTime> {
         if (tail.starts_with('+') || tail.starts_with('-'))
             && tail[1..].bytes().all(|b| b.is_ascii_digit())
         {
+            // the colon goes between the offset's hours and minutes
             normalized = format!(
                 "{}{}:{}",
                 &normalized[..normalized.len() - 5],
-                &tail[..1],
-                &tail[1..]
+                &tail[..3],
+                &tail[3..]
             );
         }
     }
@@ -176,7 +177,7 @@ pub fn fmt_timedelta(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use time::macros::datetime;
+    use time::macros::{date, datetime, time};
 
     #[test]
     fn parses_rfc3339() {
@@ -237,5 +238,31 @@ mod tests {
             fmt_timedelta(Duration::days(2) + Duration::microseconds(123_456)),
             "2 days, 0:00:00.123456"
         );
+    }
+
+    #[test]
+    fn an_empty_string_is_no_timestamp() {
+        assert!(parse("").is_none());
+        assert!(parse("   ").is_none());
+    }
+
+    #[test]
+    fn parses_a_bare_date_as_local_midnight() {
+        let dt = to_local(parse("2026-10-22").unwrap());
+        assert_eq!(dt.date(), date!(2026 - 10 - 22));
+        assert_eq!(dt.time(), time!(00:00:00));
+    }
+
+    #[test]
+    fn parses_a_z_suffix_after_a_space_separator() {
+        // not RFC 3339 (space, not T), so it takes the rewrite path
+        let dt = parse("2026-10-22 01:23:45Z").unwrap();
+        assert_eq!(dt, datetime!(2026-10-22 01:23:45 UTC));
+    }
+
+    #[test]
+    fn parses_an_offset_without_a_colon() {
+        let dt = parse("2026-10-22 01:23:45+0000").unwrap();
+        assert_eq!(dt, datetime!(2026-10-22 01:23:45 UTC));
     }
 }

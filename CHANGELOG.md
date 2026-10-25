@@ -1,3 +1,23 @@
+## 1.3.8
+
+Close the cheap coverage gaps, and fix two dead parse paths.
+
+Tier 1 of the coverage plan: unit and mock tests for the untested plain
+logic — robots.txt group merging, wildcard pattern edges, the query
+parts of URLs, the link header's rel-less parts, the rate-limit reset
+header, the value coercers' every variant, robots-cache and stream
+error paths, nodeinfo and host-meta failure reasons, the debug actions'
+reported failures, state expiry of odd entries, and a session finished
+untouched.
+
+Two bugs fell out, both in timeutil::parse: a bare date could never
+parse (a date-only format does not parse into a PrimitiveDateTime; it
+parses into a Date), and a UTC offset without a colon was rewritten
+wrong ("+0000" became "+:0000", so the shape never parsed). Both now
+work, with tests.
+
+Line coverage 93.45% to 95.05%.
+
 ## 1.3.7
 
 The debug picker keeps showing the tested identity.

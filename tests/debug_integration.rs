@@ -5,7 +5,9 @@
 mod common;
 mod fixture;
 
-use fedifetcher::debug::{account_posts, lookup_account, test_connection, verify_credentials};
+use fedifetcher::debug::{
+    account_posts, instance_info, lookup_account, test_connection, verify_credentials,
+};
 use fedifetcher::http::HttpClient;
 use httpmock::Method;
 use httpmock::prelude::*;
@@ -186,4 +188,99 @@ async fn a_failed_lookup_stops_a_post_fetch() {
         .unwrap_err();
 
     assert!(err.to_string().contains("ghost was not found"), "{err}");
+}
+
+#[tokio::test]
+async fn a_failed_instance_info_is_reported() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v1/instance");
+            then.status(500);
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let http = client(&dir).await;
+
+    let err = instance_info(&server.base_url(), &http).await.unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Error getting instance info") && message.contains("500"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_user_lookup_is_reported() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v1/accounts/lookup");
+            then.status(500);
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let http = client(&dir).await;
+
+    let err = lookup_account(&server.base_url(), "someone", "sekret-token", &http)
+        .await
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Error looking up user") && message.contains("500"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_statuses_fetch_is_reported() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v1/accounts/lookup");
+            then.status(200)
+                .json_body(json!({"id": "42", "acct": "someone", "display_name": "Someone"}));
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/accounts/42/statuses");
+            then.status(500);
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let http = client(&dir).await;
+
+    let err = account_posts(&server.base_url(), "someone", 5, "sekret-token", &http)
+        .await
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Error getting posts for user") && message.contains("500"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn an_account_without_an_id_stops_a_post_fetch() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v1/accounts/lookup");
+            then.status(200)
+                .json_body(json!({"acct": "someone", "display_name": "Someone"}));
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let http = client(&dir).await;
+
+    let err = account_posts(&server.base_url(), "someone", 5, "sekret-token", &http)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("no id"), "{err}");
 }

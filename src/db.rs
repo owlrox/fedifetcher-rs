@@ -2840,4 +2840,19 @@ mod tests {
             "a fresh entry is kept"
         );
     }
+
+    #[tokio::test]
+    async fn table_rows_with_no_columns_asked_returns_no_rows() {
+        let (config, _dir) = test_config();
+        let pool = open(&config).await.unwrap();
+        let rows = table_rows(&pool, "logs", &[], "ts", LogOrder::Desc, 10)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn a_non_database_error_is_never_a_lock_error() {
+        assert!(!is_locked(&sqlx::Error::RowNotFound));
+    }
 }

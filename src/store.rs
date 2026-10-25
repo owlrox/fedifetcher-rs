@@ -593,4 +593,20 @@ mod tests {
 
         assert!(parse_lock_content("not a timestamp").is_none());
     }
+
+    #[tokio::test]
+    async fn finishing_a_session_whose_state_was_never_taken_writes_anyway() {
+        let dir = temp_dir();
+        let config = test_config(&dir);
+        let pool = db::open(&config).await.unwrap();
+        let store = StateStore::new(config);
+
+        let session = store.session(&pool).await.unwrap();
+        session.finish().await.unwrap();
+
+        // and the database still reads back cleanly
+        let loaded = store.load(&pool).await.unwrap();
+        assert!(loaded.seen_urls().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
