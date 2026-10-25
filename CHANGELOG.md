@@ -1,3 +1,10 @@
+## 1.3.7
+
+The debug picker keeps showing the tested identity.
+
+The POST re-render marked the first option selected again; the submitted
+token_index now rides back into the page.
+
 ## 1.3.6
 
 Close the coverage holes the OAuth and debug work left.

@@ -1173,7 +1173,7 @@ async fn debug_page(
     let running = run_in_progress(&state).await;
     let identities = debug_identities(&state).await;
     render(move || {
-        view! { <DebugPage state=state running=running result=None live=live identities=identities /> }
+        view! { <DebugPage state=state running=running result=None live=live identities=identities tested=None /> }
     })
 }
 
@@ -1226,8 +1226,12 @@ async fn debug_post(
     let live = live_updates(&headers);
     let running = run_in_progress(&state).await;
     let identities = debug_identities(&state).await;
+    let tested = pairs
+        .iter()
+        .find(|(key, _)| key == "token_index")
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok());
     render(
-        move || view! { <DebugPage state=state running=running result=Some(outcome) live=live identities=identities /> },
+        move || view! { <DebugPage state=state running=running result=Some(outcome) live=live identities=identities tested=tested /> },
     )
 }
 
@@ -2787,6 +2791,8 @@ fn DebugPage(
     result: Option<DebugOutcome>,
     live: bool,
     identities: Vec<(usize, String, String)>,
+    /// The identity a just-run test used, so the picker keeps showing it.
+    tested: Option<usize>,
 ) -> impl IntoView {
     view! {
         <Page state=state running=running title="Debug".to_string() live=live refresh=None>
@@ -2804,7 +2810,9 @@ fn DebugPage(
                             let value = index.to_string();
                             let title = format!("tested against {server}");
                             let label = label.clone();
-                            if *index == 0 {
+                            let selected =
+                                tested == Some(*index) || (tested.is_none() && *index == 0);
+                            if selected {
                                 view! { <option value={value} title={title} selected="selected">{label}</option> }.into_any()
                             } else {
                                 view! { <option value={value} title={title}>{label}</option> }.into_any()

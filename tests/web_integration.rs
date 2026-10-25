@@ -1446,6 +1446,30 @@ async fn the_connection_test_rejects_an_unknown_picker_index() {
     assert!(body.contains("not configured any more"), "{body}");
 }
 
+/// After a test run, the picker still shows the identity that was tested,
+/// not the first one.
+#[tokio::test]
+async fn the_picker_keeps_showing_the_tested_identity() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string(), OAUTH_TOKEN.to_string()];
+    let (base, db) = spawn_ui_with(config).await;
+    fedifetcher::db::save_oauth_account(&db, OAUTH_TOKEN, "other.example", "someone", "")
+        .await
+        .unwrap();
+
+    let (status, body) = post_debug(&base, "action=connect&token_index=1").await;
+    assert_eq!(status, 200);
+    let option = body
+        .split("<option ")
+        .find(|tag| tag.starts_with("value=\"1\""))
+        .unwrap_or_else(|| panic!("an option for the tested identity: {body}"));
+    assert!(
+        option.contains("selected"),
+        "the tested identity stays selected: {body}"
+    );
+}
+
 /// The logs page refreshes itself while live updates are on — a meta
 /// refresh, the one kind of live update that needs no JavaScript — and
 /// the top bar's toggle pauses and resumes it with a cookie, going back
