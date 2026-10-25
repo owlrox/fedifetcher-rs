@@ -247,3 +247,27 @@ async fn a_post_url_on_a_known_server_is_parsed_without_asking() {
         "the answer is remembered"
     );
 }
+
+/// Wafrn speaks the Mastodon API behind its own URL shapes: posts live at
+/// /fediverse/post/<id>, profiles at /blog/<user>.
+#[tokio::test]
+async fn a_wafrn_servers_urls_are_read_by_the_mastodon_client() {
+    let dir = common::tmp_dir();
+    let http = http(&dir);
+    let client = client_for(&server_info("wafrn"), &http)
+        .expect("wafrn speaks the Mastodon API, so it gets a client");
+
+    assert_eq!(
+        client
+            .post_id_from(
+                "https://app.wafrn.net/fediverse/post/01a16b83-d93e-75e5-bc05-a563a5e5f1a3"
+            )
+            .await
+            .as_deref(),
+        Some("01a16b83-d93e-75e5-bc05-a563a5e5f1a3")
+    );
+    assert_eq!(
+        client.username_from("https://app.wafrn.net/blog/someone"),
+        Some("someone".to_string())
+    );
+}

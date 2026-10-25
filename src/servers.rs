@@ -83,6 +83,10 @@ pub fn software_apis(flavor: ApiFlavor) -> &'static [&'static str] {
             "fedibird",
             "kmyblue",
             "mitra",
+            // wafrn serves a Mastodon-shaped /api/v1 (its instance info
+            // reads "4.3.0 (compatible; Wafrn ...)"), behind its own
+            // /fediverse/post/<id> and /blog/<user> URL shapes
+            "wafrn",
         ],
         ApiFlavor::Misskey => &[
             "misskey",

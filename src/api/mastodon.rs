@@ -41,6 +41,8 @@ static POST_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"^https?://[^/]+/notice/(?P<name>[^/]+)",
         r"^https?://[^/]+/p/[^/]+/(?P<name>[^/]+)",
         r"^https?://[^/]+/notes/(?P<name>[^/]+)",
+        // wafrn's post URLs, with the id the API addresses the post by
+        r"^https?://[^/]+/fediverse/post/(?P<name>[^/]+)",
     ]
     .iter()
     .map(|p| anchored(p))
@@ -68,6 +70,8 @@ static PROFILE_PATHS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"^https?://[^/]+/@(?P<name>[^/]+)",
         r"^https?://[^/]+/users/(?P<name>[^/]+)",
         r"^https?://[^/]+/(?P<name>[^/]+)/?$",
+        // wafrn's profile pages
+        r"^https?://[^/]+/blog/(?P<name>[^/]+)",
     ]
     .iter()
     .map(|p| anchored(p))
