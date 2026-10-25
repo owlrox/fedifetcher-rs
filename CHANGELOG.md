@@ -1,3 +1,20 @@
+## 1.2.14
+
+Record the OAuth onboarding one-pager.
+
+The idea-refine session's output, saved as docs/ideas/oauth-onboarding.md:
+an account-management section on the existing /config page — dynamic
+per-server app registration, the authorize redirect, a callback route,
+an account list with disconnect/revoke and a 401-reconnect prompt, and
+the manual paste field kept unchanged below. One consent screen carries
+all three scopes (decided in the session); scope staging, the
+onboarding-first wizard, the pairing-code flow and refresh tokens are
+recorded as not-doing with their reasons. The assumptions to validate
+before a spec: proxy-header origin detection, the scope list itself,
+and open app registration on target servers.
+
+cargo test (360), clippy -D warnings and fmt pass.
+
 ## 1.2.13
 
 Sharpen the wafrn note with what their own API serves.
