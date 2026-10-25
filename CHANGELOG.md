@@ -1,3 +1,13 @@
+## 1.3.4
+
+Test connection picks which account or token to test.
+
+The Test connection form gains a picker of every configured identity:
+connected accounts by their acct and their own server, pasted tokens by
+their masked value. The test asks the picked identity's own server, and
+an index that no longer matches is a failure instead of a silently
+different test. The user and posts lookups keep using the first token.
+
 ## 1.3.3
 
 Keep the remove label beside its checkbox.

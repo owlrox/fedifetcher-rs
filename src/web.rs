@@ -1171,7 +1171,40 @@ async fn debug_page(
     page_load(&state, "GET /debug");
     let live = live_updates(&headers);
     let running = run_in_progress(&state).await;
-    render(move || view! { <DebugPage state=state running=running result=None live=live /> })
+    let identities = debug_identities(&state).await;
+    render(move || {
+        view! { <DebugPage state=state running=running result=None live=live identities=identities /> }
+    })
+}
+
+/// The identities the Test connection form can pick: one per access
+/// token, labelled by its connected account when the token came from
+/// OAuth, else by its masked value, each with the server a test would
+/// ask. No token ever leaves the server.
+async fn debug_identities(state: &AppState) -> Vec<(usize, String, String)> {
+    let config = state.config.lock().unwrap().clone();
+    let rows = match db::oauth_accounts(&state.db).await {
+        Ok(rows) => rows,
+        Err(ex) => {
+            tracing::warn!("could not read the connected accounts for the debug page: {ex}");
+            Vec::new()
+        }
+    };
+    config
+        .access_tokens
+        .iter()
+        .enumerate()
+        .map(
+            |(index, token)| match rows.iter().find(|row| &row.token == token) {
+                Some(row) => (index, format!("@{}", row.acct), row.server.clone()),
+                None => (
+                    index,
+                    format!("pasted token {}", masked(token)),
+                    config.server.clone(),
+                ),
+            },
+        )
+        .collect()
 }
 
 /// Run the debug tab's form, and render the page with the result. The
@@ -1192,13 +1225,15 @@ async fn debug_post(
     }
     let live = live_updates(&headers);
     let running = run_in_progress(&state).await;
+    let identities = debug_identities(&state).await;
     render(
-        move || view! { <DebugPage state=state running=running result=Some(outcome) live=live /> },
+        move || view! { <DebugPage state=state running=running result=Some(outcome) live=live identities=identities /> },
     )
 }
 
 /// Run one debug action against the configured server, with the first
-/// access token.
+/// access token — except the connection test, which tests whichever
+/// identity the form's picker named, against that identity's own server.
 async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> DebugOutcome {
     let field = |name: &str| {
         pairs
@@ -1221,21 +1256,37 @@ async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> Debug
             message: "No server is configured — set one on the Config page.".to_string(),
         };
     }
-    let Some(token) = config.access_tokens.first() else {
+    let Some(first) = config.access_tokens.first().cloned() else {
         return DebugOutcome::Failed {
             message: "No access token is configured — add one on the Config page.".to_string(),
         };
     };
-    let token = token.clone();
-    let base = format!("https://{}", config.server);
-    let http = HttpClient::new(config, state.db.clone());
+    let base = format!("{}://{}", state.http.scheme(), config.server);
+    let http = state.http.ignoring_robots();
     match action.as_str() {
-        "connect" => match debug::test_connection(&base, &token, &http).await {
-            Ok((instance, account)) => DebugOutcome::Connected { instance, account },
-            Err(ex) => DebugOutcome::Failed {
-                message: ex.to_string(),
-            },
-        },
+        "connect" => {
+            let index = field("token_index").parse::<usize>().unwrap_or(0);
+            let Some(token) = config.access_tokens.get(index).cloned() else {
+                return DebugOutcome::Failed {
+                    message:
+                        "That account or token is not configured any more — reload the Debug page."
+                            .to_string(),
+                };
+            };
+            // a connected account carries its own server; a pasted token
+            // belongs to the configured one
+            let server = match db::oauth_account(&state.db, &token).await {
+                Ok(Some(row)) if !row.server.is_empty() => row.server,
+                _ => config.server.clone(),
+            };
+            let base = format!("{}://{}", state.http.scheme(), server);
+            match debug::test_connection(&base, &token, &http).await {
+                Ok((instance, account)) => DebugOutcome::Connected { instance, account },
+                Err(ex) => DebugOutcome::Failed {
+                    message: ex.to_string(),
+                },
+            }
+        }
         "user" => {
             let acct = field("user");
             if acct.is_empty() {
@@ -1243,7 +1294,7 @@ async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> Debug
                     message: "Enter an account to look up, e.g. user@example.social.".to_string(),
                 };
             }
-            match debug::lookup_account(&base, &acct, &token, &http).await {
+            match debug::lookup_account(&base, &acct, &first, &http).await {
                 Ok(account) => DebugOutcome::User { acct, account },
                 Err(ex) => DebugOutcome::Failed {
                     message: ex.to_string(),
@@ -1259,7 +1310,7 @@ async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> Debug
                 };
             }
             let limit = field("limit").parse::<i64>().unwrap_or(10).clamp(1, 40);
-            match debug::account_posts(&base, &acct, limit, &token, &http).await {
+            match debug::account_posts(&base, &acct, limit, &first, &http).await {
                 Ok((account, posts)) => DebugOutcome::Posts {
                     acct,
                     account,
@@ -2735,29 +2786,42 @@ fn DebugPage(
     running: Option<String>,
     result: Option<DebugOutcome>,
     live: bool,
+    identities: Vec<(usize, String, String)>,
 ) -> impl IntoView {
-    let config = state.config.lock().unwrap().clone();
-    let server = if config.server.is_empty() {
-        "not set".to_string()
-    } else {
-        config.server.clone()
-    };
-    let token_hint = config
-        .access_tokens
-        .first()
-        .map(|token| masked(token))
-        .unwrap_or_else(|| "none".to_string());
     view! {
         <Page state=state running=running title="Debug".to_string() live=live refresh=None>
             <section>
                 <h2>"Test connection"</h2>
                 <p class="muted">
-                    "Asks " <code>{server.clone()}</code> " what it is, and whether it accepts the first access token (" {token_hint.clone()} ")."
+                    "Asks the picked account's server what it is, and whether it accepts that account's token. Pick which connected account or pasted token to test with:"
                 </p>
-                <form method="post" action="/debug">
-                    <input type="hidden" name="action" value="connect"/>
-                    <button type="submit">"Test connection"</button>
-                </form>
+                {if identities.is_empty() {
+                    view! { <p class="muted">"No access token is configured — add one on the Config page."</p> }.into_any()
+                } else {
+                    let options: Vec<AnyView> = identities
+                        .iter()
+                        .map(|(index, label, server)| {
+                            let value = index.to_string();
+                            let title = format!("tested against {server}");
+                            let label = label.clone();
+                            if *index == 0 {
+                                view! { <option value={value} title={title} selected="selected">{label}</option> }.into_any()
+                            } else {
+                                view! { <option value={value} title={title}>{label}</option> }.into_any()
+                            }
+                        })
+                        .collect();
+                    view! {
+                        <form method="post" action="/debug">
+                            <input type="hidden" name="action" value="connect"/>
+                            <p>
+                                <select name="token_index">{options}</select>
+                                <button type="submit">"Test connection"</button>
+                            </p>
+                        </form>
+                    }
+                    .into_any()
+                }}
             </section>
             <section>
                 <h2>"Look up a user"</h2>

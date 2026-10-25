@@ -9,6 +9,7 @@ use httpmock::Method;
 use httpmock::prelude::*;
 
 const TOKEN: &str = "smoke-secret-token-123";
+const OAUTH_TOKEN: &str = "the-oauth-token";
 
 /// Start the web UI on an ephemeral port, returning its base URL.
 async fn spawn_ui(dir: &std::path::Path) -> String {
@@ -1353,6 +1354,96 @@ async fn debug_rejects_an_unknown_action() {
     let (status, body) = post_debug(&base, "action=dance").await;
     assert_eq!(status, 200);
     assert!(body.contains("Unknown action"), "{body}");
+}
+
+/// The Test connection form offers every configured identity: OAuth
+/// accounts by their acct and their own server, pasted tokens by their
+/// masked value and the configured server. No token ever reaches the page.
+#[tokio::test]
+async fn the_debug_page_offers_each_identity_to_test_with() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string(), OAUTH_TOKEN.to_string()];
+    let (base, db) = spawn_ui_with(config).await;
+    fedifetcher::db::save_oauth_account(&db, OAUTH_TOKEN, "other.example", "someone", "")
+        .await
+        .unwrap();
+
+    let (status, body) = get(&format!("{base}/debug")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("name=\"token_index\""), "{body}");
+    assert!(body.contains("@someone"), "the account's label: {body}");
+    assert!(
+        body.contains("other.example"),
+        "the account's own server: {body}"
+    );
+    assert!(
+        body.contains(&masked(TOKEN)),
+        "the pasted token's label: {body}"
+    );
+    assert!(
+        !body.contains(TOKEN) && !body.contains(OAUTH_TOKEN),
+        "no full token in the page: {body}"
+    );
+}
+
+/// Testing a connected account asks that account's own server, not the
+/// configured one, with that account's token.
+#[tokio::test]
+async fn the_connection_test_uses_the_picked_identitys_server() {
+    let server = MockServer::start_async().await;
+    let mock_host = server.base_url().trim_start_matches("http://").to_string();
+    let instance = server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v1/instance");
+            then.status(200).json_body(
+                serde_json::json!({"title": "Other", "uri": mock_host, "version": "4.2.0"}),
+            );
+        })
+        .await;
+    let verify = server
+        .mock_async(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/accounts/verify_credentials")
+                .header("Authorization", "Bearer the-oauth-token");
+            then.status(200).json_body(
+                serde_json::json!({"id": "1", "acct": "someone", "display_name": "Someone"}),
+            );
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string(), "the-oauth-token".to_string()];
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    fedifetcher::db::save_oauth_account(&db, "the-oauth-token", &mock_host, "someone", "")
+        .await
+        .unwrap();
+    let app = web::app_with_scheme(config, db.clone(), "http");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let base = format!("http://{addr}");
+
+    let (status, body) = post_debug(&base, "action=connect&token_index=1").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Other"), "the account's instance: {body}");
+    assert!(body.contains("someone"), "the account: {body}");
+    assert_eq!(instance.calls(), 1);
+    assert_eq!(verify.calls(), 1);
+}
+
+/// A picker index that no longer matches a token is a failure, not a
+/// silently different test.
+#[tokio::test]
+async fn the_connection_test_rejects_an_unknown_picker_index() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, body) = post_debug(&base, "action=connect&token_index=7").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("not configured any more"), "{body}");
 }
 
 /// The logs page refreshes itself while live updates are on — a meta
