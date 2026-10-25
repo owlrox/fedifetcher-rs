@@ -1,3 +1,23 @@
+## 1.2.15
+
+Write the OAuth onboarding spec.
+
+SPEC-oauth-onboarding.md turns the one-pager into the build contract:
+objective (zero secrets copied by hand, config page as account
+management), the six Mastodon endpoints used with no new dependencies
+(the OAuth client is hand-rolled on the existing HttpClient), a new
+src/oauth.rs beside the web routes, two new db tables (per-server app
+registrations and per-account metadata with needs_reconnect), the
+testing strategy (httpmock plays the instance; the authorize step is
+asserted on the redirect's Location), boundaries (schema changes and
+new dependencies ask first; a script tag or an unmasked secret never),
+and eight testable success criteria including denial, revoke-on-
+disconnect, and the 401 reconnect lifecycle. Open questions: proxy-
+header origin detection versus an explicit public-URL field, and
+whether mid-run config changes need a guard.
+
+cargo test (360), clippy -D warnings and fmt pass.
+
 ## 1.2.14
 
 Record the OAuth onboarding one-pager.
