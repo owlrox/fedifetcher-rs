@@ -362,3 +362,64 @@ async fn a_failed_dance_step_is_logged_into_the_logs_table() {
         rows.iter().map(|row| &row.message).collect::<Vec<_>>()
     );
 }
+
+/// A config save logs what it changed: every changed option named in one
+/// line, tokens called out added/removed and masked — never whole.
+#[tokio::test]
+async fn a_config_save_logs_every_change_it_made() {
+    let tmp = tmp_dir();
+    let (config, db) = state_db(&tmp).await;
+    drop(db);
+
+    let port = free_port();
+    let ui = child(&tmp, &["serve", "--port", &port.to_string()])
+        .spawn()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let _ = healthz(&base).await;
+
+    // two changes in one save: the server and a first access token
+    let token = "saved-token-1234567890";
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("{base}/config"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("server=example.social&new_access_token={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+
+    let db = db::open(&config).await.unwrap();
+    for _ in 0..100 {
+        let rows = db::recent_logs(&db, 100, LogSort::Time, LogOrder::Desc, None)
+            .await
+            .unwrap();
+        let saved = rows
+            .iter()
+            .find(|row| row.message.contains("Configuration saved"));
+        if let Some(row) = saved {
+            let message = &row.message;
+            assert!(
+                message.contains("server") && message.contains("access_tokens"),
+                "every changed option is named: {message}"
+            );
+            assert!(
+                message.contains("added token"),
+                "a token's arrival is called out: {message}"
+            );
+            assert!(
+                !message.contains(token),
+                "the token is masked, never whole: {message}"
+            );
+            stop_ui(&tmp, ui).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    stop_ui(&tmp, ui).await;
+    panic!("the config save logged nothing");
+}

@@ -530,3 +530,92 @@ async fn an_app_registered_with_other_scopes_is_registered_again() {
         .expect("the row is updated");
     assert_eq!(row.scopes, oauth::SCOPES, "the row carries the new scopes");
 }
+
+/// The OAuth lifecycle speaks in the logs table, like the runs do: a
+/// connect and a disconnect each leave their line, with the token only
+/// ever masked.
+#[tokio::test]
+async fn the_oauth_lifecycle_is_logged_into_the_logs_table() {
+    use fedifetcher::db::{self, LogOrder, LogSort};
+
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, &host(&server));
+    let db = fixture::test_db(&config).await;
+    // the pipeline serve mode runs: tracing events into the logs table
+    let log_db = fedifetcher::logging::setup(&config, db.clone()).expect("logging sets up");
+
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/api/v1/apps");
+            then.status(200).json_body(registration());
+        })
+        .await;
+    mock_the_exchange(&server).await;
+
+    let base = spawn_ui(&config, &db).await;
+    let client = dance_client();
+
+    // connect: the dance, end to end
+    let resp = client
+        .post(format!("{base}/oauth/connect"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("server={}", host(&server)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    let authorize_url = resp.headers().get("Location").unwrap().to_str().unwrap();
+    let authorize = url::Url::parse(authorize_url).unwrap();
+    let state = authorize
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+        .unwrap();
+    let cookie = state_cookie(&resp);
+    let resp = client
+        .get(format!(
+            "{base}/oauth/callback?code=the-dance-code&state={state}"
+        ))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+
+    // disconnect the account again
+    let resp = client
+        .post(format!("{base}/oauth/disconnect"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("acct=alice&server={}", host(&server)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+
+    // both lifecycle lines are in the logs table, the token masked
+    for _ in 0..100 {
+        let rows = db::recent_logs(&db, 100, LogSort::Time, LogOrder::Desc, None)
+            .await
+            .unwrap();
+        let connected = rows.iter().any(|row| {
+            row.message.contains("Connected @alice on") && !row.message.contains("the-new-token")
+        });
+        let disconnected = rows
+            .iter()
+            .any(|row| row.message.contains("Disconnected @alice on"));
+        if connected && disconnected {
+            log_db.shutdown().await;
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let rows = db::recent_logs(&db, 100, LogSort::Time, LogOrder::Desc, None)
+        .await
+        .unwrap();
+    log_db.shutdown().await;
+    panic!(
+        "the lifecycle lines are missing from the logs table: {:?}",
+        rows.iter().map(|row| &row.message).collect::<Vec<_>>()
+    );
+}

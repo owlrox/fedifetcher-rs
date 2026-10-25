@@ -1,3 +1,32 @@
+## 1.2.24
+
+Log the OAuth lifecycle and what each config save changed.
+
+The user's live round found the OAuth lifecycle silent in the logs
+table, and a removal through the config page silent too.
+
+The lifecycle now speaks where the runs do: the dance's start
+("Starting the OAuth dance for example.social"), its success
+("Connected @alice on example.social (token 6hi7w***Konng)") and the
+disconnect ("Disconnected @alice on … (token …)") all land in the logs
+table — the token only ever masked, per the spec's boundary. The
+revoke-refusal warnings were already in place; a test walks the full
+connect-and-disconnect lifecycle through the real logs pipeline
+(logging::setup) and asserts both lines, and that no whole token
+appears.
+
+The config save's story is now one INFO line naming every changed
+option — the changed-options call-out existed but at DEBUG, invisible
+at the default level, and the INFO line named nothing. A save changing
+the server and adding a token reads: "Configuration saved to the
+database (changed: server, access_tokens (added token
+saved***67890))". Removals are called out the same way; a reorder with
+no add or remove says so; the binary test proves the line for a real
+save through the running web UI, including that no whole token
+appears.
+
+379 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.23
 
 Re-register stale-scope apps and log the dance's failures.

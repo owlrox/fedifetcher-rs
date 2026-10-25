@@ -786,13 +786,51 @@ async fn save_config(
         .filter(|key| before.get(*key) != after.get(*key))
         .cloned()
         .collect();
-    tracing::info!("Configuration saved to the database");
-    tracing::debug!(
-        "POST /config: changed options: {}",
-        if changed.is_empty() {
-            "none".to_string()
+
+    // the save's story in one line: every changed option named, tokens
+    // called out added and removed, masked — never whole
+    let token_list = |values: &RawValues| -> Vec<String> {
+        values
+            .get("access_tokens")
+            .and_then(|value| value.as_array())
+            .map(|tokens| {
+                tokens
+                    .iter()
+                    .filter_map(|token| token.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut summary: Vec<String> = Vec::new();
+    for name in &changed {
+        if name == "access_tokens" {
+            let (before_tokens, after_tokens) = (token_list(&before), token_list(&after));
+            let added: Vec<String> = after_tokens
+                .iter()
+                .filter(|token| !before_tokens.contains(token))
+                .map(|token| format!("added token {}", masked(token)))
+                .collect();
+            let removed: Vec<String> = before_tokens
+                .iter()
+                .filter(|token| !after_tokens.contains(token))
+                .map(|token| format!("removed token {}", masked(token)))
+                .collect();
+            let mut token_changes = added;
+            token_changes.extend(removed);
+            if token_changes.is_empty() {
+                token_changes.push("reordered".to_string());
+            }
+            summary.push(format!("access_tokens ({})", token_changes.join(", ")));
         } else {
-            changed.join(", ")
+            summary.push(name.clone());
+        }
+    }
+    tracing::info!(
+        "Configuration saved to the database (changed: {})",
+        if summary.is_empty() {
+            "nothing".to_string()
+        } else {
+            summary.join(", ")
         }
     );
     *state.config.lock().unwrap() = config;
@@ -841,6 +879,7 @@ async fn oauth_connect(
         }
     };
 
+    tracing::info!("Starting the OAuth dance for {server}");
     let oauth_state = uuid::Uuid::new_v4().to_string();
     let authorize = oauth::authorize_url(&app, state.http.scheme(), &origin, &oauth_state);
     // the cookie remembers both the state and the server the dance is on
@@ -955,6 +994,12 @@ async fn oauth_callback(
         .await);
     }
     *state.config.lock().unwrap() = config;
+    tracing::info!(
+        "Connected @{acct} on {server} (token {hint})",
+        acct = account.acct,
+        server = app.server,
+        hint = masked(&token)
+    );
 
     Ok(back("connected"))
 }
@@ -1022,6 +1067,10 @@ async fn oauth_disconnect(
         if let Err(ex) = db::delete_oauth_account(&state.db, &row.token).await {
             tracing::warn!("Disconnecting @{acct}: could not drop the account row: {ex}");
         }
+        tracing::info!(
+            "Disconnected @{acct} on {server} (token {hint})",
+            hint = masked(&row.token)
+        );
         let mut config = state.config.lock().unwrap().clone();
         config.access_tokens.retain(|token| token != &row.token);
         if let Err(ex) = db::save_config(&state.db, &config.to_raw_values()).await {
