@@ -1,3 +1,27 @@
+## 1.2.12
+
+Record wafrn as known-incompatible, with the evidence.
+
+A user's run hit app.wafrn.net and logged "runs wafrn and no supported
+API is known for it". Investigated rather than guessed: wafrn advertises
+a Mastodon-compatible API (its /api/v1/instance says 4.3.0 compatible),
+but that layer refuses every unauthenticated request with 401 — public
+timelines, account lookup, statuses, and context; only /api/v1/instance
+and /api/v1/instance/peers answer. FediFetcher's remote fetches are
+deliberately unauthenticated, so adding wafrn to a flavor's software
+list would trade today's one cached skip line for a 401 error per URL.
+Upstream FediFetcher has no wafrn mention either.
+
+So the software_apis comment's known-incompatible list (where gotosocial
+already sits for the same token-gating reason) gains wafrn with the
+evidence and the date, answering "should we support wafrn?" for the
+next reader. No behavior change: the URL's context is still skipped,
+once, with its reason logged.
+
+cargo test (360, all green three times over; one transient failure
+during the recompile window did not reproduce), clippy -D warnings and
+fmt pass.
+
 ## 1.2.11
 
 Canary the binary tests' state-resolution assumptions.

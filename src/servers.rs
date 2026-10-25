@@ -58,6 +58,12 @@ impl ApiFlavor {
 /// FediFetcher for various reasons:
 /// * gotosocial - all Mastodon APIs require an access token
 ///   (https://github.com/superseriousbusiness/gotosocial/issues/2038)
+/// * wafrn - its Mastodon-compatible API (which calls itself 4.3.0
+///   compatible) refuses every unauthenticated request with 401 —
+///   timelines, account lookup, statuses, context; only /api/v1/instance
+///   answers (verified against app.wafrn.net, 2026-10-24). FediFetcher's
+///   remote fetches are deliberately unauthenticated, so there is nothing
+///   to talk to; a post URL's context is skipped with a logged reason.
 pub fn software_apis(flavor: ApiFlavor) -> &'static [&'static str] {
     match flavor {
         ApiFlavor::Mastodon => &[
