@@ -1,3 +1,7 @@
+## 1.3.3
+
+Keep the remove label beside its checkbox.
+
 ## 1.3.2
 
 Pin that the dashboard counts connected accounts in its token total.

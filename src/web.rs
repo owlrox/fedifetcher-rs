@@ -1690,7 +1690,7 @@ pre { white-space: pre-wrap; }
 ul.tokens { margin: 0.2rem 0; padding-left: 1.2rem; }
 ul.tokens label { color: #888; }
 ul.tokens li.token-row { display: flex; align-items: center; gap: 0.75rem; }
-ul.tokens li.token-row label.token-remove { margin-left: auto; }
+ul.tokens li.token-row label.token-remove { margin-left: auto; white-space: nowrap; }
 li.account { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 li.account form.account-actions { margin: 0; }
 li.account form.account-actions:first-of-type { margin-left: auto; }
