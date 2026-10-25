@@ -91,7 +91,25 @@ https even when the mock server speaks http.
 Coverage is measured with cargo-llvm-cov
 (`cargo llvm-cov --summary-only`); on a machine where it cannot find
 llvm-tools-preview, point `LLVM_COV` and `LLVM_PROFDATA` at the
-toolchain's `lib/rustlib/<host>/bin` copies.
+toolchain's `lib/rustlib/<host>/bin` copies. Line coverage sits at
+about 95%. The uncovered remainder is deliberate, not an accident:
+
+- database failure fallbacks (every `Err(ex) => warn!` around a db
+  call): reaching them needs a fault-injecting seam over the pool, a
+  refactor not worth its cost while the fallbacks are one log line
+  each;
+- the `web()` startup path and `main.rs`: they need a spawned process
+  and assert on process plumbing, not logic;
+- environment-dependent code that cannot be reached in-process
+  (`default_state_dir`'s env-var branches — `set_var` is unsafe and
+  process-global, so racing parallel tests);
+- defensive arms that no valid input can reach (the log sorter's
+  `LogSort::Time` match arm behind an early `if`).
+
+When a new arm lands in one of these classes, leave it uncovered and
+note it here rather than writing a test that asserts on an impossible
+state. Pure logic and mock-reachable branches are never an excuse:
+those get tests.
 
 ## License
 

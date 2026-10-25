@@ -497,4 +497,38 @@ mod tests {
             "Added 0 new context toots (with 0 failures) from 3 context urls (3 already seen)"
         );
     }
+
+    #[test]
+    fn the_known_context_line_counts_local_toots_separately() {
+        let scan = ContextScan {
+            total: 4,
+            local: 2,
+            fetched: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            known_context_found_line(&[], &scan, None),
+            "Found 0 known context toots (from 4 toots: 0 private, 0 unresolved, 0 already checked recently, 2 fetched; 2 on our server)"
+        );
+    }
+
+    #[test]
+    fn the_known_context_line_reports_the_new_known_split_only_with_urls() {
+        let urls = vec!["https://remote.example/@alice/1".to_string()];
+        let scan = ContextScan {
+            total: 1,
+            fetched: 1,
+            ..Default::default()
+        };
+        // a database record alongside found urls: the split is spelled out
+        assert_eq!(
+            known_context_found_line(&urls, &scan, Some((1, 0))),
+            "Found 1 known context toots: https://remote.example/@alice/1 (from 1 toots: 0 private, 0 unresolved, 0 already checked recently, 1 fetched; 1 new, 0 already known)"
+        );
+        // a database record but nothing found: no split to report
+        assert_eq!(
+            known_context_found_line(&[], &scan, Some((1, 0))),
+            "Found 0 known context toots (from 1 toots: 0 private, 0 unresolved, 0 already checked recently, 1 fetched)"
+        );
+    }
 }

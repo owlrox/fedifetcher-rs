@@ -1,3 +1,14 @@
+## 1.3.9
+
+Cover the last reachable arms, document the deliberate remainder.
+
+Lock files left by a dead process or a version that recorded no
+process are reclaimed with their file rewritten; the manual fetch's
+malformed-acct and live-host paths, the profile URL for a server of no
+known flavor, and the context line's local-toots and new/known split
+variants all have tests. AGENTS.md now lists which paths stay
+uncovered on purpose and why, so future audits do not re-litigate them.
+
 ## 1.3.8
 
 Close the cheap coverage gaps, and fix two dead parse paths.

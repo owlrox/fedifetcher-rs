@@ -609,4 +609,50 @@ mod tests {
         assert!(loaded.seen_urls().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn a_lock_whose_holder_is_dead_is_reclaimed_at_once() {
+        let dir = temp_dir();
+        let config = test_config(&dir);
+        // a recent lock naming a process id that cannot exist
+        std::fs::write(
+            config.lock_path(),
+            serde_json::json!({
+                "pid": 999_999_999,
+                "created": timeutil::fmt_lock_ts(timeutil::now()),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let guard_lock = lock(&config).unwrap();
+
+        // the reclaim rewrote the lock file with a live holder's record
+        let reclaimed =
+            parse_lock_content(&std::fs::read_to_string(config.lock_path()).unwrap()).unwrap();
+        assert_eq!(
+            reclaimed.pid,
+            Some(std::process::id()),
+            "the dead holder's pid is replaced by ours"
+        );
+        drop(guard_lock);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_lock_from_a_version_that_recorded_no_process_is_reclaimed() {
+        let dir = temp_dir();
+        let config = test_config(&dir);
+        // the bare-timestamp shape older versions wrote
+        std::fs::write(config.lock_path(), timeutil::fmt_lock_ts(timeutil::now())).unwrap();
+
+        let guard_lock = lock(&config).unwrap();
+
+        // the reclaim rewrote the lock file, recording a holder this time
+        let reclaimed =
+            parse_lock_content(&std::fs::read_to_string(config.lock_path()).unwrap()).unwrap();
+        assert_eq!(reclaimed.pid, Some(std::process::id()));
+        drop(guard_lock);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

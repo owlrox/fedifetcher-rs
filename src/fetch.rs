@@ -220,5 +220,11 @@ mod tests {
             profile_url_for(&server("peertube"), "remote.example", "alice"),
             "https://remote.example/accounts/alice"
         );
+        // a server of no known flavor still gets a profile URL: the
+        // mastodon/misskey shape, which is the most common
+        assert_eq!(
+            profile_url_for(&server("wordpress"), "remote.example", "alice"),
+            "https://remote.example/@alice"
+        );
     }
 }

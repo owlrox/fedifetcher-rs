@@ -19,6 +19,7 @@ use fedifetcher::timeutil;
 use fedifetcher::users::User;
 use httpmock::Method;
 use httpmock::prelude::*;
+use serde_json::json;
 
 /// The mock server's host, without the scheme.
 fn host(server: &MockServer) -> String {
@@ -396,4 +397,75 @@ async fn trigger_posts_round_trip_through_the_scan() {
     assert_eq!(recorded.uri, toot.uri);
     assert_eq!(recorded.url, toot.url);
     assert_eq!(recorded.source, "bookmarks");
+}
+
+/// An acct with no local part is not a remote account either.
+#[tokio::test]
+async fn force_user_posts_skips_a_malformed_acct() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "home.example");
+    let db = db::open(&config).await.unwrap();
+    let http = HttpClient::new(config.clone(), db.clone());
+    let home = HomeServer::with_scheme("home.example", "http", "secret-token", http.clone());
+    let mut state = State::default();
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
+
+    let logs = capture::LogCapture::new();
+    let guard = logs.install();
+    fetch::force_user_posts(&mut ctx, "@remote.example", UserSet::KnownFollowings, false).await;
+    drop(guard);
+
+    assert!(
+        logs.text().contains("not a remote account"),
+        "{}",
+        logs.text()
+    );
+    assert!(
+        state.known_followings().is_empty(),
+        "the account is not recorded as checked"
+    );
+}
+
+/// Re-checking a live server reports what it runs.
+#[tokio::test]
+async fn force_host_info_reports_a_live_server() {
+    let server = MockServer::start_async().await;
+    let host = server.base_url().trim_start_matches("http://").to_string();
+    let href_host = host.clone();
+    server
+        .mock_async(move |when, then| {
+            when.method(Method::GET).path("/.well-known/nodeinfo");
+            then.status(200).json_body(json!({
+                "links": [{
+                    "rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
+                    "href": format!("http://{href_host}/nodeinfo/2.0"),
+                }],
+            }));
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/nodeinfo/2.0");
+            then.status(200).json_body(json!({
+                "software": {"name": "mastodon", "version": "4.3.0"},
+                "protocols": ["activitypub"],
+            }));
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "home.example");
+    let db = db::open(&config).await.unwrap();
+    let http = HttpClient::with_scheme(config, db, "http");
+    let mut state = State::default();
+
+    let logs = capture::LogCapture::new();
+    let guard = logs.install();
+    fetch::force_host_info(&host, &http, &mut state).await;
+    drop(guard);
+
+    assert!(
+        logs.text().contains("runs mastodon 4.3.0"),
+        "{}",
+        logs.text()
+    );
 }
