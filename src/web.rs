@@ -354,9 +354,11 @@ fn table_action(table: &str) -> Option<TableAction> {
 }
 
 /// The /data page: sub-tabs for the hosts FediFetcher has seen and for
-/// every table in the database, except logs and config, which have pages
-/// of their own. The tab query string names "hosts" or a table; anything
-/// else falls back to the hosts tab.
+/// every table in the database, except the ones with pages or pickers of
+/// their own — logs and config, which have pages, and the OAuth tables,
+/// whose tokens and app secrets have no business on a page that shows
+/// raw rows. The tab query string names "hosts" or a table; anything else
+/// falls back to the hosts tab.
 async fn data(
     AxumState(state): AxumState<Arc<AppState>>,
     Query(query): Query<DataQuery>,
@@ -380,10 +382,16 @@ async fn data(
         }
     };
     // the logs and config tables are shown on their own pages (/logs,
-    // /config); the data page's tabs are for everything else
+    // /config), and the OAuth tables' rows are secrets, not data; the
+    // data page's tabs are for everything else
     let tables: Vec<String> = tables
         .into_iter()
-        .filter(|name| name != "logs" && name != "config")
+        .filter(|name| {
+            !matches!(
+                name.as_str(),
+                "logs" | "config" | "oauth_accounts" | "oauth_apps"
+            )
+        })
         .collect();
     let mut table_counts: Vec<(String, i64)> = Vec::with_capacity(tables.len());
     for name in &tables {

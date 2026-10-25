@@ -875,6 +875,20 @@ async fn the_hosts_page_sorts_by_the_clicked_column() {
 async fn seed_db(dir: &std::path::Path) {
     let config = common::test_config(dir, "example.social");
     let pool = fedifetcher::db::open(&config).await.unwrap();
+    sqlx::query(
+        "INSERT INTO oauth_accounts (token, server, acct, avatar, connected_at)
+         VALUES ('tok', 'example.social', 'me', '', '2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO oauth_apps (server, client_id, client_secret, registered_at)
+         VALUES ('example.social', 'id', 'secret', '2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let log = |level: &str, message: &str| fedifetcher::db::LogRow {
         ts: "2026-10-22 16:05:07 -05:00".to_string(),
         level: level.to_string(),
@@ -955,12 +969,20 @@ async fn the_data_page_drills_into_the_databases_tables() {
             "the {tab} sub-tab is linked"
         );
     }
-    for gone in ["logs", "config"] {
+    for gone in ["logs", "config", "oauth_accounts", "oauth_apps"] {
         assert!(
             !body.contains(&format!("href=\"/data?tab={gone}\"")),
-            "the {gone} table has its own page, not a sub-tab"
+            "the {gone} table has no sub-tab"
         );
     }
+    // asking for an OAuth tab by name falls back to the hosts tab, whatever
+    // rows the tables hold
+    let (status, body) = get(&format!("{base}/data?tab=oauth_accounts")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Seen hosts"),
+        "an OAuth table's name falls back to the hosts tab"
+    );
     assert!(body.contains("(2)"), "a sub-tab shows its row count");
     // the hosts tab is the default
     assert!(body.contains("Seen hosts"));
