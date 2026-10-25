@@ -32,7 +32,7 @@ docs/ideas/oauth-onboarding.md
     `<script>`
   - Verify: web_integration tests; gates
   - Files: src/web.rs, src/db.rs, tests/web_integration.rs
-- [ ] Task 4: The reconnect lifecycle
+- [x] Task 4: The reconnect lifecycle
   - Acceptance: 401 marks the row; Reconnect renders; fresh authorize
     clears the mark
   - Verify: run-path + web tests; gates

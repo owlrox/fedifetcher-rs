@@ -906,6 +906,25 @@ async fn oauth_callback(
     };
 
     let mut config = state.config.lock().unwrap().clone();
+    // a re-authorization of an account we already hold replaces its older
+    // tokens: the fresh one works, the stale ones are dead weight — and
+    // their needs-reconnect marks go with them
+    let stale: Vec<String> = db::oauth_accounts_by_acct(&state.db, &account.acct, &app.server)
+        .await
+        .unwrap_or_else(|ex| {
+            tracing::warn!("POST /oauth/callback: could not read the account's rows: {ex}");
+            Vec::new()
+        })
+        .iter()
+        .filter(|row| row.token != token)
+        .map(|row| row.token.clone())
+        .collect();
+    if !stale.is_empty() {
+        if let Err(ex) = db::delete_oauth_accounts(&state.db, &stale).await {
+            tracing::warn!("POST /oauth/callback: could not drop the stale rows: {ex}");
+        }
+        config.access_tokens.retain(|held| !stale.contains(held));
+    }
     if !config.access_tokens.contains(&token) {
         config.access_tokens.push(token.clone());
     }
@@ -2553,6 +2572,17 @@ fn ConfigPage(
                                 " on "
                                 <code>{server.clone()}</code>
                                 " (connected " <code>{account.connected_at.clone()}</code> ")"
+                                {account.needs_reconnect.then(|| {
+                                    view! {
+                                        <span class="muted">
+                                            "The instance rejected this token — reconnect:"
+                                        </span>
+                                        <form method="post" action="/oauth/connect">
+                                            <input type="hidden" name="server" value={server.clone()}/>
+                                            <button type="submit">"Reconnect"</button>
+                                        </form>
+                                    }
+                                })}
                                 <form method="post" action="/oauth/disconnect">
                                     <input type="hidden" name="acct" value={acct}/>
                                     <input type="hidden" name="server" value={server}/>

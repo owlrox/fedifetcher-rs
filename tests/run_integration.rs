@@ -296,3 +296,52 @@ async fn a_stop_lands_while_the_run_is_paused() {
     assert!(message.starts_with("Stopped after "), "{message}");
     assert!(message.ends_with('.'), "{message}");
 }
+
+/// A token the instance rejects during a run marks its connected account
+/// for reconnect: the config page's row will offer to re-authorize.
+#[tokio::test]
+async fn a_dead_token_marks_its_account_for_reconnect() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let instance_host = server.base_url().trim_start_matches("http://").to_string();
+    let mut config = common::test_config(&dir, &instance_host);
+    config.access_tokens = vec!["dead-token".to_string()];
+    config.from_lists = true;
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    fedifetcher::db::save_oauth_account(
+        &db,
+        "dead-token",
+        &instance_host,
+        "alice",
+        "http://avatar.example/alice.png",
+    )
+    .await
+    .unwrap();
+    // the lists task is the first thing the run asks for; the instance
+    // refuses the token
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v1/lists");
+            then.status(401);
+        })
+        .await;
+
+    let outcome = fedifetcher::run::run_once_with_scheme(
+        config,
+        "http",
+        CancelToken::new(),
+        Pause::new(),
+        &db,
+    )
+    .await;
+    assert!(outcome.is_err(), "the run fails on a rejected token");
+
+    let row = fedifetcher::db::oauth_account(&db, "dead-token")
+        .await
+        .unwrap()
+        .expect("the connected account is still recorded");
+    assert!(
+        row.needs_reconnect,
+        "the rejected token's account is marked for reconnect"
+    );
+}

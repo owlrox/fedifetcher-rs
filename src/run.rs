@@ -195,6 +195,18 @@ pub async fn run_once(
     pause: Pause,
     db: &SqlitePool,
 ) -> Result<String> {
+    run_once_with_scheme(config, "https", cancel, pause, db).await
+}
+
+/// Run once with the instance client pointed at `scheme`. Production always
+/// uses `run_once` (https); tests point the run at a local http server.
+pub async fn run_once_with_scheme(
+    config: Config,
+    scheme: &'static str,
+    cancel: CancelToken,
+    pause: Pause,
+    db: &SqlitePool,
+) -> Result<String> {
     let started = timeutil::now();
     let run_id = match db::start_run(db, &timeutil::fmt_state_ts(started)).await {
         Ok(id) => Some(id),
@@ -203,7 +215,7 @@ pub async fn run_once(
             None
         }
     };
-    let result = run_once_inner(config, cancel.clone(), pause, db).await;
+    let result = run_once_inner(config, scheme, cancel.clone(), pause, db).await;
     if let Some(id) = run_id {
         let (outcome, message) = match &result {
             Ok(message) if cancel.is_canceled() => ("stopped", message.clone()),
@@ -227,6 +239,7 @@ pub async fn run_once(
 
 async fn run_once_inner(
     config: Config,
+    scheme: &'static str,
     cancel: CancelToken,
     pause: Pause,
     db: &SqlitePool,
@@ -241,7 +254,7 @@ async fn run_once_inner(
         );
     }
 
-    let http = HttpClient::new(config.clone(), db.clone());
+    let http = HttpClient::with_scheme(config.clone(), db.clone(), scheme);
     let notifier = Notifier::new(config.clone(), http.clone(), Uuid::new_v4());
     let store = StateStore::new(config.clone());
 
@@ -268,7 +281,7 @@ async fn run_once_inner(
     // Delete any old robots.txt entries so we can re-download them
     http.robots().discard_stale(ROBOTS_MAX_AGE).await;
 
-    let result = run_tasks(&config, &http, &mut session, &cancel, &pause, db).await;
+    let result = run_tasks(&config, &http, scheme, &mut session, &cancel, &pause, db).await;
 
     // the session writes the state back, failures included
     if let Err(ex) = session.finish().await {
@@ -310,6 +323,7 @@ async fn run_once_inner(
 async fn run_tasks(
     config: &Config,
     http: &HttpClient,
+    scheme: &'static str,
     session: &mut Session,
     cancel: &CancelToken,
     pause: &Pause,
@@ -330,7 +344,7 @@ async fn run_tasks(
         if cancel.is_canceled() {
             break;
         }
-        let home = HomeServer::new(&config.server, token, http.clone());
+        let home = HomeServer::with_scheme(&config.server, scheme, token, http.clone());
         let mut ctx = Context {
             config,
             state: session.state(),
@@ -340,7 +354,17 @@ async fn run_tasks(
             pause: pause.clone(),
             db,
         };
-        run_enabled_tasks(&mut ctx).await?;
+        if let Err(ex) = run_enabled_tasks(&mut ctx).await {
+            // the instance rejected this token: its account's row offers
+            // reconnect on the config page. Other statuses keep today's
+            // behavior — the run fails and nothing is marked.
+            if ex.to_string().contains("Status code: 401")
+                && let Err(mark) = db::mark_oauth_needs_reconnect(db, token, true).await
+            {
+                warn!("Could not mark the account for reconnect: {mark}");
+            }
+            return Err(ex);
+        }
     }
     Ok(())
 }

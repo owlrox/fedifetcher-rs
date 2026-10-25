@@ -2079,3 +2079,152 @@ async fn removing_a_token_by_index_drops_its_oauth_row() {
         "the account's row went with the token"
     );
 }
+
+/// A connected account whose token the instance rejected renders a
+/// Reconnect button that starts a fresh authorize round for its server.
+#[tokio::test]
+async fn a_marked_account_offers_to_reconnect() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec!["dead-token-aaaa".to_string()];
+    let (base, pool) = spawn_ui_with(config).await;
+    fedifetcher::db::save_oauth_account(
+        &pool,
+        "dead-token-aaaa",
+        "example.social",
+        "alice",
+        "http://avatar.example/alice.png",
+    )
+    .await
+    .unwrap();
+    fedifetcher::db::mark_oauth_needs_reconnect(&pool, "dead-token-aaaa", true)
+        .await
+        .unwrap();
+
+    let (status, body) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Reconnect"),
+        "the marked row offers to reconnect: {body}"
+    );
+    assert!(
+        !body.contains("Reconnect the marked FediFetcher"),
+        "the reconnect is the account's own dance"
+    );
+}
+
+/// Reconnecting replaces the dead token: the fresh one joins the config,
+/// the stale one leaves it, and the mark is cleared.
+#[tokio::test]
+async fn reconnecting_replaces_the_dead_token() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let instance_host = server.base_url().trim_start_matches("http://").to_string();
+    let mut config = common::test_config(&dir, &instance_host);
+    config.access_tokens = vec!["dead-token-aaaa".to_string()];
+    let pool = fedifetcher::db::open(&config).await.unwrap();
+    fedifetcher::db::save_oauth_account(
+        &pool,
+        "dead-token-aaaa",
+        &instance_host,
+        "alice",
+        "http://avatar.example/alice.png",
+    )
+    .await
+    .unwrap();
+    fedifetcher::db::mark_oauth_needs_reconnect(&pool, "dead-token-aaaa", true)
+        .await
+        .unwrap();
+
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/api/v1/apps");
+            then.status(200).json_body(serde_json::json!({
+                "id": "17",
+                "client_id": "the-client-id",
+                "client_secret": "the-client-secret",
+            }));
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/oauth/token");
+            then.status(200)
+                .json_body(serde_json::json!({ "access_token": "fresh-token-bbbb" }));
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/accounts/verify_credentials");
+            then.status(200).json_body(serde_json::json!({
+                "acct": "alice",
+                "avatar": "http://avatar.example/alice.png",
+            }));
+        })
+        .await;
+
+    let app = fedifetcher::web::app_with_scheme(config, pool.clone(), "http");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let base = format!("http://{addr}");
+
+    // the reconnect dance: connect names the same server, the instance
+    // approves, the callback trades the code
+    let resp = client()
+        .post(format!("{base}/oauth/connect"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("server={instance_host}"))
+        .send()
+        .await
+        .unwrap();
+    let authorize_url = resp.headers().get("Location").unwrap().to_str().unwrap();
+    let authorize = url::Url::parse(authorize_url).unwrap();
+    let state = authorize
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+        .unwrap();
+    let cookie = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .find_map(|value| {
+            let text = value.to_str().ok()?;
+            text.starts_with("ff_oauth_state=")
+                .then(|| text.split(';').next().unwrap_or_default().to_string())
+        })
+        .unwrap();
+
+    let resp = client()
+        .get(format!(
+            "{base}/oauth/callback?code=the-dance-code&state={state}"
+        ))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+
+    let saved = saved_config(&pool).await;
+    assert_eq!(
+        saved.access_tokens,
+        vec!["fresh-token-bbbb".to_string()],
+        "the fresh token replaced the dead one"
+    );
+    assert!(
+        fedifetcher::db::oauth_account(&pool, "dead-token-aaaa")
+            .await
+            .unwrap()
+            .is_none(),
+        "the dead token's row is gone"
+    );
+    let row = fedifetcher::db::oauth_account(&pool, "fresh-token-bbbb")
+        .await
+        .unwrap()
+        .expect("the fresh row is recorded");
+    assert!(!row.needs_reconnect, "the fresh token needs no reconnect");
+}

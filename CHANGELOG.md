@@ -1,3 +1,29 @@
+## 1.2.20
+
+Add the reconnect lifecycle: a dead token asks to be re-authorized.
+
+Task 4 of the OAuth onboarding plan, TDD: what happens after a connect.
+
+The run loop's per-token site is where a token's death surfaces: a task
+failing with the instance's Status code: 401 answer marks that token's
+oauth_accounts row needs_reconnect (matched by the token in hand, no
+network ask; 403s and network errors keep today's behavior, and the
+run still fails as it always has). The config page's row renders a
+Reconnect button for a marked account — the same dance, its server
+prefilled — and the callback now supersedes: a re-authorization of an
+account we already hold removes that account's older tokens from
+access_tokens and drops their rows, so the fresh token replaces the
+dead one and the mark goes with it. Connecting a brand-new account is
+unchanged: nothing to supersede, nothing stale.
+
+The run path needed the same scheme treatment the rest of the codebase
+got in 1.2.9: run_once_with_scheme (the listen_with_scheme pattern)
+lets the test point a real run at httpmock — the instance refuses the
+lists task with 401 and the row ends marked — while run_once stays
+https and the binary's behavior is unchanged.
+
+375 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.19
 
 Add the connected-accounts section and Disconnect.

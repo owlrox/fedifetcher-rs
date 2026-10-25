@@ -477,6 +477,17 @@ pub async fn oauth_accounts_by_acct(
     Ok(rows.iter().map(connected_account_row).collect())
 }
 
+/// Mark (or clear) that an instance rejected a connected account's token:
+/// the run loop's 401s speak here, the config page's row renders it.
+pub async fn mark_oauth_needs_reconnect(pool: &SqlitePool, token: &str, needs: bool) -> Result<()> {
+    sqlx::query("UPDATE oauth_accounts SET needs_reconnect = ? WHERE token = ?")
+        .bind(needs)
+        .bind(token)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Forget a connected account's row; its token is being removed.
 pub async fn delete_oauth_account(pool: &SqlitePool, token: &str) -> Result<()> {
     sqlx::query("DELETE FROM oauth_accounts WHERE token = ?")
