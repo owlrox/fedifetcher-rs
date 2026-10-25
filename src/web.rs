@@ -26,6 +26,7 @@ use crate::db::{self, LogOrder, LogRow, LogSort, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
+use crate::oauth;
 use crate::run::{CancelToken, Context, Pause, run_once};
 use crate::store::{State, StateStore, lock};
 use crate::stream;
@@ -69,6 +70,8 @@ const TABLE_ROWS_SHOWN: i64 = 500;
 struct AppState {
     /// The effective config; replaced when the config page saves.
     config: Mutex<Config>,
+    /// The client the OAuth handlers speak to the instance with.
+    http: HttpClient,
     /// The database everything is stored in: the configuration, the state,
     /// the log lines, the run history.
     db: SqlitePool,
@@ -126,8 +129,17 @@ pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std
 /// manual fetch trigger, logs, the editable config page, the debug page,
 /// and the health check.
 pub fn app(config: Config, db: SqlitePool) -> Router {
+    app_with_scheme(config, db, "https")
+}
+
+/// The web UI's router with its instance client pointed at `scheme`.
+/// Production always uses `app` (https); tests point the OAuth dance at a
+/// local http server.
+pub fn app_with_scheme(config: Config, db: SqlitePool, scheme: &'static str) -> Router {
+    let http = HttpClient::with_scheme(config.clone(), db.clone(), scheme);
     let state = Arc::new(AppState {
         config: Mutex::new(config),
+        http,
         db,
         run_guard: Arc::new(AsyncMutex::new(())),
         cancel: CancelToken::new(),
@@ -147,6 +159,8 @@ pub fn app(config: Config, db: SqlitePool) -> Router {
         .route("/logs", get(logs))
         .route("/logs/clear", post(clear_logs))
         .route("/config", get(config_page).post(save_config))
+        .route("/oauth/connect", post(oauth_connect))
+        .route("/oauth/callback", get(oauth_callback))
         .route("/debug", get(debug_page).post(debug_post))
         .route("/about", get(about))
         .route("/healthz", get(healthz))
@@ -733,6 +747,147 @@ async fn save_config(
     );
     *state.config.lock().unwrap() = config;
     Ok(Redirect::to("/config"))
+}
+
+/// The cookie the OAuth dance's state rides in: set when connect sends the
+/// user to the instance, checked and cleared when the instance redirects
+/// back. Short-lived; only the dance reads it.
+const OAUTH_STATE_COOKIE: &str = "ff_oauth_state";
+
+/// Start the dance: register the app on the named server (from the cache
+/// when it is registered already) and send the user to the instance's own
+/// consent screen, carrying a state only we know. No JavaScript anywhere:
+/// a form post, a cookie, a 303.
+async fn oauth_connect(
+    AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<axum::response::Response, (StatusCode, Html<String>)> {
+    let live = live_updates(&headers);
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let server = pairs
+        .iter()
+        .find(|(key, _)| key == "server")
+        .map(|(_, value)| value.trim().to_lowercase())
+        .unwrap_or_default();
+    if server.is_empty() {
+        return Err(save_error(
+            &state,
+            StatusCode::BAD_REQUEST,
+            "the server to connect to is missing",
+            live,
+        )
+        .await);
+    }
+
+    let origin = oauth::public_origin(&headers);
+    let http = state.http.ignoring_robots();
+    let app = match oauth::registered_app(&state.db, &server, &http, &origin).await {
+        Ok(app) => app,
+        Err(ex) => {
+            return Err(save_error(&state, StatusCode::BAD_REQUEST, &ex.to_string(), live).await);
+        }
+    };
+
+    let oauth_state = uuid::Uuid::new_v4().to_string();
+    let authorize = oauth::authorize_url(&app, state.http.scheme(), &origin, &oauth_state);
+    // the cookie remembers both the state and the server the dance is on
+    // with: the instance's redirect back carries only the code and state
+    let cookie = format!(
+        "{OAUTH_STATE_COOKIE}={oauth_state}|{server}; Path=/; Max-Age=600; HttpOnly; SameSite=Lax"
+    );
+    Ok(([(header::SET_COOKIE, cookie)], Redirect::to(&authorize)).into_response())
+}
+
+/// The instance came back: check the state against the cookie, trade the
+/// code for a token, learn whose it is, and connect the account — the
+/// token joins access_tokens and round-trips like a pasted one.
+async fn oauth_callback(
+    AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, (StatusCode, Html<String>)> {
+    let live = live_updates(&headers);
+    let clear_state = format!("{OAUTH_STATE_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax");
+    let back = |what: &str| {
+        (
+            [(header::SET_COOKIE, clear_state.clone())],
+            Redirect::to(&format!("/config?oauth={what}")),
+        )
+            .into_response()
+    };
+
+    // the instance says the user refused: nothing is added
+    if params.contains_key("error") {
+        return Ok(back("denied"));
+    }
+    // the state must match the cookie the dance started with; a mismatch
+    // (or a callback with no dance behind it at all) is not ours. The
+    // cookie also names the server the dance is on with.
+    let Some(dance) = cookie_value(&headers, OAUTH_STATE_COOKIE) else {
+        return Ok(back("expired"));
+    };
+    let Some((oauth_state, server)) = dance.split_once('|') else {
+        return Ok(back("expired"));
+    };
+    if oauth_state != params.get("state").map(String::as_str).unwrap_or_default() {
+        return Ok(back("expired"));
+    }
+    let Some(code) = params.get("code") else {
+        return Ok(back("failed"));
+    };
+    let server = server.to_lowercase();
+
+    let origin = oauth::public_origin(&headers);
+    let http = state.http.ignoring_robots();
+    let app = match oauth::registered_app(&state.db, &server, &http, &origin).await {
+        Ok(app) => app,
+        Err(ex) => {
+            return Err(save_error(&state, StatusCode::BAD_REQUEST, &ex.to_string(), live).await);
+        }
+    };
+    let (token, account) = match oauth::exchange_code(&http, &app, &origin, code).await {
+        Ok(connected) => connected,
+        Err(ex) => {
+            return Err(save_error(&state, StatusCode::BAD_REQUEST, &ex.to_string(), live).await);
+        }
+    };
+
+    let mut config = state.config.lock().unwrap().clone();
+    if !config.access_tokens.contains(&token) {
+        config.access_tokens.push(token.clone());
+    }
+    if let Err(ex) = db::save_config(&state.db, &config.to_raw_values()).await {
+        return Err(save_error(
+            &state,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &ex.to_string(),
+            live,
+        )
+        .await);
+    }
+    if let Err(ex) = db::save_oauth_account(
+        &state.db,
+        &token,
+        &app.server,
+        &account.acct,
+        &account.avatar,
+    )
+    .await
+    {
+        return Err(save_error(
+            &state,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &ex.to_string(),
+            live,
+        )
+        .await);
+    }
+    *state.config.lock().unwrap() = config;
+
+    Ok(back("connected"))
 }
 
 /// Options whose empty form field means "unset".

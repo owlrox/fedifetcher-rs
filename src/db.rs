@@ -159,6 +159,18 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS oauth_accounts (
+            token TEXT PRIMARY KEY,
+            server TEXT NOT NULL,
+            acct TEXT NOT NULL,
+            avatar TEXT NOT NULL,
+            connected_at TEXT NOT NULL,
+            needs_reconnect INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS oauth_apps (
             server TEXT PRIMARY KEY,
             client_id TEXT NOT NULL,
@@ -406,6 +418,58 @@ pub async fn save_oauth_app(
     .bind(server)
     .bind(client_id)
     .bind(client_secret)
+    .bind(crate::timeutil::fmt_state_ts(crate::timeutil::now()))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// A connected account, as the OAuth flow and the runs leave it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OauthAccountRow {
+    pub token: String,
+    pub server: String,
+    pub acct: String,
+    pub avatar: String,
+    pub needs_reconnect: bool,
+}
+
+/// The connected account a token belongs to, if it was connected by OAuth.
+pub async fn oauth_account(pool: &SqlitePool, token: &str) -> Result<Option<OauthAccountRow>> {
+    let row = sqlx::query(
+        "SELECT token, server, acct, avatar, needs_reconnect
+         FROM oauth_accounts WHERE token = ?",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|row| OauthAccountRow {
+        token: row.get("token"),
+        server: row.get("server"),
+        acct: row.get("acct"),
+        avatar: row.get("avatar"),
+        needs_reconnect: row.get::<i64, _>("needs_reconnect") != 0,
+    }))
+}
+
+/// Record a freshly connected account.
+pub async fn save_oauth_account(
+    pool: &SqlitePool,
+    token: &str,
+    server: &str,
+    acct: &str,
+    avatar: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO oauth_accounts (token, server, acct, avatar, connected_at, needs_reconnect)
+         VALUES (?, ?, ?, ?, ?, 0)
+         ON CONFLICT(token) DO UPDATE SET acct = excluded.acct,
+         avatar = excluded.avatar, needs_reconnect = 0",
+    )
+    .bind(token)
+    .bind(server)
+    .bind(acct)
+    .bind(avatar)
     .bind(crate::timeutil::fmt_state_ts(crate::timeutil::now()))
     .execute(pool)
     .await?;

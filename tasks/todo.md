@@ -5,20 +5,24 @@ docs/ideas/oauth-onboarding.md
 
 ## Phase 1: The connect dance
 
-- [ ] Task 1: `src/oauth.rs` — app registration and the authorize redirect
+- [x] Task 1: `src/oauth.rs` — app registration and the authorize redirect
   - Acceptance: registration cached per server in `oauth_apps`;
     `authorize_url()` carries client_id, three scopes, state, redirect_uri;
     cached registrations are reused
   - Verify: `cargo test --test oauth_integration`; gates
   - Files: src/oauth.rs, src/db.rs, tests/oauth_integration.rs
-- [ ] Task 2: Callback route, exchange, and denial
+- [x] Task 2: Callback route, exchange, and denial
   - Acceptance: state checked, code exchanged, account appended and
     listed; denial and state mismatch add nothing and say so
   - Verify: full-dance e2e over httpmock; gates
   - Files: src/web.rs, src/oauth.rs, src/db.rs, tests/oauth_integration.rs
 
 ## Checkpoint: the dance works end-to-end
-- [ ] Gates pass; deployed-shape origin validated behind a proxy
+- [x] Gates pass; origin consistency behind a proxy validated with
+      forwarded headers in the oauth suite (a real reverse proxy re-check
+      remains a deploy-time step)
+- [x] Task 2's e2e dance covers register → redirect → callback →
+      exchange → verify → token in access_tokens
 
 ## Phase 2: Account management
 

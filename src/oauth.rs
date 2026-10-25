@@ -74,6 +74,83 @@ pub async fn registered_app(
     Ok(app)
 }
 
+/// The account a token belongs to, as the instance spells it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectedAccount {
+    pub acct: String,
+    pub avatar: String,
+}
+
+/// Trade the approval code for an access token, and learn whose it is.
+pub async fn exchange_code(
+    http: &HttpClient,
+    app: &RegisteredApp,
+    origin: &str,
+    code: &str,
+) -> Result<(String, ConnectedAccount)> {
+    let form = [
+        ("client_id".to_string(), app.client_id.clone()),
+        ("client_secret".to_string(), app.client_secret.clone()),
+        (
+            "redirect_uri".to_string(),
+            format!("{origin}/oauth/callback"),
+        ),
+        ("grant_type".to_string(), "authorization_code".to_string()),
+        ("code".to_string(), code.to_string()),
+    ];
+    let url = format!(
+        "{scheme}://{server}/oauth/token",
+        scheme = http.scheme(),
+        server = app.server
+    );
+    let resp = http.post_form(&url, &form, None).await?;
+    if resp.status != 200 {
+        return Err(Error::Fetch(format!(
+            "trading the approval code for a token failed with status {}",
+            resp.status
+        )));
+    }
+    let answer: Value = resp.json()?;
+    let token = answer
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Fetch("the token answer has no access_token".to_string()))?;
+
+    let who = http
+        .get(
+            &format!(
+                "{scheme}://{server}/api/v1/accounts/verify_credentials",
+                scheme = http.scheme(),
+                server = app.server
+            ),
+            None,
+        )
+        .await?;
+    if who.status != 200 {
+        return Err(Error::Fetch(format!(
+            "checking whose token it is failed with status {}",
+            who.status
+        )));
+    }
+    let who: Value = who.json()?;
+    let acct = who
+        .get("acct")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Fetch("the credentials answer has no acct".to_string()))?;
+    let avatar = who
+        .get("avatar")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    Ok((
+        token.to_string(),
+        ConnectedAccount {
+            acct: acct.to_string(),
+            avatar: avatar.to_string(),
+        },
+    ))
+}
+
 /// The instance's own consent screen, pointed at with everything the dance
 /// needs. The scheme is the http client's: https in production, and http
 /// when the tests play the instance.

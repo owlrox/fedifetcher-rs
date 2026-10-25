@@ -1,3 +1,39 @@
+## 1.2.18
+
+Add the OAuth callback: the code is traded and the account connects.
+
+Task 2 of the OAuth onboarding plan, TDD: the dance's web side.
+
+POST /oauth/connect registers the app on the named server (cache-first,
+from Task 1), generates a fresh state, and 303s the user to the
+instance's own consent screen — setting the ff_oauth_state cookie
+(HttpOnly, SameSite=Lax, ten minutes) which remembers both the state
+and the server the dance is on with, because the instance's redirect
+back carries only the code and the state.
+
+GET /oauth/callback refuses anything that is not the dance we started:
+a state mismatch, a missing cookie, or the instance reporting a denied
+consent each land back on /config with the reason in the query string
+(?oauth=denied|expired|failed) and nothing added. A real callback
+trades the code at /oauth/token, asks verify_credentials whose token it
+is, appends the token to access_tokens (the same mutex swap
+save_config does), records the account row in the new oauth_accounts
+table, clears the state cookie, and 303s back with ?oauth=connected.
+
+The web app's AppState now holds the instance client the OAuth handlers
+speak through: app_with_scheme builds it (production app() keeps
+https), which is also how the tests point the whole dance at httpmock.
+The oauth handlers' requests ignore robots.txt, as the home server's
+own calls do.
+
+The e2e test walks the dance from the browser's seat: connect →
+authorize URL's state carried to the callback → token in access_tokens
+→ account row recorded; plus denial, forged state, and — behind
+forwarded headers — both ends of the dance naming the public origin,
+the plan's origin-validation checkpoint. A real reverse-proxy recheck
+remains a deploy-time step. 368 tests pass; clippy -D warnings and fmt
+clean.
+
 ## 1.2.17
 
 Add the OAuth app registration and the authorize redirect.
