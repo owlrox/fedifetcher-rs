@@ -26,6 +26,15 @@ End the commit subject with the version in parentheses — `Some change
 (1.1.4)` — so the message and `Cargo.toml` can be checked against each
 other (`git show <commit>:Cargo.toml`).
 
+Every version commit also updates `CHANGELOG.md`: run `./changelog.sh`
+to regenerate it from the commit history and commit the result with the
+bump. The changelog holds one section per version — the write-ups of
+the commits that carried it — so the commit message is the changelog
+entry; there is nothing separate to write. A commit subject without the
+version suffix falls back to the `Cargo.toml` committed with it, which
+is how the pre-1.0.5 history (and 1.0.25, whose subject forgot the
+suffix) lands in the right section.
+
 ## Style
 
 Follow the Rust style guide (https://doc.rust-lang.org/style-guide/):

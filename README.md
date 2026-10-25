@@ -260,6 +260,10 @@ Present in the Mastodon source (`config/routes/api.rb` and its controllers), abs
 
 Considered and not planned: `annual_reports`, `donation_campaigns`, `collections`, `web/*`, `accounts/:id/note`, `accounts/:id/email_subscriptions`, `statuses/:id/interaction_policy`, `conversations/:id/unread`, `instance/languages`, and `domain_blocks/preview` — present in the source but not useful for fetching context. Also confirmed removed on current servers: `GET /api/v1/search`, `GET /api/v1/statuses/:id/card` (the card is a field of the Status JSON), and `GET /api/v1/timelines/direct`.
 
+## Changelog
+
+Versions and their write-ups are collected in [CHANGELOG.md](CHANGELOG.md), one section per version, newest first.
+
 ## License
 
 FediFetcher-rs is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License](https://www.gnu.org/licenses/gpl-3.0.html) as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. The full text ships as `LICENSE`.
