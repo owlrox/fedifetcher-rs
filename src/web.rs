@@ -1942,8 +1942,8 @@ header .run form { margin: 0; }
 header .run button { font-size: 0.8rem; padding: 0.1rem 0.6rem; }
 header a.live { color: #9cf; border: 1px solid rgba(153, 204, 255, 0.4); border-radius: 0.4rem; padding: 0.1rem 0.6rem; text-decoration: none; white-space: nowrap; }
 nav.tabs { gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #8884; margin-bottom: 1.5rem; }
-nav.tabs a { color: #06c; text-decoration: none; padding-bottom: 0.25rem; }
-nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
+nav.tabs a { color: #06c; text-decoration: none; padding: 0.15rem 0.6rem 0.25rem; border-radius: 0.4rem 0.4rem 0 0; }
+nav.tabs a.active { color: inherit; font-weight: 600; background: #8881; border-bottom: 2px solid currentColor; }
 main { padding: 1rem 1.5rem; max-width: 64rem; }
 section { margin-bottom: 1.75rem; }
 h2 { font-size: 1rem; }
