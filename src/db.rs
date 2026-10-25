@@ -159,6 +159,16 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS oauth_apps (
+            server TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            client_secret TEXT NOT NULL,
+            registered_at TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS seen_urls (
             uri TEXT PRIMARY KEY,
             first_seen TEXT NOT NULL
@@ -358,6 +368,50 @@ pub async fn load_config(pool: &SqlitePool) -> Result<RawValues> {
 
 /// Replace the stored configuration: options absent from `values` are
 /// cleared, so an unset option stays unset when the config is read back.
+/// The app registered on a server, if it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OauthAppRow {
+    pub server: String,
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// The app registered on the given server, if it is.
+pub async fn oauth_app(pool: &SqlitePool, server: &str) -> Result<Option<OauthAppRow>> {
+    let row =
+        sqlx::query("SELECT server, client_id, client_secret FROM oauth_apps WHERE server = ?")
+            .bind(server)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|row| OauthAppRow {
+        server: row.get("server"),
+        client_id: row.get("client_id"),
+        client_secret: row.get("client_secret"),
+    }))
+}
+
+/// Remember the app registration for a server, replacing any earlier one.
+pub async fn save_oauth_app(
+    pool: &SqlitePool,
+    server: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO oauth_apps (server, client_id, client_secret, registered_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(server) DO UPDATE SET client_id = excluded.client_id,
+         client_secret = excluded.client_secret, registered_at = excluded.registered_at",
+    )
+    .bind(server)
+    .bind(client_id)
+    .bind(client_secret)
+    .bind(crate::timeutil::fmt_state_ts(crate::timeutil::now()))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn save_config(pool: &SqlitePool, values: &RawValues) -> Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM config").execute(&mut *tx).await?;

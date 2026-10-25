@@ -1,3 +1,32 @@
+## 1.2.17
+
+Add the OAuth app registration and the authorize redirect.
+
+Task 1 of the OAuth onboarding plan, TDD: the RED test named
+fedifetcher::oauth and did not compile; this makes it pass.
+
+src/oauth.rs speaks the first half of the authorization-code flow:
+registered_app registers FediFetcher-rs on an instance with
+POST /api/v1/apps (name, callback redirect_uris, the three scopes) and
+caches the client credentials in the new oauth_apps table — asked once
+per server, never once per visit. authorize_url builds the instance's
+own consent-screen URL with every parameter the dance needs: client_id,
+redirect_uri, response_type, scope, state. public_origin derives the
+public origin the instance must redirect back to from the forwarding
+headers a reverse proxy sets, falling back to the request's own Host —
+one function, used identically at registration and at the callback, so
+the two redirect URIs cannot disagree. The instance scheme follows the
+http client's, like every lookup since 1.2.9.
+
+HttpClient gains post_form: urlencoded POST on the same robots and 429
+cooldown path as get, by generalizing the private request into a Body
+enum (none, JSON, form) rather than duplicating the retry logic.
+
+tests/oauth_integration.rs: httpmock plays the instance; the
+registration request's form fields, the registration-once cache
+behavior, the authorize URL's pieces, and the forwarding-header origin
+are each asserted. 364 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.16
 
 Plan the OAuth onboarding implementation.

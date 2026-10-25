@@ -20,6 +20,14 @@ use crate::robots::RobotFileParser;
 use crate::timeutil;
 use crate::urls::{netloc_of, scheme_of};
 
+/// The body a request carries: nothing, JSON, or a pre-encoded urlencoded
+/// form.
+enum Body<'a> {
+    None,
+    Json(&'a Value),
+    Form(String),
+}
+
 /// A response with the body already read: FediFetcher never streams.
 pub struct Response {
     pub status: u16,
@@ -184,7 +192,7 @@ impl HttpClient {
     /// limits. A 429 is retried along the configured cooldown series: one wait
     /// per entry of `rate_limit_cooldown`, in order, until the series runs out.
     pub async fn get(&self, url: &str, timeout: Option<Duration>) -> Result<Response> {
-        self.request(Method::GET, url, None, timeout, true).await
+        self.send(Method::GET, url, Body::None, timeout, true).await
     }
 
     /// Make a post request while providing our user agent, and respecting
@@ -195,7 +203,23 @@ impl HttpClient {
         json: &Value,
         timeout: Option<Duration>,
     ) -> Result<Response> {
-        self.request(Method::POST, url, Some(json), timeout, true)
+        self.send(Method::POST, url, Body::Json(json), timeout, true)
+            .await
+    }
+
+    /// POST a urlencoded form — OAuth's registration and token exchange —
+    /// while providing our user agent, and respecting rate limits, on the
+    /// same cooldown series as `get`.
+    pub async fn post_form(
+        &self,
+        url: &str,
+        form: &[(String, String)],
+        timeout: Option<Duration>,
+    ) -> Result<Response> {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(form)
+            .finish();
+        self.send(Method::POST, url, Body::Form(body), timeout, true)
             .await
     }
 
@@ -228,7 +252,7 @@ impl HttpClient {
 
     /// Get the URL the given URL redirects to.
     pub async fn get_redirect_url(&self, url: &str) -> Option<String> {
-        let response = match self.request(Method::HEAD, url, None, None, false).await {
+        let response = match self.send(Method::HEAD, url, Body::None, None, false).await {
             Ok(response) => response,
             Err(ex) => {
                 tracing::error!("Error getting redirect URL for URL {url}. Exception: {ex}");
@@ -253,11 +277,11 @@ impl HttpClient {
         None
     }
 
-    async fn request(
+    async fn send(
         &self,
         method: Method,
         url: &str,
-        json: Option<&Value>,
+        body: Body<'_>,
         timeout: Option<Duration>,
         allow_redirects: bool,
     ) -> Result<Response> {
@@ -310,8 +334,17 @@ impl HttpClient {
                 .request(method.clone(), url)
                 .headers(headers.clone())
                 .timeout(timeout);
-            if let Some(json) = json {
-                request = request.json(json);
+            match &body {
+                Body::None => {}
+                Body::Json(json) => request = request.json(json),
+                Body::Form(form) => {
+                    request = request
+                        .header(
+                            reqwest::header::CONTENT_TYPE,
+                            "application/x-www-form-urlencoded",
+                        )
+                        .body(form.clone());
+                }
             }
             let response = request.send().await.map_err(|ex| Error::Http {
                 url: url.to_string(),
