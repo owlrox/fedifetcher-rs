@@ -1,8 +1,11 @@
 //! The real binary, as a process: the command line's two modes, the web
 //! UI's startup, and what serve does to a run history it finds on disk.
 //! The tests point the child at its own state directory through
-//! XDG_STATE_HOME, pre-seed its database where a test needs to, and assert
-//! on what the child left behind.
+//! XDG_STATE_HOME — with HOME pointed into the same sandbox behind it —
+//! pre-seed its database where a test needs to, and assert on what the
+//! child left behind. The sandboxing is canaried: if default_state_dir's
+//! precedence ever changes, the tests say so instead of failing on a
+//! missing row, and nothing is written into the developer's real state.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -40,16 +43,41 @@ async fn state_db(tmp: &std::path::Path) -> (Config, sqlx::SqlitePool) {
     (config, db)
 }
 
-/// The binary, run as a child process with its own state home.
+/// The binary, run as a child process with its own state home. HOME is
+/// pointed into the sandbox too: default_state_dir falls back to
+/// ~/.local/state/fedifetcher when XDG_STATE_HOME is not honored, and that
+/// fallback must land in the test's own directory, never in the real one.
 fn child(tmp: &std::path::Path, args: &[&str]) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_fedifetcher"));
     command
         .args(args)
         .env("XDG_STATE_HOME", tmp.join("xdg"))
+        .env("HOME", tmp.join("home"))
         .current_dir(tmp)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
+}
+
+/// The child must have resolved its state through XDG_STATE_HOME: neither
+/// the legacy artifacts/ directory of its working directory (which
+/// default_state_dir prefers over everything else) nor its HOME fallback
+/// may hold state. If either fires, the seeding in these tests no longer
+/// matches what the binary opens, and the test says which assumption
+/// broke instead of failing later on a missing row.
+fn assert_state_stayed_in_the_sandbox(tmp: &std::path::Path) {
+    assert!(
+        !tmp.join("artifacts").exists(),
+        "the child resolved its state to the legacy artifacts/ directory in \
+         its working directory: default_state_dir's precedence changed, and \
+         these tests seed a different database than the binary opens"
+    );
+    assert!(
+        !tmp.join("home").join(".local").exists(),
+        "the child resolved its state through HOME: XDG_STATE_HOME is not \
+         being honored, and these tests seed a different database than the \
+         binary opens"
+    );
 }
 
 /// A port nothing is listening on yet.
@@ -75,14 +103,16 @@ async fn healthz(base: &str) -> String {
     panic!("the web UI never answered {base}/healthz");
 }
 
-/// Stop a spawned web UI, and say whether it stayed up until we did.
-async fn stop_ui(mut ui: Child) {
+/// Stop a spawned web UI, say whether it stayed up until we did, and that
+/// its state stayed in the sandbox.
+async fn stop_ui(tmp: &std::path::Path, mut ui: Child) {
     ui.kill().await.unwrap();
     let status = ui.wait().await.unwrap();
     assert!(
         status.code().is_none() || !status.success(),
         "the web UI should have been killed, not exited on its own"
     );
+    assert_state_stayed_in_the_sandbox(tmp);
 }
 
 #[tokio::test]
@@ -119,6 +149,7 @@ async fn a_run_with_a_saved_config_runs_once_and_exits_clean() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    assert_state_stayed_in_the_sandbox(&tmp);
     let db = db::open(&config).await.unwrap();
     let runs = db::recent_runs(&db, 10).await.unwrap();
     assert_eq!(runs.len(), 1, "the run recorded itself in the history");
@@ -144,6 +175,7 @@ async fn a_run_without_a_config_is_refused() {
         stderr.starts_with("CRITICAL:FediFetcher:"),
         "the refusal is critical: {stderr}"
     );
+    assert_state_stayed_in_the_sandbox(&tmp);
 }
 
 /// The web UI answers when no configuration exists at all (the config page
@@ -181,7 +213,7 @@ async fn serve_answers_without_a_config_and_sweeps_a_dead_runs_row() {
     );
     drop(db);
 
-    stop_ui(ui).await;
+    stop_ui(&tmp, ui).await;
 }
 
 /// Streaming without a configured server or token is refused with a warning,
@@ -227,7 +259,7 @@ async fn serve_warns_and_skips_streaming_without_a_server() {
     );
     drop(db);
 
-    stop_ui(ui).await;
+    stop_ui(&tmp, ui).await;
 }
 
 /// Streaming with a server and token starts the listener.
@@ -252,7 +284,7 @@ async fn serve_starts_the_stream_listener_when_the_config_asks() {
         .unwrap();
     let body = healthz(&format!("http://127.0.0.1:{port}")).await;
     assert_eq!(body, "ok");
-    stop_ui(ui).await;
+    stop_ui(&tmp, ui).await;
 }
 
 /// A port that is already taken is reported as an error, with a failed exit.
@@ -276,4 +308,5 @@ async fn serve_on_a_taken_port_fails_with_the_reason() {
         stderr.contains("ERROR:FediFetcher:") && stderr.contains("os error"),
         "the bind failure names itself: {stderr}"
     );
+    assert_state_stayed_in_the_sandbox(&tmp);
 }

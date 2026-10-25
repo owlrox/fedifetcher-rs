@@ -1,3 +1,26 @@
+## 1.2.11
+
+Canary the binary tests' state-resolution assumptions.
+
+The binary tests pointed the child at its state through XDG_STATE_HOME
+and assumed its working directory held no artifacts/ directory. Both
+held, but a failure would have surfaced as a missing run row pointing
+at nothing — and if XDG_STATE_HOME support ever disappeared, the child
+would have fallen through to the real ~/.local/state/fedifetcher and
+written there.
+
+Now HOME is pointed into the same sandbox behind XDG_STATE_HOME, and
+every test that runs the binary's main body ends with a canary: neither
+a legacy artifacts/ directory in the child's working directory nor a
+.local tree under its HOME may hold state. If default_state_dir's
+precedence ever changes, the test names the broken assumption instead
+of failing later on a missing row, and nothing escapes into the
+developer's real state. The precedence claim itself was verified
+against the real binary: with artifacts/ present the database lands
+there, without it under XDG_STATE_HOME, exactly as the tests seed it.
+
+cargo test (360, all green), clippy -D warnings and fmt pass.
+
 ## 1.2.10
 
 Test the binary as a process and Lemmy's failures, closing the audit.
