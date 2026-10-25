@@ -1,3 +1,14 @@
+## 1.3.10
+
+Move the big test modules into sibling tests.rs files.
+
+db, config, stream, robots, servers, store, state and http each keep a
+one-line `#[cfg(test)] mod tests;` pointer, with their tests in
+`src/<name>/tests.rs` — still a child module, so private items stay
+reachable and nothing is published for the tests' sake. The smaller
+modules keep their tests inline. No behavior change; the suite is
+untouched at 454 tests.
+
 ## 1.3.9
 
 Cover the last reachable arms, document the deliberate remainder.
