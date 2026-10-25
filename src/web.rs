@@ -1810,7 +1810,7 @@ fn text_row(name: &str, value: &str) -> AnyView {
     let tooltip = option_description(name);
     view! {
         <tr>
-            <td><code>{name.to_string()}</code></td>
+            <td title={tooltip.clone()}><code>{name.to_string()}</code></td>
             <td><input type="text" name={name.to_string()} value={value.to_string()} title=tooltip/></td>
         </tr>
     }
@@ -1823,7 +1823,7 @@ fn int_row(name: &str, value: i64) -> AnyView {
     let tooltip = option_description(name);
     view! {
         <tr>
-            <td><code>{name.to_string()}</code></td>
+            <td title={tooltip.clone()}><code>{name.to_string()}</code></td>
             <td><input type="number" name={name.to_string()} value={value.to_string()} title=tooltip/></td>
         </tr>
     }
@@ -1847,7 +1847,7 @@ fn bool_row(name: &str, value: bool) -> AnyView {
     };
     view! {
         <tr>
-            <td><code>{name.to_string()}</code></td>
+            <td title={tooltip.clone()}><code>{name.to_string()}</code></td>
             <td>
                 <select name={name.to_string()} title=tooltip>
                     {yes}
@@ -1881,9 +1881,10 @@ fn tokens_row(config: &Config) -> AnyView {
             .into_any()
         })
         .collect();
+    let tooltip = option_description("access_tokens");
     view! {
         <tr>
-            <td><code>"access_tokens"</code></td>
+            <td title={tooltip}><code>"access_tokens"</code></td>
             <td>
                 {if items.is_empty() {
                     view! { <p class="muted">"No access tokens set."</p> }.into_any()
@@ -1907,7 +1908,7 @@ fn log_level_row(value: &str) -> AnyView {
     let tooltip = option_description("log_level");
     view! {
         <tr>
-            <td><code>"log_level"</code></td>
+            <td title={tooltip.clone()}><code>"log_level"</code></td>
             <td>
                 <select name="log_level" title=tooltip>
                     {levels

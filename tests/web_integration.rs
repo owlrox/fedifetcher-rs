@@ -3292,3 +3292,22 @@ async fn the_top_bar_is_a_grey_gradient() {
         "the header's text is light on the dark bar: {page}"
     );
 }
+
+/// Hovering an option's name shows the same tooltip as its field: the
+/// description rides on the name's cell too.
+#[tokio::test]
+async fn the_config_names_carry_the_same_tooltip_as_their_fields() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, _db) = spawn_ui_with(config).await;
+
+    let (status, page) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    let description =
+        fedifetcher::config::option_description("http_timeout").expect("the option is documented");
+    let prefix: String = description.chars().take(24).collect();
+    assert!(
+        page.contains(&format!("<td title=\"{prefix}")),
+        "the name cell carries the field's tooltip: {page}"
+    );
+}
