@@ -1,3 +1,25 @@
+## 1.2.16
+
+Plan the OAuth onboarding implementation.
+
+tasks/plan.md and tasks/todo.md break SPEC-oauth-onboarding.md into
+five tasks across three phases, each with acceptance criteria,
+verification, files, and size. The architecture decisions the plan
+fixes: no OAuth crate (three HTTPS calls on the existing HttpClient,
+new src/oauth.rs); origin detection from proxy headers by one function
+used identically at registration and callback, with the explicit
+public-URL field held as the ask-first fallback; CSRF state in one new
+short-lived SameSite=Lax cookie; the token single-sourced in
+access_tokens with oauth_accounts holding metadata plus the token for
+secret-safe 401-to-row matching; index-based token removal staying
+authoritative with oauth_accounts rows cleaned up when it fires; and
+401 marking riding the existing per-token call site rather than a new
+error variant. Risks tabled with mitigations, the origin question
+deliberately scheduled as Task 2's checkpoint before Phase 2 builds on
+it.
+
+cargo test (360), clippy -D warnings and fmt pass.
+
 ## 1.2.15
 
 Write the OAuth onboarding spec.
