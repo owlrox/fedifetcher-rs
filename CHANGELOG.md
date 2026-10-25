@@ -1,3 +1,11 @@
+## 1.3.5
+
+Drop the unused leptos_axum dependency.
+
+It was never referenced: pages are rendered with leptos' own to_html
+inside plain axum handlers, and AxumState is axum::extract::State
+renamed. Removing it takes 25 crates out of the lockfile.
+
 ## 1.3.4
 
 Test connection picks which account or token to test.
