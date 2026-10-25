@@ -1,3 +1,122 @@
+## 1.3.18
+
+Drop the debug tab's cleanup blurb, count only the biggest tables.
+
+The database section keeps its size line and its buttons; the row
+counts now cover only the five tables that take the most space in the
+database file, measured from SQLite's dbstat pages (ties broken by
+name, and the write-ahead log is not read, so the reading is of the
+checkpointed file). Empty tables occupy their root page and so tie at
+one page — hence the name tiebreaker for a fresh database.
+
+## 1.3.17
+
+Keep the OAuth tables off the Data page.
+
+The Data page's tabs already skipped logs and config, which have pages
+of their own; the two OAuth tables now stay off the tabs too, since
+their rows are tokens and app secrets, not data to browse. A tab name
+asking for either falls back to the hosts tab, whatever rows the tables
+hold. The data-page test seeds both OAuth tables and pins the missing
+tabs and the fallback.
+
+## 1.3.16
+
+The Debug tab offers Trim 10% before Clean up DB.
+
+The gentler action first, the destructive one second — the same order
+they should be tried in.
+
+## 1.3.15
+
+Add a Trim 10% button next to Clean up DB on the Debug tab.
+
+Trim 10% works over the same tables a cleanup empties, but takes only
+the oldest tenth of each: the report line, the same tables' rows, and
+nothing else. A tenth rounds down, so a table with fewer than ten rows
+loses nothing, and the kept tables — config, oauth_accounts,
+oauth_apps — are never touched. The freed space is vacuumed back to
+the filesystem, as a cleanup does.
+
+db::trim runs one static count/delete pair per table (sqlx audits
+dynamic SQL), ordering each by its own age column — id for the logs
+and the runs, the timestamp columns for the rest, rowid for
+replied_toots, which has none. The Debug page renders both buttons in
+one form, each submit button carrying its own action, and the result
+section says "Trimmed the oldest 10%: removed ..." with the same
+per-table counts a cleanup reports. The run-in-progress guard covers
+both actions.
+
+tests/cleanup_integration.rs grows two tests: ten rows per table (the
+oldest one each gone, nine kept, one removal in the report per table),
+and a trim of tables too small to lose anything. The web suite covers
+the button, its report, and the actual removal. cargo test (all 22
+binaries), clippy and fmt pass; the web suite ran three times without
+a flake.
+
+## 1.3.14
+
+Clean up DB empties everything but the config and OAuth tables.
+
+The first cut of the Debug tab's Clean up DB button only pruned to the
+app's retention windows. That was the wrong scope: the button now
+empties every table except the three whose loss is not repaired by
+fetching again — config, oauth_accounts and oauth_apps. The run
+history, the log lines, the seen URLs, the host info, the robots.txt
+cache, the context caches, and the scanned-post and account-wish
+records all go; FediFetcher re-fetches what it needs on its next run.
+
+The work moved to db::cleanup, a plain sequence of static DELETEs (one
+per table, so sqlx's dynamic-SQL audit is satisfied), followed by
+VACUUM and a WAL checkpoint so the freed space goes back to the
+filesystem immediately. The report is one count per emptied table,
+shown in the page's result section ("Cleaned up the database: removed
+7 log lines, 1 run, ..."). StateStore::cleanup and its per-kind report
+are gone, and prune_logs returns () again; a cleanup refuses while a
+run is in progress, because a finishing run would write its held state
+back over the emptied tables.
+
+tests/cleanup_integration.rs pins the new behavior: every non-kept
+table empty, the three kept tables intact with their rows readable,
+and a cleanup of an empty database removing nothing. The web test
+checks the report and that the logs really were emptied while a config
+row survived. cargo test (all 22 binaries), clippy and fmt pass; the
+web suite ran three times without a flake.
+
+## 1.3.13
+
+Report the database's size and usage, and clean it up, on the Debug tab.
+
+The Debug tab knew nothing about the database itself. A new section at
+the top of the page reports what fedifetcher.db uses on disk (the
+write-ahead log included, when there is one) and how many rows the
+tables worth watching hold, and offers a Clean up DB button.
+
+The button applies the app's own retention rules right now, instead of
+waiting for the next run to apply them at load: log lines beyond the
+retention (the logger's own 100,000), host info past the configured
+remember_hosts_for_days, robots.txt entries past their refetch age,
+context entries past their week, and recently checked users past
+remember_users_for_hours. The freed space is reported, per kind, in
+the page's result section.
+
+Nothing else is touched: the configuration and OAuth tables, the run
+history, and every account's recorded wishes — opt-outs, private-post
+markers, the known context and trigger posts, seen_urls and
+known_followings, none of which the app ever expires — stay. A cleanup
+never causes a refetch of posts; only entries a run would have dropped
+itself are removed.
+
+New tests: tests/cleanup_integration.rs pins what cleanup removes and
+what it keeps (three tests: log pruning by retention, expiry by the
+load rules with the report's counts, and the kept records), and the
+web suite covers the section's rendering and the button's report.
+StateStore::cleanup does the work, reusing the expiry helpers the load
+path uses so the button's rules can never drift from the app's;
+prune_logs now returns how many lines it pruned. cargo test (all 22
+binaries), clippy and fmt pass, and the web suite was run three times
+without a flake.
+
 ## 1.3.12
 
 Log the errors that were passing silently.

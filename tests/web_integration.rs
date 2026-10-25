@@ -2754,13 +2754,36 @@ async fn a_data_page_whose_database_is_gone_warns_and_renders() {
     );
 }
 
-/// The debug page reports the database's size and usage at the top.
+/// The debug page reports the database's size, and row counts only for the
+/// five tables that take the most space in it.
 #[tokio::test]
 async fn the_debug_page_reports_the_database_size_and_usage() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.access_tokens = vec![TOKEN.to_string()];
-    let (base, _db) = spawn_ui_with(config).await;
+    let (base, db) = spawn_ui_with(config).await;
+    // give the logs table enough rows to span pages, as it would in a
+    // real deployment: an empty table still occupies its root page, so a
+    // handful of rows would tie with every empty table at one page
+    for i in 0..300 {
+        fedifetcher::db::insert_log(
+            &db,
+            &fedifetcher::db::LogRow {
+                ts: "2026-01-01 00:00:00+00:00".to_string(),
+                level: "INFO".to_string(),
+                message: format!("filler {i}: {}", "x".repeat(200)),
+                target: "test".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    // the space reading comes from the main database file, so the
+    // write-ahead log's rows are checkpointed into it first
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&db)
+        .await
+        .unwrap();
 
     let (status, page) = get(&format!("{base}/debug")).await;
 
@@ -2775,8 +2798,17 @@ async fn the_debug_page_reports_the_database_size_and_usage() {
     );
     assert!(page.contains("B"), "a size is reported: {page}");
     assert!(
-        page.contains("log lines") && page.contains("seen URLs"),
-        "the usage is broken down by table: {page}"
+        page.contains("biggest:"),
+        "the counts are introduced as the biggest tables: {page}"
+    );
+    assert!(
+        page.contains("log lines"),
+        "the biggest table's count is reported: {page}"
+    );
+    // a table that is not among the biggest five is not counted
+    assert!(
+        !page.contains("runs recorded"),
+        "small tables go uncounted: {page}"
     );
 }
 

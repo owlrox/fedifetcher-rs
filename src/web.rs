@@ -1200,21 +1200,35 @@ async fn debug_page(
     })
 }
 
-/// The tables the debug page's database section counts, with the singular
-/// label the page pluralizes: first the ones a cleanup empties, then the
-/// ones it keeps.
-const DB_USAGE_TABLES: &[(&str, &str)] = &[
+/// How many tables the debug page's database section counts: the five that
+/// take the most space in the database file.
+const BIGGEST_TABLES_SHOWN: usize = 5;
+
+/// The singular label a counted table is pluralized with; anything not
+/// listed is shown under its own name.
+const TABLE_LABELS: &[(&str, &str)] = &[
     ("logs", "log line"),
     ("seen_urls", "seen URL"),
     ("seen_hosts", "known host"),
     ("context_cache", "context entry"),
     ("robots_cache", "robots.txt entry"),
     ("trigger_posts", "scanned post"),
+    ("private_posts", "private post"),
+    ("known_context_posts", "known context post"),
     ("opted_out_accounts", "opted-out record"),
     ("config", "config record"),
     ("oauth_accounts", "connected account"),
+    ("oauth_apps", "registered app"),
     ("runs", "run"),
 ];
+
+fn table_label(table: &str) -> &str {
+    TABLE_LABELS
+        .iter()
+        .find(|(name, _)| *name == table)
+        .map(|(_, label)| *label)
+        .unwrap_or(table)
+}
 
 /// The database's size on disk and row counts, as the debug page's database
 /// section reports them.
@@ -1224,8 +1238,8 @@ struct DbUsage {
     size: u64,
     /// The write-ahead log's size, in bytes, when one exists.
     wal: u64,
-    /// Row counts, by label, in `DB_USAGE_TABLES`' order.
-    counts: Vec<(&'static str, i64)>,
+    /// Row counts of the biggest tables, biggest first.
+    counts: Vec<(String, i64)>,
 }
 
 impl DbUsage {
@@ -1237,6 +1251,11 @@ impl DbUsage {
             .map(|(label, count)| plural(*count as u64, label))
             .collect::<Vec<_>>()
             .join(", ");
+        let counts = if counts.is_empty() {
+            counts
+        } else {
+            format!("biggest: {counts}")
+        };
         if self.wal > 0 {
             format!(
                 "fedifetcher.db uses {} (plus {} of write-ahead log) — {}.",
@@ -1264,10 +1283,21 @@ async fn db_usage(state: &AppState) -> DbUsage {
     let wal = std::fs::metadata(&wal_path)
         .map(|meta| meta.len())
         .unwrap_or(0);
-    let mut counts = Vec::with_capacity(DB_USAGE_TABLES.len());
-    for &(table, label) in DB_USAGE_TABLES {
-        let count = db::table_count(&state.db, table).await.unwrap_or(0);
-        counts.push((label, count));
+    // the five biggest tables, by their share of the file's pages, from
+    // SQLite's dbstat virtual table
+    let biggest: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT name, SUM(pgsize) FROM dbstat \
+         WHERE name NOT LIKE 'sqlite%' GROUP BY name ORDER BY SUM(pgsize) DESC, name \
+         LIMIT ?",
+    )
+    .bind(BIGGEST_TABLES_SHOWN as i64)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let mut counts = Vec::with_capacity(biggest.len());
+    for (table, _bytes) in biggest {
+        let count = db::table_count(&state.db, &table).await.unwrap_or(0);
+        counts.push((table_label(&table).to_string(), count));
     }
     DbUsage { size, wal, counts }
 }
@@ -2977,9 +3007,6 @@ fn DebugPage(
             <section>
                 <h2>"Database"</h2>
                 <p class="muted">{usage_line}</p>
-                <p class="muted">
-                    "Clean up empties every table except the configuration's and the OAuth ones: the log lines, the run history, the seen URLs, the host info, the caches, and the scanned-post records. Trim 10% does the same to the oldest tenth of each of those tables, keeping the newest records. FediFetcher re-fetches what it needs on its next run. The configuration, the connected accounts, and the registered OAuth apps are always kept, and the freed space is returned to the filesystem."
-                </p>
                 <form method="post" action="/debug">
                     <p>
                         <button type="submit" name="action" value="trim">"Trim 10%"</button>
