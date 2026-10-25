@@ -1930,16 +1930,16 @@ fn log_level_row(value: &str) -> AnyView {
 const CSS: &str = r#"
 :root { color-scheme: light dark; }
 body { font-family: system-ui, sans-serif; margin: 0; }
-header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; }
+header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; background: linear-gradient(to right, #2b2b2b, #6a6a6a); color: #eee; }
 header h1 { font-size: 1.1rem; margin: 0; }
-header h1 a { color: inherit; text-decoration: none; }
+header h1 a { color: #eee; text-decoration: none; }
 .version { color: #888; font-weight: normal; }
 nav { display: flex; gap: 1rem; }
 nav a { color: #06c; }
 header .run { display: flex; gap: 0.5rem; align-items: center; margin-left: auto; }
 header .run form { margin: 0; }
 header .run button { font-size: 0.8rem; padding: 0.1rem 0.6rem; }
-header a.live { color: #06c; border: 1px solid #06c55; border-radius: 0.4rem; padding: 0.1rem 0.6rem; text-decoration: none; white-space: nowrap; }
+header a.live { color: #9cf; border: 1px solid rgba(153, 204, 255, 0.4); border-radius: 0.4rem; padding: 0.1rem 0.6rem; text-decoration: none; white-space: nowrap; }
 nav.tabs { gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #8884; margin-bottom: 1.5rem; }
 nav.tabs a { color: #06c; text-decoration: none; padding-bottom: 0.25rem; }
 nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
@@ -2112,23 +2112,6 @@ fn Dashboard(
     counts: Vec<(String, i64)>,
     live: bool,
 ) -> impl IntoView {
-    let config = state.config.lock().unwrap().clone();
-    let (status_label, status_class, is_running, is_paused) = match running.as_deref() {
-        Some(started) if state.pause.is_paused() => (
-            format!("Paused (running since {started})"),
-            "paused".to_string(),
-            true,
-            true,
-        ),
-        Some(started) => (
-            format!("Running since {started}"),
-            "running".to_string(),
-            true,
-            false,
-        ),
-        None => ("Idle".to_string(), "ok".to_string(), false, false),
-    };
-    let tasks = config.enabled_tasks();
     let mut stats = vec![
         ("seen urls".to_string(), data.seen_urls().len() as i64),
         (
@@ -2161,58 +2144,6 @@ fn Dashboard(
     };
     view! {
         <Page state=state running=running title="Dashboard".to_string() live=live refresh=refresh>
-            <section>
-                <h2>"Run"</h2>
-                <p>
-                    "Status: "
-                    <span class=format!("badge {status_class}")>{status_label}</span>
-                </p>
-                {if is_running {
-                    let pause_button = if is_paused {
-                        view! {
-                            <form class="run" method="post" action="/resume">
-                                <button type="submit">"Resume the paused FediFetcher"</button>
-                            </form>
-                        }.into_any()
-                    } else {
-                        view! {
-                            <form class="run" method="post" action="/pause">
-                                <button type="submit">"Pause the running FediFetcher"</button>
-                            </form>
-                        }.into_any()
-                    };
-                    view! {
-                        <>
-                            {pause_button}
-                            <form class="run" method="post" action="/stop">
-                                <button type="submit">"Stop the running FediFetcher"</button>
-                            </form>
-                        </>
-                    }.into_any()
-                } else {
-                    view! {
-                        <form class="run" method="post" action="/run">
-                            <button type="submit">"FediFetch NOW!"</button>
-                        </form>
-                    }.into_any()
-                }}
-                <p class="muted">
-                    "Server " <code>{config.server.clone()}</code>
-                    " · " {config.access_tokens.len()} " access token(s)"
-                </p>
-            </section>
-            <section>
-                <h2>"Enabled tasks"</h2>
-                {if tasks.is_empty() {
-                    view! { <p class="muted">"None — nothing is enabled."</p> }.into_any()
-                } else {
-                    view! {
-                        <ul>
-                            {tasks.into_iter().map(|task| view! { <li>{task}</li> }).collect::<Vec<_>>()}
-                        </ul>
-                    }.into_any()
-                }}
-            </section>
             <section>
                 <h2>"State"</h2>
                 <table>
@@ -2449,9 +2380,12 @@ fn hosts_tab(
                             {rows
                                 .into_iter()
                                 .map(|(host, software, version, apis, last_checked)| {
+                                    let host_url = format!("https://{host}");
                                     view! {
                                         <tr>
-                                            <td><code>{host.clone()}</code></td>
+                                            <td>
+                                                <a href={host_url}><code>{host.clone()}</code></a>
+                                            </td>
                                             <td>{software}</td>
                                             <td>{version}</td>
                                             <td>{apis}</td>
@@ -2525,12 +2459,17 @@ fn table_tab(
                         let mut cells: Vec<AnyView> = row
                             .into_iter()
                             .map(|cell| match cell {
-                                Some(value) => match json_cell(&value) {
-                                    Some(pretty) => {
-                                        view! { <td><pre class="json">{pretty}</pre></td> }
-                                            .into_any()
+                                Some(value) => match url_cell(&value) {
+                                    Some(url) => {
+                                        view! { <td><a href={url}>{url}</a></td> }.into_any()
                                     }
-                                    None => view! { <td>{value}</td> }.into_any(),
+                                    None => match json_cell(&value) {
+                                        Some(pretty) => {
+                                            view! { <td><pre class="json">{pretty}</pre></td> }
+                                                .into_any()
+                                        }
+                                        None => view! { <td>{value}</td> }.into_any(),
+                                    },
                                 },
                                 None => view! { <td><span class="muted">"NULL"</span></td> }.into_any(),
                             })
@@ -2556,6 +2495,21 @@ fn table_tab(
         </section>
     }
     .into_any()
+}
+
+/// A table cell's content as a link target, when the cell is a URL: the
+/// post and robots URLs the tables show are worth following. Anything that
+/// is not a bare http(s) URL renders as text.
+fn url_cell(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed == value
+        && (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
+        && !trimmed.contains(char::is_whitespace)
+    {
+        Some(trimmed)
+    } else {
+        None
+    }
 }
 
 /// A table cell's content, pretty-printed when it is a JSON document —

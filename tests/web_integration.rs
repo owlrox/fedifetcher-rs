@@ -171,7 +171,7 @@ async fn every_page_renders_without_javascript() {
     let base = spawn_ui(&dir).await;
 
     for (path, marker) in [
-        ("/", "FediFetch NOW!"),
+        ("/", "Recent runs"),
         ("/data", "Seen hosts"),
         ("/logs", "Recent log"),
         ("/config", "access_tokens"),
@@ -363,12 +363,12 @@ async fn the_run_status_comes_from_the_run_history() {
     let config = common::test_config(&dir, "example.social");
     let (base, db) = spawn_ui_with(config).await;
 
-    // no runs yet: idle, in the top bar and in the Run section
+    // no runs yet: idle, in the top bar
     let (status, body) = get(&format!("{base}/")).await;
     assert_eq!(status, 200);
     assert!(
         body.contains("<span class=\"badge ok\">Idle</span>"),
-        "idle, in the top bar and the Run section: {body}"
+        "idle, in the top bar: {body}"
     );
 
     // a run recorded as started but not finished, as one in progress is:
@@ -385,17 +385,8 @@ async fn the_run_status_comes_from_the_run_history() {
         );
         assert!(!body.contains(">Idle</span>"), "{page}: no stale idle pill");
     }
-    let (status, body) = get(&format!("{base}/")).await;
-    assert_eq!(status, 200);
-    assert!(
-        body.contains(&format!(
-            "<span class=\"badge running\">Running since {started}</span>"
-        )),
-        "the Run section follows the history row: {body}"
-    );
 
-    // the row finishes: the pill and the Run section go back to idle,
-    // from the same read
+    // the row finishes: the pill goes back to idle, from the same read
     fedifetcher::db::finish_run(&db, id, &started, "ok", "done")
         .await
         .unwrap();
@@ -403,7 +394,7 @@ async fn the_run_status_comes_from_the_run_history() {
     assert_eq!(status, 200);
     assert!(
         body.contains("<span class=\"badge ok\">Idle</span>"),
-        "the pill and the Run section are idle again: {body}"
+        "the pill is idle again: {body}"
     );
     assert!(!body.contains(">Running</span>"), "no stale running pill");
 }
@@ -1060,11 +1051,11 @@ async fn posting_stop_redirects_back_even_when_idle() {
     assert_eq!(resp.status().as_u16(), 303, "the POST must redirect");
     assert_eq!(resp.headers().get("Location").unwrap(), "/");
 
-    // idle: the dashboard offers to run, not to stop
+    // idle: the top bar offers to run, not to stop
     let (status, body) = get(&format!("{base}/")).await;
     assert_eq!(status, 200);
-    assert!(body.contains("FediFetch NOW!"));
-    assert!(!body.contains("Stop the running FediFetcher"));
+    assert!(body.contains(">Start</button>"));
+    assert!(!body.contains(">Stop</button>"));
 }
 
 #[tokio::test]
@@ -1085,14 +1076,14 @@ async fn the_stop_button_stops_a_running_run() {
     let resp = client().post(format!("{base}/run")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 303);
 
-    // while the run is going, the dashboard offers to stop it
-    let running_page = page_containing(&base, "/", &["Running since"]).await;
+    // while the run is going, the top bar offers to stop it
+    let running_page = page_containing(&base, "/", &["badge running\">Running<"]).await;
     assert!(
-        running_page.contains("Running since"),
+        running_page.contains("badge running\">Running<"),
         "the run should be running"
     );
-    assert!(running_page.contains("Stop the running FediFetcher"));
-    assert!(!running_page.contains("FediFetch NOW!"));
+    assert!(running_page.contains(">Stop</button>"));
+    assert!(!running_page.contains(">Start</button>"));
 
     let resp = client().post(format!("{base}/stop")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 303);
@@ -1131,15 +1122,15 @@ async fn the_pause_button_pauses_a_running_run_and_resume_continues_it() {
     let resp = client().post(format!("{base}/run")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 303);
 
-    // while the run is going, the dashboard offers to pause it
-    let running_page = page_containing(&base, "/", &["Running since"]).await;
+    // while the run is going, the top bar offers to pause it
+    let running_page = page_containing(&base, "/", &["badge running\">Running<"]).await;
     assert!(
-        running_page.contains("Running since"),
+        running_page.contains("badge running\">Running<"),
         "the run should be running"
     );
-    assert!(running_page.contains("Pause the running FediFetcher"));
-    assert!(running_page.contains("Stop the running FediFetcher"));
-    assert!(!running_page.contains("Resume the paused FediFetcher"));
+    assert!(running_page.contains(">Pause</button>"));
+    assert!(running_page.contains(">Stop</button>"));
+    assert!(!running_page.contains(">Resume</button>"));
 
     let resp = client().post(format!("{base}/pause")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 303);
@@ -1152,10 +1143,9 @@ async fn the_pause_button_pauses_a_running_run_and_resume_continues_it() {
         paused_page.contains("badge paused"),
         "the status badge should say paused"
     );
-    assert!(paused_page.contains("Paused (running since"));
-    assert!(paused_page.contains("Resume the paused FediFetcher"));
-    assert!(paused_page.contains("Stop the running FediFetcher"));
-    assert!(!paused_page.contains("Pause the running FediFetcher"));
+    assert!(paused_page.contains(">Resume</button>"));
+    assert!(paused_page.contains(">Stop</button>"));
+    assert!(!paused_page.contains(">Pause</button>"));
 
     // the callback has finished by now, and the run would have finished
     // with it — a paused run holds instead
@@ -1181,13 +1171,17 @@ async fn the_pause_button_pauses_a_running_run_and_resume_continues_it() {
     // consistent page: the dashboard reads the status and the run history
     // at two moments, so a page can briefly show the finished status next
     // to the still-running history row.
-    let resumed_page =
-        page_containing(&base, "/", &["Running since", "Processing finished in"]).await;
+    let resumed_page = page_containing(
+        &base,
+        "/",
+        &["badge running\">Running<", "Processing finished in"],
+    )
+    .await;
     assert!(
         !resumed_page.is_empty(),
         "the resume should set the run going again"
     );
-    assert!(!resumed_page.contains("Resume the paused FediFetcher"));
+    assert!(!resumed_page.contains(">Resume</button>"));
 
     // and the run finishes once it is going again
     let body = page_containing(&base, "/", &["Processing finished in"]).await;
@@ -3031,5 +3025,135 @@ async fn a_json_cell_renders_pretty_printed() {
     assert!(
         !page.contains("<pre class=\"json\">mastodon<"),
         "the software column stays a plain cell: {page}"
+    );
+}
+
+/// The dashboard keeps only the State section and the run history: the
+/// run controls live in the top bar on every page, and the enabled tasks
+/// and counts are on the Config and Data pages.
+#[tokio::test]
+async fn the_dashboard_keeps_only_state_and_recent_runs() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, page) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(page.contains("State"), "the State section stays: {page}");
+    assert!(
+        page.contains("Recent runs"),
+        "the run history stays: {page}"
+    );
+    for gone in [
+        "FediFetch NOW",
+        "Enabled tasks",
+        "Status:",
+        "access token(s)",
+    ] {
+        assert!(
+            !page.contains(gone),
+            "the dashboard no longer says {gone:?}: {page}"
+        );
+    }
+    // the run controls are still reachable, from the top bar
+    assert!(page.contains(">Start</button>"));
+}
+
+/// The top bar is a grey gradient, dark to medium, left to right.
+#[tokio::test]
+async fn the_top_bar_is_a_grey_gradient() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, page) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("header {") && page.contains("linear-gradient(to right, #2b2b2b, #6a6a6a)"),
+        "the header carries the grey gradient: {page}"
+    );
+    assert!(
+        page.contains("header h1 a { color: #eee"),
+        "the header's text is light on the dark bar: {page}"
+    );
+}
+
+/// URLs the tables show are clickable: the URL-bearing columns of the
+/// named tables link out, and the hosts tab's host names link to the
+/// server's own https address.
+#[tokio::test]
+async fn the_tables_urls_are_clickable() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let pool = fedifetcher::db::open(&config).await.unwrap();
+    let url = "https://remote.example/@alice/1";
+    sqlx::query("INSERT INTO seen_urls (uri, first_seen) VALUES (?1, '2026-01-01')")
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO context_cache (uri, last_seen, created_at) VALUES (?1, '2026-01-01', '2026-01-01')")
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO known_context_posts (uri, first_seen, last_seen) VALUES (?1, '2026-01-01', '2026-01-01')")
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO private_posts (uri, first_marked) VALUES (?1, '2026-01-01')")
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO robots_cache (url, text, fetched_at) VALUES (?1, '', '2026-01-01')")
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO trigger_posts (uri, url, source, first_seen, last_seen) VALUES (?1, ?1, 'test', '2026-01-01', '2026-01-01')")
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO seen_hosts (host, webserver, software, version, mastodon_api,
+         misskey_api, lemmy_api, peertube_api, last_checked, error, raw_nodeinfo)
+         VALUES ('host.example', 'host.example', 'mastodon', '4', 1, 0, 0, 0,
+         ?1, NULL, '{}')",
+    )
+    .bind(fedifetcher::timeutil::fmt_state_ts(
+        fedifetcher::timeutil::now(),
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = web::app(config, pool);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    let base = format!("http://{addr}");
+
+    for tab in [
+        "seen_urls",
+        "context_cache",
+        "known_context_posts",
+        "private_posts",
+        "robots_cache",
+        "trigger_posts",
+    ] {
+        let (status, page) = get(&format!("{base}/data?tab={tab}")).await;
+        assert_eq!(status, 200, "{tab}");
+        assert!(
+            page.contains(&format!("href=\"{url}\"")),
+            "the {tab} table's URL is a link: {page}"
+        );
+    }
+
+    // the hosts tab's host name links to the server itself
+    let (status, page) = get(&format!("{base}/data?tab=hosts")).await;
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("href=\"https://host.example\""),
+        "the host name links to the server: {page}"
     );
 }
