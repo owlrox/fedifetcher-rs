@@ -1,3 +1,7 @@
+## 1.3.2
+
+Pin that the dashboard counts connected accounts in its token total.
+
 ## 1.3.1
 
 Trim the token row's hints.
