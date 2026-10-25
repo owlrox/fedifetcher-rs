@@ -481,7 +481,13 @@ impl RobotsCache {
                 }
                 RobotsEntry::Text(text)
             }
-            Err(_) => RobotsEntry::Verdict(true),
+            Err(ex) => {
+                warn!(
+                    "Could not fetch the robots.txt for {robots_url}: {ex} — \
+                     treating every path as allowed until it can be fetched"
+                );
+                RobotsEntry::Verdict(true)
+            }
         };
 
         self.cache.lock().unwrap().insert(

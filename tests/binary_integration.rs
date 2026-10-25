@@ -80,6 +80,21 @@ fn assert_state_stayed_in_the_sandbox(tmp: &std::path::Path) {
     );
 }
 
+/// Poll a page until it contains any of the markers, and return it.
+async fn page_containing(base: &str, path: &str, markers: &[&str]) -> String {
+    let client = reqwest::Client::new();
+    for _ in 0..200 {
+        if let Ok(resp) = client.get(format!("{base}{path}")).send().await
+            && let Ok(body) = resp.text().await
+            && markers.iter().any(|marker| body.contains(marker))
+        {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the page {path} never contained any of {markers:?}");
+}
+
 /// A port nothing is listening on yet.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -498,4 +513,31 @@ async fn a_config_save_logs_every_change_it_made() {
     }
     stop_ui(&tmp, ui).await;
     panic!("the config save logged nothing");
+}
+
+/// When another FediFetcher holds the lock, the web UI still serves — but it
+/// says so in the logs page, where the "runs refuse to start" surprise is
+/// answered before it is hit.
+#[tokio::test]
+async fn serve_says_so_when_another_instance_holds_the_lock() {
+    let tmp = tmp_dir();
+    let (config, _db) = state_db(&tmp).await;
+    // the test process holds the lock the child will want
+    let guard = fedifetcher::store::lock(&config).unwrap();
+
+    let port = free_port();
+    let mut running = child(&tmp, &["serve", "--port", &port.to_string()])
+        .spawn()
+        .unwrap();
+
+    let base = format!("http://127.0.0.1:{port}");
+    healthz(&base).await;
+    let logs = page_containing(&base, "/logs", &["holds the lock"]).await;
+
+    drop(guard);
+    running.kill().await.unwrap();
+    assert!(
+        logs.contains("Another FediFetcher"),
+        "the lock's holder is named on the logs page: {logs}"
+    );
 }

@@ -92,11 +92,19 @@ pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std
     // A run row still marked running belongs to a process that is gone —
     // unless another process holds the lock and is running right now, in
     // which case the sweep is skipped and the row is left alone.
-    if let Ok(guard) = lock(&config) {
-        if let Err(ex) = db::interrupt_stale_runs(&db, timeutil::now()).await {
-            tracing::warn!("Could not mark interrupted runs: {ex}");
+    match lock(&config) {
+        Ok(guard) => {
+            if let Err(ex) = db::interrupt_stale_runs(&db, timeutil::now()).await {
+                tracing::warn!("Could not mark interrupted runs: {ex}");
+            }
+            drop(guard);
         }
-        drop(guard);
+        Err(ex) => {
+            tracing::warn!(
+                "Another FediFetcher holds the lock file ({ex}); runs started \
+                 here will refuse until it is free"
+            );
+        }
     }
     // The home timeline stream, when the config asks for it: a long-lived
     // connection that turns new posts into immediate trigger posts. It reads
@@ -420,7 +428,13 @@ async fn data(
             }
         }
         Some(name) => {
-            let columns = db::table_columns(&state.db, name).await.unwrap_or_default();
+            let columns = match db::table_columns(&state.db, name).await {
+                Ok(columns) => columns,
+                Err(ex) => {
+                    tracing::warn!("Could not read the {name} table's columns: {ex}");
+                    Vec::new()
+                }
+            };
             // the default sort: a table with an id column shows the newest
             // rows first; anything else sorts by its first column
             let (default_column, default_order) = if columns.iter().any(|col| col == "id") {
@@ -1357,12 +1371,29 @@ fn back_to_referer(headers: &HeaderMap) -> Redirect {
 /// triggered from.
 ///
 /// The redirect is what makes this work without JavaScript: the POST answers
+/// Run a detached job with its panics logged: a panic does not pass through
+/// tracing, so an uncaught one would never reach the logs table — stderr
+/// only — and the job's run rows would claim it is still running until the
+/// next start sweeps them.
+async fn run_detached(db: SqlitePool, job: impl std::future::Future<Output = ()> + Send) {
+    let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(job)).await;
+    if outcome.is_err() {
+        tracing::error!(
+            "The job panicked; its run rows are marked interrupted. The panic itself is on this process's stderr."
+        );
+        if let Err(ex) = db::interrupt_stale_runs(&db, timeutil::now()).await {
+            tracing::error!("Could not mark the interrupted run: {ex}");
+        }
+    }
+}
+
 /// 303 See Other, and the browser follows it with a GET.
 async fn run(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Redirect {
     if let Ok(guard) = state.run_guard.clone().try_lock_owned() {
         tracing::info!("POST /run: run triggered from the web UI");
         state.cancel.reset();
         state.pause.resume();
+        let db = state.db.clone();
         tokio::spawn(async move {
             let config = state.config.lock().unwrap().clone();
             let cancel = state.cancel.clone();
@@ -1371,9 +1402,11 @@ async fn run(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> 
             // — the history row is the one source of run status, so every
             // page's pill flips to running with the row, not with anything
             // held in memory
-            let _ = run_once(config, cancel, pause, &state.db).await;
-
-            drop(guard);
+            run_detached(db.clone(), async move {
+                let _ = run_once(config, cancel, pause, &db).await;
+                drop(guard);
+            })
+            .await;
         });
     } else {
         tracing::debug!("POST /run: a run is already in progress; trigger ignored");
@@ -1457,9 +1490,13 @@ async fn manual_fetch(AxumState(state): AxumState<Arc<AppState>>, body: Bytes) -
     }
     if let Ok(guard) = state.run_guard.clone().try_lock_owned() {
         tracing::info!("POST /fetch: {kind} {key} triggered from the web UI");
+        let db = state.db.clone();
         tokio::spawn(async move {
-            run_fetch(&state, &kind, &key, &set, force).await;
-            drop(guard);
+            run_detached(db, async move {
+                run_fetch(&state, &kind, &key, &set, force).await;
+                drop(guard);
+            })
+            .await;
         });
     } else {
         tracing::debug!("POST /fetch: a run is already in progress; the fetch is ignored");
@@ -3133,5 +3170,36 @@ mod tests {
         assert_eq!(text_field(&account, "note"), "-", "empty is absent");
         assert_eq!(int_field(&account, "followers_count"), "12");
         assert_eq!(int_field(&account, "id"), "-");
+    }
+    #[tokio::test]
+    async fn a_panicking_job_is_logged_and_its_run_rows_are_swept() {
+        let dir = std::env::temp_dir().join(format!("ff-web-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = Config {
+            state_dir: dir.clone(),
+            ..Default::default()
+        };
+        let db = crate::db::open(&config).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (started, finished, outcome, message) VALUES (?, ?, 'running', '')",
+        )
+        .bind(timeutil::fmt_state_ts(timeutil::now()))
+        .bind(timeutil::fmt_state_ts(timeutil::now()))
+        .execute(&db)
+        .await
+        .unwrap();
+
+        run_detached(db.clone(), async {
+            panic!("the job dies");
+        })
+        .await;
+
+        // the job's row no longer claims it is running
+        let outcome: String = sqlx::query_scalar("SELECT outcome FROM runs")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(outcome, "error");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

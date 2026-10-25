@@ -1,3 +1,25 @@
+## 1.3.12
+
+Log the errors that were passing silently.
+
+Four gaps where a failure either never reached the logs table or was
+swallowed without a line: a robots.txt that cannot be fetched at all
+was treated as allow-everything and cached, silently; a serve() startup
+whose lock is held by another FediFetcher skipped the stale-run sweep
+without a word; a data page whose database is gone rendered empty
+tables as if they were truly empty; and a panicked background job —
+the one error class that bypasses tracing entirely — never reached the
+logs table at all, and left its run row claiming to be running until
+the next start. Each now says so, and each has a test: the robots
+warning via a dead port, the lock warning visible on the child's logs
+page, the database failure via a closed pool fault-injected into the
+running web UI, and the panic via a job that dies and is seen to leave
+its row marked interrupted.
+
+Also caught: the page-load logging test's flake was real — a second
+global subscriber installer starved the first; the new test reuses the
+binary's one capture instead.
+
 ## 1.3.11
 
 Cover the flavor clients' failure arms, and the database's absence.

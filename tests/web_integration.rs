@@ -2698,3 +2698,36 @@ async fn an_empty_optional_option_saves_as_unset() {
         saved.lock_file
     );
 }
+
+/// A database that is gone (closed after startup) still renders every page —
+/// with the failures named in the log, not silently empty tables.
+#[tokio::test]
+async fn a_data_page_whose_database_is_gone_warns_and_renders() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    db.close().await;
+
+    // the page-load capture is this binary's one global subscriber; using it
+    // here too (its install is idempotent) instead of a second installer
+    install_page_load_capture();
+    let app = web::app(config, db.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let base = format!("http://{addr}");
+
+    let (status, body) = get(&format!("{base}/data")).await;
+
+    assert_eq!(status, 200, "the page renders regardless: {body}");
+    assert!(
+        page_load_lines()
+            .iter()
+            .any(|line| line.contains("Could not read the")),
+        "the database's failure is named: {:?}",
+        page_load_lines()
+    );
+}

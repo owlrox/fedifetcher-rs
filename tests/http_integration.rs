@@ -788,3 +788,27 @@ async fn post_sends_the_body_as_json_and_the_client_headers() {
     assert_eq!(resp.status, 200);
     assert_eq!(api.calls(), 1);
 }
+
+/// A robots.txt that cannot be fetched at all is reported, and until it can
+/// be fetched again every path is treated as allowed.
+#[tokio::test]
+async fn a_robots_txt_that_cannot_be_fetched_is_reported_and_treated_as_allowed() {
+    let logs = capture::LogCapture::new();
+    let guard = logs.install();
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fixture::test_db(&config).await;
+    let client = HttpClient::new(config, db);
+
+    // nothing listens on port 9: the robots.txt cannot be fetched at all,
+    // so the request is allowed to proceed (and then fails on its own)
+    let outcome = client.get("http://127.0.0.1:9/api", None).await;
+
+    drop(guard);
+    assert!(outcome.is_err(), "the request itself still fails");
+    assert!(
+        logs.text().contains("Could not fetch the robots.txt"),
+        "the failure is reported: {}",
+        logs.text()
+    );
+}
