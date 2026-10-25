@@ -1973,6 +1973,26 @@ async fn the_config_page_lists_the_connected_accounts() {
         "the connect form is on the page"
     );
     assert!(
+        body.contains("Connect your Fediverse account"),
+        "the button speaks fediverse, not just Mastodon"
+    );
+    assert!(
+        body.contains("\"account-row\"") || body.contains("li class=\"account\""),
+        "the account rows lay out with their buttons"
+    );
+    assert!(
+        body.contains("Hover a field for what it does, its documented default, and the API scopes its task spends."),
+        "the hint names what the tooltips carry"
+    );
+    assert!(
+        body.matches("Save configuration").count() == 2,
+        "a save button sits above the table as well as below"
+    );
+    assert!(
+        body.contains("token-row") && body.contains("token-remove"),
+        "the token rows carry their remove checkbox to the right"
+    );
+    assert!(
         body.contains("new_access_token"),
         "the manual paste field stays: {body}"
     );
@@ -2284,6 +2304,10 @@ async fn a_row_missing_a_new_tasks_scopes_warns_and_offers_reconnect() {
     assert!(
         body.contains("more permissions"),
         "the row says what is missing: {body}"
+    );
+    assert!(
+        body.contains("\"warn-box\""),
+        "the warning is boxed: {body}"
     );
     assert!(
         body.contains("Reconnect"),

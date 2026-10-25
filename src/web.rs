@@ -1600,10 +1600,9 @@ fn tokens_row(config: &Config) -> AnyView {
         .map(|(index, token)| {
             let masked = masked(token);
             view! {
-                <li>
+                <li class="token-row">
                     <code>{masked}</code>
-                    " "
-                    <label>
+                    <label class="token-remove">
                         <input type="checkbox" name="remove_access_token" value={index.to_string()}/>
                         "remove"
                     </label>
@@ -1691,6 +1690,13 @@ form input[type="number"] { width: 6rem; }
 pre { white-space: pre-wrap; }
 ul.tokens { margin: 0.2rem 0; padding-left: 1.2rem; }
 ul.tokens label { color: #888; }
+ul.tokens li.token-row { display: flex; align-items: center; gap: 0.75rem; }
+ul.tokens li.token-row label.token-remove { margin-left: auto; }
+li.account { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+li.account form.account-actions { margin: 0; }
+li.account form.account-actions:first-of-type { margin-left: auto; }
+li.account form.account-actions button { font-size: 0.8rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
+.warn-box { border: 2px solid #c44; border-radius: 0.4rem; padding: 0.15rem 0.5rem; color: #c44; }
 form.fetch { margin: 0; }
 form.fetch button { font-size: 0.8rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
 form.run { margin: 0.25rem 0; }
@@ -2660,25 +2666,28 @@ fn ConfigPage(
                     {accounts.iter().map(|(account, warning)| {
                         let acct = account.acct.clone();
                         let server = account.server.clone();
+                        let reconnect_server = server.clone();
                         view! {
-                            <li>
+                            <li class="account">
                                 <img src={account.avatar.clone()} alt="" width="24" height="24"/>
-                                " "
-                                <code>{acct.clone()}</code>
-                                " on "
-                                <code>{server.clone()}</code>
-                                " (connected " <code>{account.connected_at.clone()}</code> ")"
+                                <span>
+                                    <code>{acct.clone()}</code>
+                                    " on "
+                                    <code>{server.clone()}</code>
+                                    " (connected " <code>{account.connected_at.clone()}</code> ")"
+                                </span>
                                 {warning.map(|text| {
-                                    let server = server.clone();
+                                    view! { <span class="warn-box">{text}</span> }
+                                })}
+                                {warning.map(|_| {
                                     view! {
-                                        <p class="muted">{text}</p>
-                                        <form method="post" action="/oauth/connect">
-                                            <input type="hidden" name="server" value={server}/>
+                                        <form class="account-actions" method="post" action="/oauth/connect">
+                                            <input type="hidden" name="server" value={reconnect_server.clone()}/>
                                             <button type="submit">"Reconnect"</button>
                                         </form>
                                     }
                                 })}
-                                <form method="post" action="/oauth/disconnect">
+                                <form class="account-actions" method="post" action="/oauth/disconnect">
                                     <input type="hidden" name="acct" value={acct}/>
                                     <input type="hidden" name="server" value={server}/>
                                     <button type="submit">"Disconnect"</button>
@@ -2696,7 +2705,7 @@ fn ConfigPage(
                             required
                             title="Required: the name of your instance, e.g. example.social. FediFetcher registers itself there and you approve it on the instance's own site."
                         />
-                        <button type="submit">"Connect your Mastodon account"</button>
+                        <button type="submit">"Connect your Fediverse account"</button>
                     </p>
                 </form>
             </section>
@@ -2706,8 +2715,11 @@ fn ConfigPage(
                     "Saved to " <code>{db_path}</code>
                     ". Runs use the saved values; log level and format apply on restart."
                 </p>
-                <p class="muted">"Hover a field for what it does."</p>
                 <form method="post" action="/config">
+                    <p class="muted">
+                        "Hover a field for what it does, its documented default, and the API scopes its task spends."
+                    </p>
+                    <p><button type="submit">"Save configuration"</button></p>
                     <table>
                         <tbody>{rows}</tbody>
                     </table>

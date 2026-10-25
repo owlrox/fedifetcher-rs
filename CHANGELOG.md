@@ -1,3 +1,27 @@
+## 1.3.0
+
+Polish the config page's accounts and tokens.
+
+Missing-permissions and rejected-token warnings ride in a red box
+(.warn-box, #c44 border and text), and the account rows lay out as a
+flex line: avatar and user line left, the Reconnect and Disconnect
+buttons right (margin-left:auto on the first action form). The
+Reconnect button rides the same warning mechanism both warnings use.
+
+The token rows' remove checkbox sits right of the masked token
+(token-row/token-remove classes) instead of below it. The "Hover a
+field" hint moves inside the save form — its wording now names what
+the tooltips carry (what the option does, its documented default, the
+API scopes its task spends) — and a second Save configuration button
+sits under it, above the table, so a long form saves from either end.
+
+The connect button says "Connect your Fediverse account". Disconnect's
+/oauth/revoke removes FediFetcher-rs from the user's Authorized apps
+view (that list is built from live tokens); the inert app registration
+left on the instance's developer side is invisible there.
+
+384 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.27
 
 Cleared fields reset to default, rows warn on missing scopes, richer tooltips.
