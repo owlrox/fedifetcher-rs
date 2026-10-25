@@ -46,6 +46,19 @@ async fn get(url: &str) -> (u16, String) {
     (status, body)
 }
 
+/// GET a page with a cookie header: (status, body).
+async fn get_with_cookie(url: &str, cookie: &str) -> (u16, String) {
+    let resp = client()
+        .get(url)
+        .header("Cookie", cookie)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    (status, body)
+}
+
 /// Poll the page at `path` until it contains any of the `markers`, polling
 /// as the timing conventions require, and return the matching page.
 async fn page_containing(base: &str, path: &str, markers: &[&str]) -> String {
@@ -3155,5 +3168,65 @@ async fn the_tables_urls_are_clickable() {
     assert!(
         page.contains("href=\"https://host.example\""),
         "the host name links to the server: {page}"
+    );
+}
+
+/// The data page follows a run in progress the way the dashboard does:
+/// it refreshes itself while the history's newest row is "running", even
+/// with live updates toggled off — the run is filling the tables it shows.
+#[tokio::test]
+async fn the_data_page_refreshes_while_a_run_is_in_progress() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, db) = spawn_ui_with(config).await;
+    let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
+    fedifetcher::db::start_run(&db, &started).await.unwrap();
+
+    let (status, body) = get_with_cookie(&format!("{base}/data"), "ff_live=0").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("http-equiv=\"refresh\""),
+        "a run in progress refreshes the data page even with live off: {body}"
+    );
+
+    // idle again, the page holds still
+    fedifetcher::db::finish_run(&db, 1, &started, "ok", "done")
+        .await
+        .unwrap();
+    let (status, body) = get_with_cookie(&format!("{base}/data"), "ff_live=0").await;
+    assert_eq!(status, 200);
+    assert!(
+        !body.contains("http-equiv=\"refresh\""),
+        "idle, the data page does not refresh: {body}"
+    );
+}
+
+/// The logs page follows a run in progress the same way: new lines are
+/// written the whole time, so the page refreshes even with live updates
+/// toggled off.
+#[tokio::test]
+async fn the_logs_page_refreshes_while_a_run_is_in_progress() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, db) = spawn_ui_with(config).await;
+    let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
+    fedifetcher::db::start_run(&db, &started).await.unwrap();
+
+    let (status, body) = get_with_cookie(&format!("{base}/logs"), "ff_live=0").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("http-equiv=\"refresh\""),
+        "a run in progress refreshes the logs page even with live off: {body}"
+    );
+
+    // idle again with live off, the page holds still
+    fedifetcher::db::finish_run(&db, 1, &started, "ok", "done")
+        .await
+        .unwrap();
+    let (status, body) = get_with_cookie(&format!("{base}/logs"), "ff_live=0").await;
+    assert_eq!(status, 200);
+    assert!(
+        !body.contains("http-equiv=\"refresh\""),
+        "idle, the logs page does not refresh: {body}"
     );
 }

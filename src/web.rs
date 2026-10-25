@@ -2261,8 +2261,15 @@ fn DataPage(
             action,
         } => table_tab(name, columns, rows, count, sort, order, action),
     };
+    // a run in progress is filling the tables this page shows, so the
+    // page follows it, the way the dashboard does — whatever the toggle says
+    let refresh = if running.is_some() {
+        Some(LIVE_REFRESH_SECONDS)
+    } else {
+        None
+    };
     view! {
-        <Page state=state running=running title="Data".to_string() live=live refresh=None>
+        <Page state=state running=running title="Data".to_string() live=live refresh=refresh>
             <nav class="tabs">{links}</nav>
             {section}
         </Page>
@@ -2571,7 +2578,9 @@ fn LogsPage(
     /// `levels` parameter.
     levels: Option<Vec<String>>,
 ) -> impl IntoView {
-    let refresh = if live {
+    // a run in progress writes lines the whole time, so the page follows
+    // it even with live updates toggled off — the dashboard's rule
+    let refresh = if live || running.is_some() {
         Some(LIVE_REFRESH_SECONDS)
     } else {
         None
