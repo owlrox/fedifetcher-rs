@@ -4,7 +4,9 @@
 //! with `with_scheme`; production always uses `new` (https).
 
 mod common;
+mod fixture;
 
+use fedifetcher::api::Client;
 use fedifetcher::api::lemmy::LemmyApi;
 use fedifetcher::api::mastodon::{HomeServer, MastodonApi};
 use fedifetcher::api::misskey::MisskeyApi;
@@ -26,7 +28,7 @@ fn host(server: &MockServer) -> String {
 
 async fn http(dir: &std::path::Path) -> HttpClient {
     let config = common::test_config(dir, "home.example");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     HttpClient::new(config, db)
 }
 
@@ -47,7 +49,7 @@ async fn the_mastodon_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     allow_all_robots(&server).await;
-    let api = MastodonApi::with_scheme(&host, "http", http(&dir).await);
+    let api = Client::Mastodon(MastodonApi::with_scheme(&host, "http", http(&dir).await));
 
     server
         .mock_async(|when, then| {
@@ -153,7 +155,7 @@ async fn the_misskey_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     allow_all_robots(&server).await;
-    let api = MisskeyApi::with_scheme(&host, "http", http(&dir).await);
+    let api = Client::Misskey(MisskeyApi::with_scheme(&host, "http", http(&dir).await));
 
     server
         .mock_async(|when, then| {
@@ -221,7 +223,7 @@ async fn the_misskey_client_runs_against_a_live_http_server() {
     );
 
     assert_eq!(
-        api.post_id_from(&format!("http://{host}/notes/n1")),
+        api.post_id_from(&format!("http://{host}/notes/n1")).await,
         Some("n1".to_string())
     );
     assert_eq!(
@@ -236,7 +238,7 @@ async fn the_lemmy_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     allow_all_robots(&server).await;
-    let api = LemmyApi::with_scheme(&host, "http", http(&dir).await);
+    let api = Client::Lemmy(LemmyApi::with_scheme(&host, "http", http(&dir).await));
 
     server
         .mock_async(|when, then| {
@@ -297,7 +299,7 @@ async fn the_lemmy_client_runs_against_a_live_http_server() {
     );
 
     assert_eq!(
-        api.post_id_from(&format!("http://{host}/post/123")),
+        api.post_id_from(&format!("http://{host}/post/123")).await,
         Some("123".to_string())
     );
     assert_eq!(
@@ -312,7 +314,7 @@ async fn the_peertube_client_runs_against_a_live_http_server() {
     let dir = common::tmp_dir();
     let host = host(&server);
     allow_all_robots(&server).await;
-    let api = PeerTubeApi::with_scheme(&host, "http", http(&dir).await);
+    let api = Client::PeerTube(PeerTubeApi::with_scheme(&host, "http", http(&dir).await));
 
     server
         .mock_async(|when, then| {
@@ -355,7 +357,7 @@ async fn the_peertube_client_runs_against_a_live_http_server() {
     );
 
     assert_eq!(
-        api.post_id_from(&format!("http://{host}/w/abc")),
+        api.post_id_from(&format!("http://{host}/w/abc")).await,
         Some("abc".to_string())
     );
     assert_eq!(

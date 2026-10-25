@@ -2,7 +2,9 @@
 //! at-will fetches the web UI's buttons start — one post's context, one
 //! account's posts, one host's server info, one URL's resolve.
 
+mod capture;
 mod common;
+mod runner;
 
 use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::backfill::UserSet;
@@ -55,7 +57,7 @@ async fn a_scan_records_its_trigger_posts() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let private = post(&format!("{UNREACHABLE}/@alice/10"), false);
     let public = post(&format!("{UNREACHABLE}/@alice/11"), true);
@@ -97,7 +99,7 @@ async fn force_post_context_resolves_the_post_and_records_it() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "secret-token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let uri = format!("{UNREACHABLE}/@alice/10");
     let search = server
@@ -138,7 +140,7 @@ async fn force_post_context_skips_a_post_recorded_as_private() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "secret-token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let uri = format!("{UNREACHABLE}/@alice/10");
     db::mark_private_post(&db, &uri).await.unwrap();
@@ -149,7 +151,7 @@ async fn force_post_context_skips_a_post_recorded_as_private() {
         })
         .await;
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     fetch::force_post_context(&mut ctx, &uri).await;
     drop(guard);
@@ -173,7 +175,7 @@ async fn force_user_posts_refuses_an_opted_out_account() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "secret-token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     // the first things a fetch would ask for, if the refusal did not happen
     let nodeinfo = server
@@ -193,7 +195,7 @@ async fn force_user_posts_refuses_an_opted_out_account() {
         .await
         .unwrap();
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     fetch::force_user_posts(
         &mut ctx,
@@ -229,13 +231,13 @@ async fn force_user_posts_fetches_an_opted_out_account_when_forced() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme("home.example", "http", "secret-token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     db::mark_opted_out_account(&db, "bot@127.0.0.1:9", "it is not indexable")
         .await
         .unwrap();
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     fetch::force_user_posts(
         &mut ctx,
@@ -274,9 +276,9 @@ async fn force_user_posts_refuses_a_local_account() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme("home.example", "http", "secret-token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     fetch::force_user_posts(&mut ctx, "alice", UserSet::KnownFollowings, false).await;
     drop(guard);
@@ -351,7 +353,7 @@ async fn force_host_info_replaces_the_cached_entry() {
     );
     assert!(state.seen_hosts().contains(host));
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     fetch::force_host_info(host, &http, &mut state).await;
     drop(guard);
@@ -385,7 +387,7 @@ async fn trigger_posts_round_trip_through_the_scan() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let toot = post(&format!("{UNREACHABLE}/@alice/10"), true);
     known_context_urls(&mut ctx, std::slice::from_ref(&toot), "bookmarks", false).await;

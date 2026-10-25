@@ -1,3 +1,48 @@
+## 1.2.9
+
+Mock server discovery end to end and close the audit's coverage gaps.
+
+The test audit found the suite strong (88.9% lines, no flakes, polling
+not sleeping) with one structural blind spot: every server lookup and
+URL-shape dispatch hardcoded https, so no test could reach server
+discovery, the nodeinfo-to-host-meta fallback, or the context scan's
+remote half. The 1.2.6 write-up deferred exactly this.
+
+The fix follows the flavor clients' own with_scheme idiom, moved to the
+one object every lookup already receives: HttpClient carries the scheme
+(new is https, with_scheme is for tests), and nodeinfo,
+server_from_host_meta, client_for and the replied-toot URL builder all
+take theirs from http.scheme() — no signature changes anywhere else.
+The two regexes that read a server name out of a location or lrdd
+template accept http as well as https, since servers may serve either;
+the URL parsers stay https-only, as the fixtures' https-spelled URLs
+reflect.
+
+New tests, 23 of them: the servers suite grows from 1 to 12 (discovery
+success, the host-meta fallback and each of its refusals, the unreadable
+announcement shapes); backfill covers the add_user_posts loop end to end
+(resolved post's context added, unresolvable post counted as failed and
+the account left unmarked, unreachable server, profile URL the flavor
+cannot read recorded in its target set); context covers the scan against
+a real mock server (fetch, local-URL filter, unresolved count, the
+recently-checked skip), the reply chase through its redirect including
+the unfindable case, and context_urls; stream covers the two database
+bookkeeping failures (state unloadable, run history unwritable). The
+flavor e2e tests now run through the Client enum, covering its dispatch
+arms.
+
+Test infrastructure: tests/common is split into common (temp dirs,
+configs), fixture (databases), runner (run contexts) and capture (log
+capture), so each suite compiles only the helpers it uses and the
+#![allow(dead_code)] is gone; web_integration's seven copies of the same
+poll loop are one page_containing helper. AGENTS.md's testing section
+records the scheme convention and how to measure coverage.
+
+Coverage is now 91.0% of lines (was 88.9%): servers.rs 92.6 (was 73.6),
+backfill.rs 94.3 (was 74.7), context.rs 94.8 (was 77.5), api/mod.rs
+91.1 (was 75.6), stream.rs 89.5 (was 86.9). 347 tests pass three times
+over; clippy -D warnings and fmt are clean.
+
 ## 1.2.8
 
 Add CHANGELOG.md generated from the commit history.

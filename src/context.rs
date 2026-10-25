@@ -275,7 +275,12 @@ async fn replied_toot_server_id(ctx: &mut Context<'_>, toot: &Post) -> Option<Re
     // only ever asked of reply toots, which always name the post replied to
     let reply_id = toot.in_reply_to_id.as_ref()?;
 
-    let o_url = format!("https://{}/@{}/{reply_id}", ctx.config.server, mention.acct);
+    let o_url = format!(
+        "{scheme}://{server}/@{acct}/{reply_id}",
+        scheme = ctx.http.scheme(),
+        server = ctx.config.server,
+        acct = mention.acct
+    );
     if let Some(cached) = ctx.state.replied_toot_server_ids().get(&o_url) {
         // a cache entry that survived a run is JSON, so the PostRef is a list
         return cached.clone();

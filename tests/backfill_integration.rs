@@ -1,10 +1,12 @@
 //! Backfilling one account: the opt-out rules, and that skipping an account
 //! is logged with the reason.
 
+mod capture;
 mod common;
+mod runner;
 
 use fedifetcher::api::mastodon::HomeServer;
-use fedifetcher::backfill::{UserSet, user_posts};
+use fedifetcher::backfill::{Force, UserSet, add_user_posts, user_posts};
 use fedifetcher::http::HttpClient;
 use fedifetcher::posts::Post;
 use fedifetcher::store::State;
@@ -21,7 +23,7 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
     let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
     let home = HomeServer::new("example.social", "secret-token", client.clone());
-    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
 
     // the first things a fetch would ask for, if the skip did not happen
     let nodeinfo = server
@@ -40,7 +42,7 @@ async fn an_account_that_opted_out_is_logged_and_not_fetched() {
     let mut user = User::new("bot", format!("{}/@bot", server.base_url()));
     user.note = "beep boop, nobot".to_string();
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
     drop(guard);
@@ -73,14 +75,14 @@ async fn an_account_that_opted_out_is_fetched_when_the_rule_is_off() {
     let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
     let home = HomeServer::new("example.social", "secret-token", client.clone());
-    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
 
     // A local user: no fetching happens either way, but with the rule off
     // the opt-out check is skipped and the account is recorded as checked.
     let mut user = User::new("bot", "https://example.social/@bot");
     user.note = "beep boop, nobot".to_string();
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
     drop(guard);
@@ -112,14 +114,14 @@ async fn an_account_that_opted_out_is_fetched_when_forced() {
     let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
     let home = HomeServer::new("example.social", "secret-token", client.clone());
-    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
 
     // A local user: no fetching happens either way, but with the force the
     // opt-out check is skipped and the account is recorded as checked.
     let mut user = User::new("bot", "https://example.social/@bot");
     user.note = "beep boop, nobot".to_string();
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, true).await;
     drop(guard);
@@ -145,7 +147,7 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
     let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
     let home = HomeServer::new("example.social", "secret-token", client.clone());
-    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
 
     // the first things a fetch would ask for, if the skip did not happen
     let nodeinfo = server
@@ -164,7 +166,7 @@ async fn an_opted_out_account_is_recorded_and_logged_once() {
     let mut user = User::new("bot", format!("{}/@bot", server.base_url()));
     user.indexable = false;
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     // two runs over the same database
     let first = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
@@ -213,11 +215,11 @@ async fn an_unparseable_profile_url_is_recorded_as_checked() {
     let client = HttpClient::new(config.clone(), db.clone());
     let mut state = State::default();
     let home = HomeServer::new("example.social", "secret-token", client.clone());
-    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
 
     let user = User::new("alice", "not a url");
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
     drop(guard);
@@ -253,7 +255,7 @@ async fn a_server_with_no_known_api_is_not_backfilled() {
         .seen_hosts_mut()
         .add("remote.invalid", known.to_state());
     let home = HomeServer::new("example.social", "secret-token", client.clone());
-    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
 
     let user = User::new("alice@remote.invalid", "https://remote.invalid/@alice");
 
@@ -289,7 +291,7 @@ async fn a_profile_shape_the_client_cannot_read_is_recorded_as_checked() {
         .seen_hosts_mut()
         .add("remote.invalid", known.to_state());
     let home = HomeServer::new("example.social", "secret-token", client.clone());
-    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
 
     // not one of the Mastodon client's profile shapes
     let user = User::new(
@@ -297,7 +299,7 @@ async fn a_profile_shape_the_client_cannot_read_is_recorded_as_checked() {
         "https://remote.invalid/profiles/alice",
     );
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
     drop(guard);
@@ -332,7 +334,7 @@ async fn a_post_without_possible_context_is_resolved_and_remembered() {
         client.clone(),
     );
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &client, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
 
     let url = "https://remote.example/@alice/1";
     let search = server
@@ -368,5 +370,255 @@ async fn a_post_without_possible_context_is_resolved_and_remembered() {
     assert!(
         state.seen_urls().contains(url),
         "the post is remembered as seen"
+    );
+}
+
+/// The mock server's host, without the scheme.
+fn host(server: &MockServer) -> String {
+    server.base_url().trim_start_matches("http://").to_string()
+}
+
+/// The mock server already knows alice and answers her statuses with one
+/// post, `http://{host}/@alice/10`.
+async fn mock_alice(server: &MockServer) {
+    let host = host(server);
+    server
+        .mock_async(move |when, then| {
+            when.method(Method::GET).path("/robots.txt");
+            then.status(200).body("User-agent: *\nAllow: /\n");
+        })
+        .await;
+    server
+        .mock_async(move |when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/accounts/lookup")
+                .query_param("acct", "alice");
+            then.status(200).json_body(serde_json::json!({ "id": "1" }));
+        })
+        .await;
+    server
+        .mock_async(move |when, then| {
+            when.method(Method::GET).path("/api/v1/accounts/1/statuses");
+            then.status(200).json_body(serde_json::json!([{
+                "id": "10",
+                "url": format!("https://{host}/@alice/10"),
+                "uri": format!("https://{host}/@alice/10"),
+                "created_at": "2026-10-22T10:00:00.000Z",
+                "visibility": "public",
+                "reblog": null,
+                "replies_count": 2,
+            }]));
+        })
+        .await;
+}
+
+/// The mock server's host, preloaded as a known mastodon server so no
+/// discovery request is made.
+fn known_mock(server: &MockServer) -> fedifetcher::servers::ServerInfo {
+    fedifetcher::servers::ServerInfo::from_nodeinfo(
+        &host(server),
+        &serde_json::json!({
+            "software": {"name": "mastodon", "version": "4.3.0"},
+            "protocols": ["activitypub"],
+        }),
+    )
+    .unwrap()
+}
+
+/// A post the home server cannot resolve counts as a failure: the account is
+/// left unmarked, so the next run tries it again.
+#[tokio::test]
+async fn a_post_the_home_server_cannot_resolve_counts_as_failed() {
+    let server = MockServer::start_async().await;
+    let home_server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::with_scheme(config.clone(), db.clone(), "http");
+    let mut state = State::default();
+    state
+        .seen_hosts_mut()
+        .add(&host(&server), known_mock(&server).to_state());
+    let home = HomeServer::with_scheme(&host(&home_server), "http", "secret-token", client.clone());
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
+
+    mock_alice(&server).await;
+    home_server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v2/search");
+            then.status(500);
+        })
+        .await;
+
+    let logs = capture::LogCapture::new();
+    let guard = logs.install();
+    add_user_posts(
+        &mut ctx,
+        vec![User::new(
+            "alice",
+            format!("https://{}/@alice", host(&server)),
+        )],
+        UserSet::RecentlyCheckedUsers,
+        Force::default(),
+    )
+    .await;
+    drop(guard);
+
+    let logged = logs.text();
+    assert!(
+        logged.contains("Added 0 posts for user alice with 1 errors"),
+        "the failure is counted: {logged}"
+    );
+    assert!(
+        !state.recently_checked_users().contains("alice"),
+        "an account with failures is tried again next run"
+    );
+    assert!(!state.all_known_users().contains("alice"));
+}
+
+/// A post the home server resolves gets its context fetched from the server
+/// that hosts it, and the account is recorded as known.
+#[tokio::test]
+async fn a_resolved_posts_context_is_added_during_backfill() {
+    let server = MockServer::start_async().await;
+    let home_server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.backfill_with_context = true;
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::with_scheme(config.clone(), db.clone(), "http");
+    let mut state = State::default();
+    state
+        .seen_hosts_mut()
+        .add(&host(&server), known_mock(&server).to_state());
+    let home = HomeServer::with_scheme(&host(&home_server), "http", "secret-token", client.clone());
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
+
+    mock_alice(&server).await;
+    let mock_host = host(&server);
+    let ctx_host = mock_host.clone();
+    server
+        .mock_async(move |when, then| {
+            when.method(Method::GET).path("/api/v1/statuses/10/context");
+            then.status(200).json_body(serde_json::json!({
+                "ancestors": [{ "url": format!("https://{ctx_host}/@bob/9") }],
+                "descendants": [{ "url": format!("https://{ctx_host}/@carol/11") }],
+            }));
+        })
+        .await;
+    // the home server resolves everything the scan brings it
+    home_server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v2/search");
+            then.status(200);
+        })
+        .await;
+
+    let logs = capture::LogCapture::new();
+    let guard = logs.install();
+    add_user_posts(
+        &mut ctx,
+        vec![User::new(
+            "alice",
+            format!("https://{}/@alice", host(&server)),
+        )],
+        UserSet::RecentlyCheckedUsers,
+        Force::default(),
+    )
+    .await;
+    drop(guard);
+
+    let logged = logs.text();
+    assert!(
+        logged.contains("Added 1 posts for user alice with 0 errors"),
+        "the post is added: {logged}"
+    );
+    assert!(
+        logged.contains("Added 2 new context toots"),
+        "the post's context is added: {logged}"
+    );
+    assert!(
+        state
+            .seen_urls()
+            .contains(&format!("https://{mock_host}/@bob/9"))
+            && state
+                .seen_urls()
+                .contains(&format!("https://{mock_host}/@carol/11")),
+        "the context urls are remembered as seen"
+    );
+    assert!(
+        state.recently_checked_users().contains("alice")
+            && state.all_known_users().contains("alice"),
+        "a fully fetched account is recorded as known"
+    );
+}
+
+/// An account on a server that cannot be asked what it runs is skipped, and
+/// the skip says which server failed.
+#[tokio::test]
+async fn an_account_on_an_unreachable_server_is_skipped() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
+    let mut state = State::default();
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
+
+    let user = User::new("bob", "https://127.0.0.1:9/@bob");
+
+    let logs = capture::LogCapture::new();
+    let guard = logs.install();
+    let posts = user_posts(&mut ctx, &user, UserSet::RecentlyCheckedUsers, false).await;
+    drop(guard);
+
+    assert!(posts.is_none(), "nothing can be fetched");
+    assert!(
+        logs.text()
+            .contains("server 127.0.0.1:9 not found for post"),
+        "the failed lookup is logged: {}",
+        logs.text()
+    );
+}
+
+/// An account whose profile URL the server's own flavor cannot read is
+/// recorded in the target set anyway, so it is not retried every run.
+#[tokio::test]
+async fn a_profile_url_the_flavor_cannot_read_is_recorded_as_checked() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let client = HttpClient::new(config.clone(), db.clone());
+    let mut state = State::default();
+    // the server is known to speak mastodon, but the URL is a Lemmy
+    // community's, which no mastodon URL shape matches
+    let known = fedifetcher::servers::ServerInfo::from_nodeinfo(
+        "remote.invalid",
+        &serde_json::json!({"software": {"name": "mastodon", "version": "1"}}),
+    )
+    .unwrap();
+    state
+        .seen_hosts_mut()
+        .add("remote.invalid", known.to_state());
+    let home = HomeServer::new("example.social", "secret-token", client.clone());
+    let mut ctx = runner::run_context(&config, &mut state, &client, &home, &db);
+
+    let user = User::new("alice@remote.invalid", "https://remote.invalid/c/community");
+
+    let logs = capture::LogCapture::new();
+    let guard = logs.install();
+    let posts = user_posts(&mut ctx, &user, UserSet::KnownFollowings, false).await;
+    drop(guard);
+
+    assert!(posts.is_none(), "no URL shape means no posts");
+    assert!(
+        logs.text()
+            .contains("Error parsing Profile URL https://remote.invalid/c/community"),
+        "the unreadable URL is logged: {}",
+        logs.text()
+    );
+    assert!(
+        state.known_followings().contains("alice@remote.invalid"),
+        "the account is recorded in the set it was backfilled for"
     );
 }

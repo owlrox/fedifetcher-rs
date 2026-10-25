@@ -360,7 +360,10 @@ pub async fn nodeinfo(
     host_meta_fallback: bool,
     http: &HttpClient,
 ) -> Result<ServerInfo> {
-    let url = format!("https://{server}/.well-known/nodeinfo");
+    let url = format!(
+        "{scheme}://{server}/.well-known/nodeinfo",
+        scheme = http.scheme()
+    );
     let resp = match http.get(&url, Some(Duration::from_secs(30))).await {
         Ok(resp) => resp,
         Err(ex) => {
@@ -421,7 +424,7 @@ pub async fn nodeinfo(
 
     // regrab server from node_location, again in the case of different
     // display and web domains
-    let pattern = Regex::new(r"https://(?P<server>[^/]+)/").unwrap();
+    let pattern = Regex::new(r"https?://(?P<server>[^/]+)/").unwrap();
     let Some(server) = pattern
         .captures(&node_location)
         .and_then(|c| c.name("server"))
@@ -524,7 +527,10 @@ fn extract_node_location(resp: &crate::http::Response) -> Result<Option<String>>
 }
 
 pub async fn server_from_host_meta(server: &str, http: &HttpClient) -> Option<String> {
-    let url = format!("https://{server}/.well-known/host-meta");
+    let url = format!(
+        "{scheme}://{server}/.well-known/host-meta",
+        scheme = http.scheme()
+    );
     let resp = match http.get(&url, Some(Duration::from_secs(30))).await {
         Ok(resp) => resp,
         Err(ex) => {
@@ -564,7 +570,7 @@ fn parse_host_meta(text: &str, server: &str) -> Result<String> {
     let template = lrdd
         .attribute("template")
         .ok_or_else(|| Error::Fetch("lrdd link has no template".to_string()))?;
-    let pattern = Regex::new(r"https://(?P<server>[^/]+)/").unwrap();
+    let pattern = Regex::new(r"https?://(?P<server>[^/]+)/").unwrap();
     match pattern.captures(template).and_then(|c| c.name("server")) {
         Some(found) => Ok(found.as_str().to_string()),
         None => Err(Error::Fetch(format!(

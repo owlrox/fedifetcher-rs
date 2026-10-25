@@ -80,6 +80,19 @@ Timing-sensitive tests poll every 25–50 ms for up to 100 iterations
 instead of sleeping a fixed time; when touching them, run the suite a
 few times to shake out flakes.
 
+No production URL builder hardcodes a scheme: the API clients and the
+server lookups take theirs from the `HttpClient` they are given, so the
+tests can point the whole stack at a local http server with
+`HttpClient::with_scheme(config, db, "http")`. A new lookup goes through
+`http.scheme()` the same way; URL *parsers* stay https-only, because
+fediverse URLs are https in the wild — test fixtures spell their URLs
+https even when the mock server speaks http.
+
+Coverage is measured with cargo-llvm-cov
+(`cargo llvm-cov --summary-only`); on a machine where it cannot find
+llvm-tools-preview, point `LLVM_COV` and `LLVM_PROFDATA` at the
+toolchain's `lib/rustlib/<host>/bin` copies.
+
 ## License
 
 The project is GPL-3.0-only: `license = "GPL-3.0-only"` in `Cargo.toml`,

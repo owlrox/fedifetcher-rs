@@ -103,26 +103,30 @@ pub fn client_for(server: &ServerInfo, http: &HttpClient) -> Option<Client> {
     // tried in order, so a server claiming several APIs gets the best
     // supported one
     if server.supports(ApiFlavor::Mastodon) {
-        return Some(Client::Mastodon(MastodonApi::new(
+        return Some(Client::Mastodon(MastodonApi::with_scheme(
             &server.webserver,
+            http.scheme(),
             http.clone(),
         )));
     }
     if server.supports(ApiFlavor::Lemmy) {
-        return Some(Client::Lemmy(LemmyApi::new(
+        return Some(Client::Lemmy(LemmyApi::with_scheme(
             &server.webserver,
+            http.scheme(),
             http.clone(),
         )));
     }
     if server.supports(ApiFlavor::Misskey) {
-        return Some(Client::Misskey(MisskeyApi::new(
+        return Some(Client::Misskey(MisskeyApi::with_scheme(
             &server.webserver,
+            http.scheme(),
             http.clone(),
         )));
     }
     if server.supports(ApiFlavor::PeerTube) {
-        return Some(Client::PeerTube(PeerTubeApi::new(
+        return Some(Client::PeerTube(PeerTubeApi::with_scheme(
             &server.webserver,
+            http.scheme(),
             http.clone(),
         )));
     }

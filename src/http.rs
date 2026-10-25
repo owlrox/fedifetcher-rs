@@ -96,12 +96,22 @@ pub struct HttpClient {
     robots: Arc<OnceLock<Arc<RobotsCache>>>,
     headers: Option<HeaderMap>,
     ignore_robots: bool,
+    /// The scheme the server lookups build their URLs with: production
+    /// always asks real servers over https, tests point this at a local
+    /// http server.
+    scheme: &'static str,
     /// The database the robots.txt cache lives in.
     db: SqlitePool,
 }
 
 impl HttpClient {
     pub fn new(config: Config, db: SqlitePool) -> Self {
+        HttpClient::with_scheme(config, db, "https")
+    }
+
+    /// A client whose server lookups go to `scheme://`. Production always
+    /// uses `new` (https); tests point this at a local http server.
+    pub fn with_scheme(config: Config, db: SqlitePool, scheme: &'static str) -> Self {
         // a client keeps connections alive between the many requests we make
         // to the same handful of hosts
         HttpClient {
@@ -114,8 +124,14 @@ impl HttpClient {
             robots: Arc::new(OnceLock::new()),
             headers: None,
             ignore_robots: false,
+            scheme,
             db,
         }
+    }
+
+    /// The scheme this client's server lookups are built with.
+    pub fn scheme(&self) -> &'static str {
+        self.scheme
     }
 
     /// A client that will ignore robots.txt.

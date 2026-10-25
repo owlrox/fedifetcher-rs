@@ -2,7 +2,9 @@
 //! rate limits. Mirrors the Python original's test_http.py, with httpmock
 //! standing in for the mocked `requests` session.
 
+mod capture;
 mod common;
+mod fixture;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -29,7 +31,7 @@ async fn allow_all_robots(server: &MockServer) -> Mock<'_> {
 async fn user_agent_names_the_configured_server() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
     assert_eq!(
         client.user_agent(),
@@ -42,7 +44,7 @@ async fn user_agent_can_hide_the_server() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.hide_server_in_user_agent = true;
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
     assert_eq!(
         client.user_agent(),
@@ -55,7 +57,7 @@ async fn get_sends_our_user_agent() {
     let server = MockServer::start_async().await;
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
     let api = server
         .mock_async(|when, then| {
@@ -79,7 +81,7 @@ async fn a_failed_request_names_the_cause() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.respect_robots_txt = false;
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     // port 1 on localhost refuses connections: no server and no network
@@ -116,7 +118,7 @@ async fn requests_the_robots_file_forbids_are_refused() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let err = client
@@ -150,7 +152,7 @@ async fn robots_is_not_consulted_when_disabled_in_the_config() {
         .await;
     let mut config = common::test_config(&dir, "example.social");
     config.respect_robots_txt = false;
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let resp = client
@@ -179,7 +181,7 @@ async fn a_client_ignoring_robots_is_not_checked() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db).ignoring_robots();
 
     let resp = client
@@ -204,7 +206,7 @@ async fn blocklisted_hosts_are_never_contacted() {
     let netloc = server.base_url().trim_start_matches("http://").to_string();
     let mut config = common::test_config(&dir, "example.social");
     config.instance_blocklist = vec![netloc];
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let err = client
@@ -233,10 +235,10 @@ async fn a_host_blocked_by_robots_txt_is_logged_as_such() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let err = client
         .get(&format!("{}/api", server.base_url()), None)
@@ -277,10 +279,10 @@ async fn a_blocklisted_host_is_logged_as_such() {
     let netloc = server.base_url().trim_start_matches("http://").to_string();
     let mut config = common::test_config(&dir, "example.social");
     config.instance_blocklist = vec![netloc.clone()];
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let err = client
         .get(&format!("{}/api", server.base_url()), None)
@@ -333,7 +335,7 @@ async fn rate_limited_requests_are_retried_after_the_reset() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let resp = client
@@ -370,7 +372,7 @@ async fn rate_limited_requests_back_off_without_a_reset_header() {
     let mut config = common::test_config(&dir, "example.social");
     // two steps, so the third try succeeds: the series is walked in order
     config.rate_limit_cooldown = vec![0.01, 0.04];
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let resp = client
@@ -395,7 +397,7 @@ async fn rate_limiting_gives_up_eventually() {
     let mut config = common::test_config(&dir, "example.social");
     // two steps: the initial request, plus one per step, then it gives up
     config.rate_limit_cooldown = vec![0.01, 0.01];
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let err = client
@@ -423,7 +425,7 @@ async fn robots_is_read_from_the_network_once_then_remembered() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
     let url = format!("{}/api", server.base_url());
 
@@ -448,7 +450,7 @@ async fn robots_is_cached_in_the_database_between_clients() {
     let url = format!("{}/api", server.base_url());
     let robots_url = format!("{}/robots.txt", server.base_url());
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
 
     let first = HttpClient::new(config.clone(), db.clone());
     first.get(&url, None).await.expect("first client");
@@ -487,7 +489,7 @@ async fn a_refused_robots_file_denies_everything() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let err = client
@@ -507,7 +509,7 @@ async fn a_refused_robots_file_denies_everything() {
 async fn an_unreachable_robots_file_allows_everything() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     // port 9 (discard) is closed: nothing answers there
@@ -523,7 +525,7 @@ async fn an_unreachable_robots_file_allows_everything() {
 async fn stale_robots_entries_are_discarded() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let robots = HttpClient::new(config, db.clone()).robots();
 
     db::robots_store(&db, "https://old.example/robots.txt", ALLOW_ALL)
@@ -569,7 +571,7 @@ async fn get_redirect_url_returns_the_url_when_it_does_not_redirect() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
     let url = format!("{}/objects/1", server.base_url());
 
@@ -592,7 +594,7 @@ async fn get_redirect_url_follows_a_302() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     assert_eq!(
@@ -617,7 +619,7 @@ async fn get_redirect_url_gives_up_on_other_statuses() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     assert_eq!(
@@ -641,7 +643,7 @@ async fn get_redirect_url_honors_the_blocklist() {
     let netloc = server.base_url().trim_start_matches("http://").to_string();
     let mut config = common::test_config(&dir, "example.social");
     config.instance_blocklist = vec![netloc];
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     assert_eq!(
@@ -670,7 +672,7 @@ async fn get_redirect_url_honors_robots() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     assert_eq!(
@@ -702,7 +704,7 @@ async fn authenticated_clients_send_their_token_and_skip_robots() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let resp = client
@@ -739,7 +741,7 @@ async fn the_original_client_is_unaffected_by_deriving_one() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     client
@@ -771,7 +773,7 @@ async fn post_sends_the_body_as_json_and_the_client_headers() {
         })
         .await;
     let config = common::test_config(&dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     let client = HttpClient::new(config, db);
 
     let resp = client

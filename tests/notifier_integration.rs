@@ -2,6 +2,7 @@
 //! would not accept any URL we happened to build.
 
 mod common;
+mod fixture;
 
 use fedifetcher::http::HttpClient;
 use fedifetcher::run::Notifier;
@@ -20,7 +21,7 @@ async fn notifier(
     config.on_done = on_done;
     config.on_fail = on_fail;
     let http_config = common::test_config(dir, "example.social");
-    let db = common::test_db(&http_config).await;
+    let db = fixture::test_db(&http_config).await;
     let http = HttpClient::new(http_config, db);
     Notifier::new(config, http, Uuid::from_u128(1))
 }

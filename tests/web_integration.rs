@@ -45,6 +45,19 @@ async fn get(url: &str) -> (u16, String) {
     (status, body)
 }
 
+/// Poll the page at `path` until it contains any of the `markers`, polling
+/// as the timing conventions require, and return the matching page.
+async fn page_containing(base: &str, path: &str, markers: &[&str]) -> String {
+    for _ in 0..100 {
+        let (_, page) = get(&format!("{base}{path}")).await;
+        if markers.iter().any(|marker| page.contains(marker)) {
+            return page;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the page {path} never contained any of {markers:?}");
+}
+
 /// POST a urlencoded form to /config: (status, Location, body).
 async fn post_config(base: &str, form: &str) -> (u16, Option<String>, String) {
     let resp = client()
@@ -275,15 +288,7 @@ async fn posting_run_redirects_back_and_records_the_run() {
 
     // the run it started finishes (nothing is enabled), and shows up in the
     // dashboard's history
-    let mut body = String::new();
-    for _ in 0..50 {
-        let (_, page) = get(&format!("{base}/")).await;
-        if page.contains("Processing finished in") {
-            body = page;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    let body = page_containing(&base, "/", &["Processing finished in"]).await;
     assert!(
         body.contains("Processing finished in"),
         "the run should be recorded in the history"
@@ -1043,15 +1048,7 @@ async fn the_stop_button_stops_a_running_run() {
     assert_eq!(resp.status().as_u16(), 303);
 
     // while the run is going, the dashboard offers to stop it
-    let mut running_page = String::new();
-    for _ in 0..100 {
-        let (_, page) = get(&format!("{base}/")).await;
-        if page.contains("Running since") {
-            running_page = page;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    let running_page = page_containing(&base, "/", &["Running since"]).await;
     assert!(
         running_page.contains("Running since"),
         "the run should be running"
@@ -1065,15 +1062,7 @@ async fn the_stop_button_stops_a_running_run() {
 
     // the run finishes early, and the history records that it was stopped,
     // along with how long it ran before stopping
-    let mut body = String::new();
-    for _ in 0..100 {
-        let (_, page) = get(&format!("{base}/")).await;
-        if page.contains("Stopped after ") {
-            body = page;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    let body = page_containing(&base, "/", &["Stopped after "]).await;
     assert!(
         body.contains("Stopped after "),
         "the run should report being stopped, with its elapsed time"
@@ -1105,15 +1094,7 @@ async fn the_pause_button_pauses_a_running_run_and_resume_continues_it() {
     assert_eq!(resp.status().as_u16(), 303);
 
     // while the run is going, the dashboard offers to pause it
-    let mut running_page = String::new();
-    for _ in 0..100 {
-        let (_, page) = get(&format!("{base}/")).await;
-        if page.contains("Running since") {
-            running_page = page;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    let running_page = page_containing(&base, "/", &["Running since"]).await;
     assert!(
         running_page.contains("Running since"),
         "the run should be running"
@@ -1128,15 +1109,7 @@ async fn the_pause_button_pauses_a_running_run_and_resume_continues_it() {
 
     // the dashboard shows the pause: the badge, and a resume button in
     // place of the pause one — stop stays available
-    let mut paused_page = String::new();
-    for _ in 0..100 {
-        let (_, page) = get(&format!("{base}/")).await;
-        if page.contains("badge paused") {
-            paused_page = page;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    let paused_page = page_containing(&base, "/", &["badge paused"]).await;
     assert!(
         paused_page.contains("badge paused"),
         "the status badge should say paused"
@@ -1170,15 +1143,8 @@ async fn the_pause_button_pauses_a_running_run_and_resume_continues_it() {
     // consistent page: the dashboard reads the status and the run history
     // at two moments, so a page can briefly show the finished status next
     // to the still-running history row.
-    let mut resumed_page = String::new();
-    for _ in 0..100 {
-        let (_, page) = get(&format!("{base}/")).await;
-        if page.contains("Running since") || page.contains("Processing finished in") {
-            resumed_page = page;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    let resumed_page =
+        page_containing(&base, "/", &["Running since", "Processing finished in"]).await;
     assert!(
         !resumed_page.is_empty(),
         "the resume should set the run going again"
@@ -1186,15 +1152,7 @@ async fn the_pause_button_pauses_a_running_run_and_resume_continues_it() {
     assert!(!resumed_page.contains("Resume the paused FediFetcher"));
 
     // and the run finishes once it is going again
-    let mut body = String::new();
-    for _ in 0..100 {
-        let (_, page) = get(&format!("{base}/")).await;
-        if page.contains("Processing finished in") {
-            body = page;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    let body = page_containing(&base, "/", &["Processing finished in"]).await;
     assert!(
         body.contains("Processing finished in"),
         "the resumed run should finish"

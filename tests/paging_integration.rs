@@ -2,6 +2,7 @@
 //! the home server's endpoints use.
 
 mod common;
+mod fixture;
 
 use fedifetcher::api::mastodon::{StopAt, get_paginated};
 use fedifetcher::http::HttpClient;
@@ -12,7 +13,7 @@ use serde_json::json;
 async fn client(dir: &std::path::Path) -> HttpClient {
     // the paging code is not about robots.txt; leave it out of the way
     let config = common::test_config(dir, "example.social");
-    let db = common::test_db(&config).await;
+    let db = fixture::test_db(&config).await;
     HttpClient::new(config, db).ignoring_robots()
 }
 

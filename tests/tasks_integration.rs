@@ -1,7 +1,9 @@
 //! The tasks a run does: that each runs only when its setting asks for it,
 //! that a canceled run stops between tasks, and how replies are picked.
 
+mod capture;
 mod common;
+mod runner;
 
 use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::db;
@@ -78,7 +80,7 @@ async fn each_task_runs_when_its_setting_asks_for_it() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let lists = server
         .mock_async(|when, then| {
@@ -143,7 +145,7 @@ async fn each_task_runs_when_its_setting_asks_for_it() {
     let bookmarks = empty_array(&server, "/api/v1/bookmarks").await;
     let favorites = empty_array(&server, "/api/v1/favourites").await;
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     tasks::run_enabled_tasks(&mut ctx)
         .await
@@ -195,7 +197,7 @@ async fn a_task_whose_setting_is_off_does_not_run() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let timeline = server
         .mock_async(|when, then| {
@@ -227,7 +229,7 @@ async fn a_canceled_run_stops_at_the_checkpoint_after_the_first_task() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
     ctx.cancel.cancel();
 
     let lists = server
@@ -271,7 +273,7 @@ async fn reply_toots_keeps_only_recent_unseen_replies() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     // a reply we have already seen
     ctx.state
@@ -333,7 +335,7 @@ async fn reply_toots_survives_a_failing_user() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     server
         .mock_async(|when, then| {
@@ -355,7 +357,7 @@ async fn reply_toots_survives_a_failing_user() {
         })
         .await;
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let toots = reply_toots(&mut ctx, &["bad".to_string(), "good".to_string()]).await;
     drop(guard);
@@ -380,7 +382,7 @@ async fn a_timeline_posts_mentions_are_backfilled() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::with_scheme(&host(&server), "http", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     server
         .mock_async(|when, then| {
@@ -409,7 +411,7 @@ async fn a_timeline_posts_mentions_are_backfilled() {
         })
         .await;
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
     let posts = ctx.home.timeline(5).await.unwrap();
     fetch_timeline_context(&mut ctx, posts, "home timeline").await;

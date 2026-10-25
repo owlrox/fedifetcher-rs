@@ -1,7 +1,9 @@
 //! Posts found private: recorded in the database, and skipped without a
 //! single request on later runs.
 
+mod capture;
 mod common;
+mod runner;
 
 use fedifetcher::api::mastodon::HomeServer;
 use fedifetcher::context::known_context_urls;
@@ -45,7 +47,7 @@ async fn a_private_post_is_recorded_and_never_touched() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let toot = post("10", false);
     let urls = context_urls(&mut ctx, &toot).await;
@@ -75,7 +77,7 @@ async fn a_post_marked_private_is_skipped_on_later_runs() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let toot = post("10", true);
     db::mark_private_post(&db, &toot.uri).await.unwrap();
@@ -106,7 +108,7 @@ async fn a_public_post_is_still_resolved() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
     let toot = post("10", true);
     let _ = context_urls(&mut ctx, &toot).await;
@@ -132,9 +134,9 @@ async fn the_summary_line_says_why_nothing_was_found() {
     let http = HttpClient::new(config.clone(), db.clone());
     let home = HomeServer::new("home.example", "token", http.clone());
     let mut state = State::default();
-    let mut ctx = common::run_context(&config, &mut state, &http, &home, &db);
+    let mut ctx = runner::run_context(&config, &mut state, &http, &home, &db);
 
-    let logs = common::LogCapture::new();
+    let logs = capture::LogCapture::new();
     let guard = logs.install();
 
     let private_toot = post("10", false);

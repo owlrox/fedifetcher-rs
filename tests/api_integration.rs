@@ -1,7 +1,8 @@
 //! Choosing and speaking to the right server API. The flavor clients build
-//! their request URLs with a hardcoded https scheme (as the Python original
-//! does), so these tests cover the parts that need no network: which client a
-//! server gets, and how each flavor reads its own URL shapes.
+//! their request URLs with the scheme the HTTP client carries (https in
+//! production, http under the test server), so these tests cover the parts
+//! that need no network: which client a server gets, and how each flavor
+//! reads its own URL shapes.
 
 mod common;
 
@@ -221,5 +222,28 @@ async fn a_post_on_a_server_with_no_known_api_is_not_looked_up() {
     assert_eq!(
         state.parsed_urls().get("https://remote.invalid/@alice/1"),
         Some(&None)
+    );
+}
+
+/// A canonical post URL on a server we already know is read from the URL
+/// itself: no request is made, and the answer is remembered.
+#[tokio::test]
+async fn a_post_url_on_a_known_server_is_parsed_without_asking() {
+    let dir = common::tmp_dir();
+    let http = http(&dir);
+    let mut state = State::default();
+    state
+        .seen_hosts_mut()
+        .add("example.social", server_info("mastodon").to_state());
+
+    let found = find_post("https://example.social/@alice/123", &mut state, &http).await;
+
+    let found = found.expect("a canonical mastodon URL on a known server parses");
+    assert_eq!(found.server, "example.social");
+    assert_eq!(found.post_id, "123");
+    assert_eq!(
+        state.parsed_urls().get("https://example.social/@alice/123"),
+        Some(&Some(found)),
+        "the answer is remembered"
     );
 }

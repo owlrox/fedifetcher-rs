@@ -397,3 +397,82 @@ async fn a_websocket_streaming_url_is_read_over_http() {
         .expect("the streamed post is recorded as a trigger post");
     assert_eq!(recorded.source, "stream");
 }
+
+/// The stream fetch records itself as an error when its state cannot be
+/// loaded, instead of losing the run history row or panicking.
+#[tokio::test]
+async fn a_stream_fetch_records_an_error_when_the_state_cannot_be_loaded() {
+    let dir = common::tmp_dir();
+    let home = MockServer::start_async().await;
+    let (stream_url, _connections) = sse_server(&[post_event(
+        "update",
+        "https://127.0.0.1:9/@alice/1",
+        "public",
+    )])
+    .await;
+    home_with_stream(&home, &stream_url).await;
+
+    let mut config = common::test_config(&dir, &host(&home));
+    config.streaming = true;
+    let db = db::open(&config).await.unwrap();
+    sqlx::query("DROP TABLE seen_urls")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let (listener, cancel) = start_listener(config, db.clone());
+    let db2 = db.clone();
+    until(|| {
+        let db = db2.clone();
+        async move {
+            db::recent_runs(&db, 10).await.unwrap().iter().any(|run| {
+                run.outcome == "error" && run.message.contains("could not load the state")
+            })
+        }
+    })
+    .await;
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(10), listener)
+        .await
+        .expect("the canceled listener stops promptly")
+        .expect("the listener did not panic");
+}
+
+/// The stream fetch fetches the post's context even when the run history
+/// itself cannot be written: the bookkeeping failure costs the row, not the
+/// fetch.
+#[tokio::test]
+async fn a_stream_fetch_survives_a_run_history_it_cannot_write() {
+    let dir = common::tmp_dir();
+    let home = MockServer::start_async().await;
+    let (stream_url, _connections) = sse_server(&[post_event(
+        "update",
+        "https://127.0.0.1:9/@alice/1",
+        "public",
+    )])
+    .await;
+    home_with_stream(&home, &stream_url).await;
+
+    let mut config = common::test_config(&dir, &host(&home));
+    config.streaming = true;
+    let db = db::open(&config).await.unwrap();
+    sqlx::query("DROP TABLE runs").execute(&db).await.unwrap();
+
+    let (listener, cancel) = start_listener(config, db.clone());
+    let db2 = db.clone();
+    until(|| {
+        let db = db2.clone();
+        async move {
+            db::trigger_post(&db, "https://127.0.0.1:9/@alice/1")
+                .await
+                .unwrap()
+                .is_some()
+        }
+    })
+    .await;
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(10), listener)
+        .await
+        .expect("the canceled listener stops promptly")
+        .expect("the listener did not panic");
+}
