@@ -1,3 +1,15 @@
+## 1.3.6
+
+Close the coverage holes the OAuth and debug work left.
+
+Eight characterization tests: the connect flow's empty-server and
+failed-registration errors, disconnect without an identity, the
+connection test's pasted-token fallback to the configured server, the
+user and posts debug actions through the web layer with snippeted
+notes and content, the expired and failed dance messages, a fully
+scoped account row showing no warning, and an empty optional option
+saving as unset. web.rs line coverage 87.5% to 91.8%.
+
 ## 1.3.5
 
 Drop the unused leptos_axum dependency.

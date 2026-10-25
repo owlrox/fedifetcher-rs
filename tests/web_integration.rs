@@ -2405,3 +2405,272 @@ async fn a_row_missing_a_new_tasks_scopes_warns_and_offers_reconnect() {
         "the row offers the reconnect: {body}"
     );
 }
+
+/// The mock instance's host, without the scheme.
+fn instance_host(server: &MockServer) -> String {
+    server.base_url().trim_start_matches("http://").to_string()
+}
+
+/// POST a urlencoded form to an arbitrary path, without following
+/// redirects: (status, body).
+async fn post_form(base: &str, path: &str, form: &str) -> (u16, String) {
+    let resp = client()
+        .post(format!("{base}{path}"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    (status, body)
+}
+
+/// Connecting with no server named is a config error, before anything is
+/// asked of any instance.
+#[tokio::test]
+async fn connecting_without_a_server_is_rejected() {
+    let dir = common::tmp_dir();
+    let (base, _pool) = spawn_ui_with(common::test_config(&dir, "example.social")).await;
+
+    let (status, body) = post_form(&base, "/oauth/connect", "server=").await;
+    assert_eq!(status, 400);
+    assert!(
+        body.contains("the server to connect to is missing"),
+        "{body}"
+    );
+}
+
+/// When the instance refuses the app registration, the connect flow says
+/// so instead of redirecting into a doomed dance.
+#[tokio::test]
+async fn a_failed_registration_is_reported() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/api/v1/apps");
+            then.status(500);
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, &instance_host(&server));
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let app = web::app_with_scheme(config, db.clone(), "http");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let base = format!("http://{addr}");
+
+    let mock_host = instance_host(&server);
+    let (status, body) = post_form(&base, "/oauth/connect", &format!("server={mock_host}")).await;
+    assert_eq!(status, 400);
+    assert!(
+        body.contains(&format!(
+            "registering the app on {mock_host} failed with status 500"
+        )),
+        "{body}"
+    );
+}
+
+/// Disconnecting without naming an account and server is a config error.
+#[tokio::test]
+async fn disconnecting_needs_an_account_and_server() {
+    let dir = common::tmp_dir();
+    let (base, _pool) = spawn_ui_with(common::test_config(&dir, "example.social")).await;
+
+    let (status, body) = post_form(&base, "/oauth/disconnect", "").await;
+    assert_eq!(status, 400);
+    assert!(
+        body.contains("the account to disconnect is missing"),
+        "{body}"
+    );
+}
+
+/// The connection test against a pasted token (no oauth_accounts row)
+/// asks the configured server, not a per-account one.
+#[tokio::test]
+async fn the_connection_test_falls_back_to_the_configured_server_for_pasted_tokens() {
+    let server = MockServer::start_async().await;
+    let instance = server
+        .mock_async(|when, then| {
+            when.method(Method::GET).path("/api/v1/instance");
+            then.status(200).json_body(
+                serde_json::json!({"title": "Home", "uri": "example.social", "version": "4.2.0"}),
+            );
+        })
+        .await;
+    let verify = server
+        .mock_async(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/accounts/verify_credentials")
+                .header("Authorization", "Bearer smoke-secret-token-123");
+            then.status(200)
+                .json_body(serde_json::json!({"id": "1", "acct": "me", "display_name": "Me"}));
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, &instance_host(&server));
+    config.access_tokens = vec![TOKEN.to_string()];
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let app = web::app_with_scheme(config, db.clone(), "http");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let base = format!("http://{addr}");
+
+    let (status, body) = post_debug(&base, "action=connect&token_index=0").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Home"),
+        "the configured server answered: {body}"
+    );
+    assert_eq!(instance.calls(), 1);
+    assert_eq!(verify.calls(), 1);
+}
+
+/// The user lookup and the posts fetch work end-to-end through the web
+/// layer: the result views render, long notes and posts are cut to a
+/// snippet, and no full content floods the page.
+#[tokio::test]
+async fn the_debug_user_and_posts_actions_work_through_the_web() {
+    let server = MockServer::start_async().await;
+    let long_note = "n".repeat(250);
+    let long_content = "c".repeat(250);
+    let lookup = server
+        .mock_async(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/accounts/lookup")
+                .query_param("acct", "someone@example.social")
+                .header("Authorization", "Bearer smoke-secret-token-123");
+            then.status(200).json_body(serde_json::json!(
+                {"id": "42", "acct": "someone@example.social", "display_name": "Someone",
+                 "note": long_note}
+            ));
+        })
+        .await;
+    let statuses = server
+        .mock_async(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/accounts/42/statuses")
+                .header("Authorization", "Bearer smoke-secret-token-123");
+            then.status(200).json_body(serde_json::json!([
+                {"url": "https://example.social/@someone/7", "content": long_content,
+                 "visibility": "public", "created_at": "2026-10-24T12:00:00.000Z",
+                 "replies_count": 1, "reblogs_count": 2, "favourites_count": 3}
+            ]));
+        })
+        .await;
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, &instance_host(&server));
+    config.access_tokens = vec![TOKEN.to_string()];
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let app = web::app_with_scheme(config, db.clone(), "http");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let base = format!("http://{addr}");
+
+    let (status, body) = post_debug(&base, "action=user&user=someone@example.social").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Found"), "the lookup result renders: {body}");
+    assert_eq!(lookup.calls(), 1);
+    assert!(
+        body.contains(&"n".repeat(200)),
+        "the note is kept up to the snippet length"
+    );
+
+    let (status, body) =
+        post_debug(&base, "action=posts&user=someone@example.social&limit=2").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Recent posts"),
+        "the posts result renders: {body}"
+    );
+    assert_eq!(statuses.calls(), 1);
+    assert!(
+        body.contains("..."),
+        "the long content is cut to a snippet: {body}"
+    );
+    assert!(
+        !body.contains(&"c".repeat(250)),
+        "the full content must not flood the page"
+    );
+}
+
+/// The config page spells out the quiet dance endings too: an expired
+/// state and a callback with no code.
+#[tokio::test]
+async fn the_config_page_reports_expired_and_failed_dances() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, _pool) = spawn_ui_with(config).await;
+
+    let (status, body) = get(&format!("{base}/config?oauth=expired")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("not started here or has expired"),
+        "the expired message: {body}"
+    );
+
+    let (status, body) = get(&format!("{base}/config?oauth=failed")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("did not return an authorization code"),
+        "the failed message: {body}"
+    );
+}
+
+/// A connected account whose registration covers everything the enabled
+/// tasks ask for is listed with no warning at all.
+#[tokio::test]
+async fn a_fully_scoped_account_shows_no_warning() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec!["oauth-token-aaaa".to_string()];
+    let (base, pool) = spawn_ui_with(config).await;
+    fedifetcher::db::save_oauth_app(
+        &pool,
+        "example.social",
+        "the-client-id",
+        "the-client-secret",
+        "read:search read:statuses read:accounts",
+    )
+    .await
+    .unwrap();
+    fedifetcher::db::save_oauth_account(&pool, "oauth-token-aaaa", "example.social", "alice", "")
+        .await
+        .unwrap();
+
+    let (status, body) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("alice"), "the account is listed: {body}");
+    assert!(
+        !body.contains("more permissions") && !body.contains("rejected this token"),
+        "a fully scoped row must not warn: {body}"
+    );
+}
+
+/// An empty field for an optional option saves as unset, and unknown form
+/// keys are ignored rather than rejected.
+#[tokio::test]
+async fn an_empty_optional_option_saves_as_unset() {
+    let dir = common::tmp_dir();
+    let (base, pool) = spawn_ui_with(common::test_config(&dir, "example.social")).await;
+
+    let (status, location, _body) =
+        post_config_form(&base, "/config", "lock_file=&junk=ignored").await;
+    assert_eq!(status, 303);
+    assert!(location.unwrap().starts_with("/config"));
+    let saved = saved_config(&pool).await;
+    assert!(
+        saved.lock_file.is_none(),
+        "the empty optional option is unset: {:?}",
+        saved.lock_file
+    );
+}
