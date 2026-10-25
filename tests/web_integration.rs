@@ -3071,24 +3071,6 @@ async fn the_dashboard_keeps_only_state_and_recent_runs() {
     assert!(page.contains(">Start</button>"));
 }
 
-/// The top bar is a grey gradient, dark to medium, left to right.
-#[tokio::test]
-async fn the_top_bar_is_a_grey_gradient() {
-    let dir = common::tmp_dir();
-    let base = spawn_ui(&dir).await;
-
-    let (status, page) = get(&format!("{base}/")).await;
-    assert_eq!(status, 200);
-    assert!(
-        page.contains("header {") && page.contains("linear-gradient(to right, #2b2b2b, #6a6a6a)"),
-        "the header carries the grey gradient: {page}"
-    );
-    assert!(
-        page.contains("header h1 a { color: #eee"),
-        "the header's text is light on the dark bar: {page}"
-    );
-}
-
 /// URLs the tables show are clickable: the URL-bearing columns of the
 /// named tables link out, and the hosts tab's host names link to the
 /// server's own https address.
@@ -3171,33 +3153,31 @@ async fn the_tables_urls_are_clickable() {
     );
 }
 
-/// The data page follows a run in progress the way the dashboard does:
-/// it refreshes itself while the history's newest row is "running", even
-/// with live updates toggled off — the run is filling the tables it shows.
+/// The data page follows the live-updates toggle alone — the master
+/// control — and never refreshes on its own: a run filling its tables is
+/// not worth losing your place in a long list.
 #[tokio::test]
-async fn the_data_page_refreshes_while_a_run_is_in_progress() {
+async fn the_data_page_follows_the_toggle_alone() {
     let dir = common::tmp_dir();
     let config = common::test_config(&dir, "example.social");
     let (base, db) = spawn_ui_with(config).await;
     let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
     fedifetcher::db::start_run(&db, &started).await.unwrap();
 
-    let (status, body) = get_with_cookie(&format!("{base}/data"), "ff_live=0").await;
-    assert_eq!(status, 200);
-    assert!(
-        body.contains("http-equiv=\"refresh\""),
-        "a run in progress refreshes the data page even with live off: {body}"
-    );
-
-    // idle again, the page holds still
-    fedifetcher::db::finish_run(&db, 1, &started, "ok", "done")
-        .await
-        .unwrap();
+    // a run in progress, live off: the page holds still
     let (status, body) = get_with_cookie(&format!("{base}/data"), "ff_live=0").await;
     assert_eq!(status, 200);
     assert!(
         !body.contains("http-equiv=\"refresh\""),
-        "idle, the data page does not refresh: {body}"
+        "the data page does not refresh on its own: {body}"
+    );
+
+    // live on: the page follows the toggle, idle or not
+    let (status, body) = get_with_cookie(&format!("{base}/data"), "ff_live=1").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("http-equiv=\"refresh\""),
+        "live on, the data page refreshes: {body}"
     );
 }
 
@@ -3228,5 +3208,87 @@ async fn the_logs_page_refreshes_while_a_run_is_in_progress() {
     assert!(
         !body.contains("http-equiv=\"refresh\""),
         "idle, the logs page does not refresh: {body}"
+    );
+}
+/// The debug page follows a run in progress the way the dashboard does:
+/// the database usage it shows changes while a run writes to the database.
+#[tokio::test]
+async fn the_debug_page_refreshes_while_a_run_is_in_progress() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, db) = spawn_ui_with(config).await;
+    let started = fedifetcher::timeutil::fmt_state_ts(fedifetcher::timeutil::now());
+    fedifetcher::db::start_run(&db, &started).await.unwrap();
+
+    let (status, body) = get_with_cookie(&format!("{base}/debug"), "ff_live=0").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("http-equiv=\"refresh\""),
+        "a run in progress refreshes the debug page even with live off: {body}"
+    );
+
+    // idle again, the page holds still
+    fedifetcher::db::finish_run(&db, 1, &started, "ok", "done")
+        .await
+        .unwrap();
+    let (status, body) = get_with_cookie(&format!("{base}/debug"), "ff_live=0").await;
+    assert_eq!(status, 200);
+    assert!(
+        !body.contains("http-equiv=\"refresh\""),
+        "idle, the debug page does not refresh: {body}"
+    );
+}
+
+/// The live-updates toggle is the one control for auto-refresh: on, every
+/// page that can refresh does — idle or not; off, none does, except the
+/// pages that follow a run in progress. The config and about pages never
+/// refresh: one holds a form half-filled, the other nothing live.
+#[tokio::test]
+async fn the_live_toggle_is_the_master_control_for_auto_refresh() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    for page in ["/", "/data", "/logs", "/debug"] {
+        let (status, body) = get_with_cookie(&format!("{base}{page}"), "ff_live=1").await;
+        assert_eq!(status, 200, "{page}");
+        assert!(
+            body.contains("http-equiv=\"refresh\""),
+            "live on, {page} refreshes even while idle: {body}"
+        );
+    }
+    for page in ["/", "/data", "/logs", "/debug"] {
+        let (status, body) = get_with_cookie(&format!("{base}{page}"), "ff_live=0").await;
+        assert_eq!(status, 200, "{page}");
+        assert!(
+            !body.contains("http-equiv=\"refresh\""),
+            "live off and idle, {page} holds still: {body}"
+        );
+    }
+    for page in ["/config", "/about"] {
+        let (status, body) = get_with_cookie(&format!("{base}{page}"), "ff_live=1").await;
+        assert_eq!(status, 200, "{page}");
+        assert!(
+            !body.contains("http-equiv=\"refresh\""),
+            "{page} never refreshes itself: {body}"
+        );
+    }
+}
+
+/// The top bar's gradient uses the page's own greys: a soft dark-to-medium
+/// ramp that suits the light and dark schemes alike.
+#[tokio::test]
+async fn the_top_bar_is_a_grey_gradient() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, page) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("header {") && page.contains("linear-gradient(to right, #3a3a3a, #757575)"),
+        "the header carries the grey gradient: {page}"
+    );
+    assert!(
+        page.contains("header h1 a { color: #eee"),
+        "the header's text is light on the dark bar: {page}"
     );
 }

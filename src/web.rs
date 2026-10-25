@@ -1930,7 +1930,7 @@ fn log_level_row(value: &str) -> AnyView {
 const CSS: &str = r#"
 :root { color-scheme: light dark; }
 body { font-family: system-ui, sans-serif; margin: 0; }
-header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; background: linear-gradient(to right, #2b2b2b, #6a6a6a); color: #eee; }
+header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; background: linear-gradient(to right, #3a3a3a, #757575); color: #eee; }
 header h1 { font-size: 1.1rem; margin: 0; }
 header h1 a { color: #eee; text-decoration: none; }
 .version { color: #888; font-weight: normal; }
@@ -2134,10 +2134,11 @@ fn Dashboard(
     ];
     stats.extend(counts);
 
-    // a run still in progress refreshes the page, so its elapsed time ticks
-    // and its row flips to finished when it ends — whatever the live-updates
-    // toggle says, so pressing start or stop is answered by the page itself
-    let refresh = if running.is_some() {
+    // the live-updates toggle is the master control for auto-refresh; a
+    // run still in progress refreshes the page even with it off, so its
+    // elapsed time ticks and its row flips to finished when it ends —
+    // pressing start or stop is answered by the page itself
+    let refresh = if live || running.is_some() {
         Some(LIVE_REFRESH_SECONDS)
     } else {
         None
@@ -2235,6 +2236,8 @@ fn DataPage(
     tab: TabView,
     live: bool,
 ) -> impl IntoView {
+    // the live-updates toggle is this page's only auto-refresh: a run
+    // filling the tables is not worth losing your place in a long list
     let links: Vec<AnyView> = tabs
         .iter()
         .map(|tab| {
@@ -2261,9 +2264,7 @@ fn DataPage(
             action,
         } => table_tab(name, columns, rows, count, sort, order, action),
     };
-    // a run in progress is filling the tables this page shows, so the
-    // page follows it, the way the dashboard does — whatever the toggle says
-    let refresh = if running.is_some() {
+    let refresh = if live {
         Some(LIVE_REFRESH_SECONDS)
     } else {
         None
@@ -2988,8 +2989,16 @@ fn DebugPage(
     usage: DbUsage,
 ) -> impl IntoView {
     let usage_line = usage.summary_line();
+    // the live-updates toggle is the master control; a run in progress
+    // refreshes the page even with it off, since it is writing to the
+    // database this page reports on
+    let refresh = if live || running.is_some() {
+        Some(LIVE_REFRESH_SECONDS)
+    } else {
+        None
+    };
     view! {
-        <Page state=state running=running title="Debug".to_string() live=live refresh=None>
+        <Page state=state running=running title="Debug".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Database"</h2>
                 <p class="muted">{usage_line}</p>
