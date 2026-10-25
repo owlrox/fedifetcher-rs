@@ -11,7 +11,9 @@ use crate::error::{Error, Result};
 use crate::http::HttpClient;
 
 /// The permissions FediFetcher asks the instance for, one consent screen.
-pub const SCOPES: &str = "read:search read:statuses admin:read:accounts";
+/// One more than the fetching needs: `read:accounts` is verify_credentials's
+/// price, and the dance asks whose token it just minted.
+pub const SCOPES: &str = "read:search read:statuses admin:read:accounts read:accounts";
 
 /// The app as an instance knows it.
 #[derive(Clone, Debug, PartialEq, Eq)]

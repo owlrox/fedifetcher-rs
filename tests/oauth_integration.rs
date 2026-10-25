@@ -51,7 +51,9 @@ async fn a_new_server_is_registered_with_name_callback_and_scopes() {
                 .body_includes("client_name=FediFetcher-rs")
                 .body_includes(format!("redirect_uris=http%3A%2F%2F{encoded_host}").as_str())
                 .body_includes("%2Foauth%2Fcallback")
-                .body_includes("read%3Asearch+read%3Astatuses+admin%3Aread%3Aaccounts");
+                .body_includes(
+                    "read%3Asearch+read%3Astatuses+admin%3Aread%3Aaccounts+read%3Aaccounts",
+                );
             then.status(200).json_body(registration());
         })
         .await;
@@ -138,7 +140,7 @@ async fn the_authorize_url_carries_every_parameter_the_dance_needs() {
     );
     assert_eq!(
         pairs.get("scope").unwrap(),
-        "read:search read:statuses admin:read:accounts"
+        "read:search read:statuses admin:read:accounts read:accounts"
     );
 }
 

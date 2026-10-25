@@ -1,3 +1,21 @@
+## 1.2.22
+
+Ask for read:accounts: verify_credentials requires it.
+
+The second live round of the dance failed one step further along, and
+the status code carried the diagnosis: 401 was no bearer, 403 is a
+bearer with an unauthorized scope. The scope list was the README's
+fetching list — read:search, read:statuses, admin:read:accounts — but
+verify_credentials demands read:accounts, which fetching never calls
+and so the list never carried. The dance does; the ask now includes it.
+
+The instance will show the consent screen again on the next connect
+(the scope set changed since the earlier approval), which is the
+re-confirmation working as designed. The manual token path needs no
+change: nothing it does calls verify_credentials.
+
+375 tests pass; clippy -D warnings and fmt clean. Tested by hand.
+
 ## 1.2.21
 
 Send the fresh token when asking whose it is.
