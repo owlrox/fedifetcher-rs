@@ -14,10 +14,29 @@ use tracing::debug;
 
 use crate::config::{Config, RawValues};
 use crate::error::{Error, Result};
+use crate::mem;
 use crate::posts::Post;
 use crate::servers::HostRow;
 use crate::state::TimestampedSet;
 use crate::store::{RepliedToot, State};
+
+/// How much room the database takes on disk, as far as the files say:
+/// the main database file, and the write-ahead log when one exists.
+pub fn disk_usage(config: &Config) -> Option<mem::DiskUsage> {
+    disk_usage_at(&config.state_dir)
+}
+
+/// The same, for a state directory that is already at hand.
+pub fn disk_usage_at(state_dir: &std::path::Path) -> Option<mem::DiskUsage> {
+    let database = std::fs::metadata(state_dir.join("fedifetcher.db"))
+        .ok()?
+        .len();
+    let wal = std::fs::metadata(state_dir.join("fedifetcher.db-wal"))
+        .ok()
+        .map(|meta| meta.len())
+        .filter(|size| *size > 0);
+    Some(mem::DiskUsage { database, wal })
+}
 use crate::timeutil;
 use crate::urls::PostRef;
 

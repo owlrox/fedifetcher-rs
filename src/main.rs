@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use fedifetcher::config::Config;
-use fedifetcher::{db, logging, run, web};
+use fedifetcher::{db, logging, mem, run, web};
 
 #[derive(Parser)]
 #[command(
@@ -89,11 +89,15 @@ async fn main() -> ExitCode {
         Ok(log_db) => log_db,
         Err(ex) => return config_error(ex),
     };
+    // The state directory the database lives in, kept for the exit report:
+    // the config itself is handed to the run or the web server below.
+    let state_dir = config.state_dir.clone();
 
     match mode {
         Mode::Run => {
             let result =
                 run::run_once(config, run::CancelToken::new(), run::Pause::new(), &db).await;
+            mem::log_exit_usage("finished a run", db::disk_usage_at(&state_dir).as_ref());
             // wait for the log lines already received to reach the database
             log_db.shutdown().await;
             match result {
@@ -102,7 +106,15 @@ async fn main() -> ExitCode {
             }
         }
         Mode::Serve { bind, port } => match web::serve(config, &bind, port, db).await {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(reason) => {
+                mem::log_exit_usage(
+                    &format!("shut down ({reason})"),
+                    db::disk_usage_at(&state_dir).as_ref(),
+                );
+                // wait for the log lines already received to reach the database
+                log_db.shutdown().await;
+                ExitCode::SUCCESS
+            }
             Err(ex) => {
                 eprintln!("ERROR:FediFetcher:{ex}");
                 ExitCode::from(1)

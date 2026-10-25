@@ -545,3 +545,84 @@ async fn serve_says_so_when_another_instance_holds_the_lock() {
         "the lock's holder is named on the logs page: {logs}"
     );
 }
+
+/// Stop a running UI with the given signal, and return the exit log line
+/// it left in the database the logs page reads.
+#[cfg(unix)]
+async fn stopped_with_signal(tmp: &std::path::Path, flag: &str) -> String {
+    let (config, db) = state_db(tmp).await;
+    drop(db);
+
+    let port = free_port();
+    let mut ui = child(tmp, &["serve", "--port", &port.to_string()])
+        .spawn()
+        .unwrap();
+    let body = healthz(&format!("http://127.0.0.1:{port}")).await;
+    assert_eq!(body, "ok");
+
+    std::process::Command::new("kill")
+        .args([
+            flag,
+            &ui.id().expect("a running child has a pid").to_string(),
+        ])
+        .status()
+        .unwrap();
+
+    let status = tokio::time::timeout(std::time::Duration::from_secs(15), ui.wait())
+        .await
+        .expect("the child should exit after the signal")
+        .unwrap();
+    assert!(
+        status.success(),
+        "a graceful stop exits cleanly: {status:?}"
+    );
+
+    let db = db::open(&config).await.unwrap();
+    for _ in 0..100 {
+        let rows = db::recent_logs(&db, 100, LogSort::Time, LogOrder::Desc, None)
+            .await
+            .unwrap();
+        if let Some(line) = rows
+            .iter()
+            .map(|row| row.message.clone())
+            .find(|message| message.contains("memory"))
+        {
+            assert_state_stayed_in_the_sandbox(tmp);
+            return line;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let rows = db::recent_logs(&db, 100, LogSort::Time, LogOrder::Desc, None)
+        .await
+        .unwrap();
+    panic!(
+        "no memory usage line in the log: {:?}",
+        rows.iter().map(|r| r.message.clone()).collect::<Vec<_>>()
+    );
+}
+
+/// On a graceful stop -- SIGTERM, as a service manager sends -- the app
+/// records its own memory usage, names the signal that asked it to stop,
+/// and exits cleanly.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_graceful_stop_records_the_memory_usage() {
+    let tmp = tmp_dir();
+    let line = stopped_with_signal(&tmp, "-TERM").await;
+    assert!(
+        line.contains("SIGTERM") && line.contains("database"),
+        "the exit line names the signal and the database's size: {line}"
+    );
+}
+
+/// Ctrl-C -- SIGINT -- reads the same way: named in the exit line.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_ctrl_c_stop_names_the_signal() {
+    let tmp = tmp_dir();
+    let line = stopped_with_signal(&tmp, "-INT").await;
+    assert!(
+        line.contains("SIGINT"),
+        "the exit line names the signal: {line}"
+    );
+}

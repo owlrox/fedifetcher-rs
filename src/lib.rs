@@ -15,6 +15,7 @@ pub mod fetch;
 pub mod http;
 pub mod lists;
 pub mod logging;
+pub mod mem;
 pub mod oauth;
 pub mod posts;
 pub mod robots;

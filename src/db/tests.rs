@@ -1401,3 +1401,24 @@ async fn table_rows_with_no_columns_asked_returns_no_rows() {
 fn a_non_database_error_is_never_a_lock_error() {
     assert!(!is_locked(&sqlx::Error::RowNotFound));
 }
+
+#[test]
+fn disk_usage_reports_the_database_and_its_wal() {
+    let (config, dir) = test_config();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("fedifetcher.db"), vec![0u8; 4096]).unwrap();
+    std::fs::write(dir.join("fedifetcher.db-wal"), vec![0u8; 1024]).unwrap();
+
+    let usage = disk_usage(&config).expect("the database file exists");
+    assert_eq!(usage.database, 4096);
+    assert_eq!(usage.wal, Some(1024));
+
+    // no wal file reads as no wal
+    std::fs::remove_file(dir.join("fedifetcher.db-wal")).unwrap();
+    let usage = disk_usage(&config).unwrap();
+    assert_eq!(usage.wal, None);
+
+    // no database at all reads as nothing to report
+    std::fs::remove_file(dir.join("fedifetcher.db")).unwrap();
+    assert!(disk_usage(&config).is_none());
+}

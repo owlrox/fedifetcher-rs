@@ -27,6 +27,7 @@ use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
 use crate::logging;
+use crate::mem;
 use crate::oauth;
 use crate::run::{CancelToken, Context, Pause, run_once};
 use crate::store::{State, StateStore, lock};
@@ -89,7 +90,12 @@ struct AppState {
 
 /// Serve the web UI until the process is stopped. The config page saves to
 /// the database.
-pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std::io::Result<()> {
+pub async fn serve(
+    config: Config,
+    bind: &str,
+    port: u16,
+    db: SqlitePool,
+) -> std::io::Result<&'static str> {
     // A run row still marked running belongs to a process that is gone —
     // unless another process holds the lock and is running right now, in
     // which case the sweep is skipped and the row is left alone.
@@ -130,7 +136,40 @@ pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std
         .map_err(|ex| std::io::Error::new(std::io::ErrorKind::InvalidInput, ex))?;
     tracing::info!("FediFetcher-rs v{VERSION} web UI listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await
+    // a stop — Ctrl-C, or the SIGTERM a service manager sends — ends the
+    // server gracefully, so the exit can still record which signal asked
+    // and what the process's memory looked like
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(SHUTDOWN_REASON.get().copied().unwrap_or("a signal"))
+}
+
+/// Which signal asked the process to stop, recorded by `shutdown_signal`
+/// and reported by `serve`'s caller.
+static SHUTDOWN_REASON: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Waits until the process is asked to stop — Ctrl-C, or SIGTERM on Unix —
+/// remembering which one it was so the exit log can name it.
+async fn shutdown_signal() {
+    let reason = {
+        #[cfg(unix)]
+        {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("installing a SIGTERM handler cannot fail");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => "SIGINT",
+                _ = term.recv() => "SIGTERM",
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            "Ctrl-C"
+        }
+    };
+    let _ = SHUTDOWN_REASON.set(reason);
 }
 
 /// Build the web UI's router: the dashboard, the run trigger, the data page
@@ -1269,14 +1308,14 @@ impl DbUsage {
         if self.wal > 0 {
             format!(
                 "fedifetcher.db uses {} (plus {} of write-ahead log) — {}.",
-                format_bytes(self.size),
-                format_bytes(self.wal),
+                mem::human(self.size),
+                mem::human(self.wal),
                 counts
             )
         } else {
             format!(
                 "fedifetcher.db uses {} — {}.",
-                format_bytes(self.size),
+                mem::human(self.size),
                 counts
             )
         }
@@ -1287,12 +1326,9 @@ impl DbUsage {
 /// watching.
 async fn db_usage(state: &AppState) -> DbUsage {
     let config = state.config.lock().unwrap().clone();
-    let path = config.state_dir.join("fedifetcher.db");
-    let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    let wal_path = path.with_extension("db-wal");
-    let wal = std::fs::metadata(&wal_path)
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    let disk = db::disk_usage_at(&config.state_dir);
+    let size = disk.as_ref().map(|disk| disk.database).unwrap_or(0);
+    let wal = disk.and_then(|disk| disk.wal).unwrap_or(0);
     // the five biggest tables, by their share of the file's pages, from
     // SQLite's dbstat virtual table
     let biggest: Vec<(String, i64)> = sqlx::query_as(
@@ -1310,17 +1346,6 @@ async fn db_usage(state: &AppState) -> DbUsage {
         counts.push((table_label(&table).to_string(), count));
     }
     DbUsage { size, wal, counts }
-}
-
-/// A byte count, readably: the largest unit that keeps it above one, with
-/// one decimal.
-fn format_bytes(bytes: u64) -> String {
-    for (unit, name) in [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "kB")] {
-        if bytes >= unit {
-            return format!("{:.1} {name}", bytes as f64 / unit as f64);
-        }
-    }
-    format!("{bytes} B")
 }
 
 /// What a cleanup or a trim did, as the page reports it.
@@ -3358,6 +3383,26 @@ fn AboutPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_database_summary_uses_the_shared_byte_formatter() {
+        let usage = DbUsage {
+            size: 1_572_864,
+            wal: 0,
+            counts: Vec::new(),
+        };
+        assert_eq!(usage.summary_line(), "fedifetcher.db uses 1 MB \u{2014} .");
+
+        let usage = DbUsage {
+            size: 1_572_864,
+            wal: 1_048_576,
+            counts: Vec::new(),
+        };
+        assert_eq!(
+            usage.summary_line(),
+            "fedifetcher.db uses 1 MB (plus 1 MB of write-ahead log) \u{2014} ."
+        );
+    }
 
     #[test]
     fn snippet_strips_html_and_reads_entities() {
