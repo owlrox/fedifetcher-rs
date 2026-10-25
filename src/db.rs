@@ -704,12 +704,13 @@ pub async fn clear_logs(pool: &SqlitePool) -> Result<()> {
 }
 
 /// Keep only the newest `keep` log lines.
-pub async fn prune_logs(pool: &SqlitePool, keep: i64) -> Result<()> {
-    sqlx::query("DELETE FROM logs WHERE id <= (SELECT COALESCE(MAX(id), 0) - ? FROM logs)")
-        .bind(keep)
-        .execute(pool)
-        .await?;
-    Ok(())
+pub async fn prune_logs(pool: &SqlitePool, keep: i64) -> Result<u64> {
+    let result =
+        sqlx::query("DELETE FROM logs WHERE id <= (SELECT COALESCE(MAX(id), 0) - ? FROM logs)")
+            .bind(keep)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected())
 }
 
 /// Record one finished run.

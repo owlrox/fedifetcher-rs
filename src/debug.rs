@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::api::mastodon::{masked, report_mastodon_error};
 use crate::error::{Error, Result};
 use crate::http::HttpClient;
+use crate::store::CleanupReport;
 
 /// What a debug action found, as the page shows it.
 #[derive(Clone, Debug)]
@@ -27,6 +28,8 @@ pub enum DebugOutcome {
     },
     /// Something went wrong; the message says what.
     Failed { message: String },
+    /// The database was cleaned up; the report says what went.
+    Cleaned { report: CleanupReport },
 }
 
 /// The connection test: what the server says it is, and whether it accepts

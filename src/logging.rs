@@ -32,8 +32,8 @@ const DATEFMT: &[time::format_description::FormatItem<'static>] =
     time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
 /// How many log lines the database keeps; the oldest are pruned as new ones
-/// arrive.
-const LOG_RETENTION: i64 = 100_000;
+/// arrive, and a cleanup prunes to the same number.
+pub const LOG_RETENTION: i64 = 100_000;
 
 /// Prune the log table every this many lines received, so the DELETE is not
 /// run per line.

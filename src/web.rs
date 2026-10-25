@@ -26,9 +26,10 @@ use crate::db::{self, LogOrder, LogRow, LogSort, OauthAccountRow, RunRow};
 use crate::debug::{self, DebugOutcome};
 use crate::fetch;
 use crate::http::HttpClient;
+use crate::logging;
 use crate::oauth;
 use crate::run::{CancelToken, Context, Pause, run_once};
-use crate::store::{State, StateStore, lock};
+use crate::store::{CleanupReport, State, StateStore, lock};
 use crate::stream;
 use crate::timeutil;
 
@@ -1186,9 +1187,117 @@ async fn debug_page(
     let live = live_updates(&headers);
     let running = run_in_progress(&state).await;
     let identities = debug_identities(&state).await;
+    let usage = db_usage(&state).await;
     render(move || {
-        view! { <DebugPage state=state running=running result=None live=live identities=identities tested=None /> }
+        view! { <DebugPage state=state running=running result=None live=live identities=identities tested=None usage=usage /> }
     })
+}
+
+/// The tables the debug page's database section counts, with their labels:
+/// first the ones a cleanup shrinks, then the ones it keeps.
+const DB_USAGE_TABLES: &[(&str, &str)] = &[
+    ("logs", "log lines"),
+    ("seen_urls", "seen URLs"),
+    ("seen_hosts", "known hosts"),
+    ("context_cache", "context entries"),
+    ("robots_cache", "robots.txt entries"),
+    ("trigger_posts", "scanned posts"),
+    ("opted_out_accounts", "opted-out accounts"),
+    ("config", "config records"),
+    ("oauth_accounts", "connected accounts"),
+    ("runs", "runs"),
+];
+
+/// The database's size on disk and row counts, as the debug page's database
+/// section reports them.
+#[derive(Clone)]
+struct DbUsage {
+    /// The main database file's size, in bytes.
+    size: u64,
+    /// The write-ahead log's size, in bytes, when one exists.
+    wal: u64,
+    /// Row counts, by label, in `DB_USAGE_TABLES`' order.
+    counts: Vec<(&'static str, i64)>,
+}
+
+impl DbUsage {
+    /// The one-line summary the section opens with.
+    fn summary_line(&self) -> String {
+        let counts = self
+            .counts
+            .iter()
+            .map(|(label, count)| format!("{count} {label}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.wal > 0 {
+            format!(
+                "fedifetcher.db uses {} (plus {} of write-ahead log) — {}.",
+                format_bytes(self.size),
+                format_bytes(self.wal),
+                counts
+            )
+        } else {
+            format!(
+                "fedifetcher.db uses {} — {}.",
+                format_bytes(self.size),
+                counts
+            )
+        }
+    }
+}
+
+/// Read the database's size on disk and the row counts of the tables worth
+/// watching.
+async fn db_usage(state: &AppState) -> DbUsage {
+    let config = state.config.lock().unwrap().clone();
+    let path = config.state_dir.join("fedifetcher.db");
+    let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let wal_path = path.with_extension("db-wal");
+    let wal = std::fs::metadata(&wal_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let mut counts = Vec::with_capacity(DB_USAGE_TABLES.len());
+    for &(table, label) in DB_USAGE_TABLES {
+        let count = db::table_count(&state.db, table).await.unwrap_or(0);
+        counts.push((label, count));
+    }
+    DbUsage { size, wal, counts }
+}
+
+/// A byte count, readably: the largest unit that keeps it above one, with
+/// one decimal.
+fn format_bytes(bytes: u64) -> String {
+    for (unit, name) in [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "kB")] {
+        if bytes >= unit {
+            return format!("{:.1} {name}", bytes as f64 / unit as f64);
+        }
+    }
+    format!("{bytes} B")
+}
+
+/// What a cleanup did, as the page reports it.
+fn cleanup_report_line(report: &CleanupReport) -> String {
+    let mut parts = Vec::new();
+    if report.logs > 0 {
+        parts.push(format!("{} log lines", report.logs));
+    }
+    if report.robots > 0 {
+        parts.push(format!("{} robots.txt entries", report.robots));
+    }
+    if report.hosts > 0 {
+        parts.push(format!("{} stale host entries", report.hosts));
+    }
+    if report.context > 0 {
+        parts.push(format!("{} expired context entries", report.context));
+    }
+    if report.users > 0 {
+        parts.push(format!("{} long-unseen users", report.users));
+    }
+    if parts.is_empty() {
+        "Cleaned up the database: there was nothing to remove.".to_string()
+    } else {
+        format!("Cleaned up the database: removed {}.", parts.join(", "))
+    }
 }
 
 /// The identities the Test connection form can pick: one per access
@@ -1244,8 +1353,9 @@ async fn debug_post(
         .iter()
         .find(|(key, _)| key == "token_index")
         .and_then(|(_, value)| value.trim().parse::<usize>().ok());
+    let usage = db_usage(&state).await;
     render(
-        move || view! { <DebugPage state=state running=running result=Some(outcome) live=live identities=identities tested=tested /> },
+        move || view! { <DebugPage state=state running=running result=Some(outcome) live=live identities=identities tested=tested usage=usage /> },
     )
 }
 
@@ -1261,6 +1371,19 @@ async fn run_debug_action(state: &AppState, pairs: &[(String, String)]) -> Debug
             .unwrap_or_default()
     };
     let action = field("action");
+    if action == "cleanup" {
+        tracing::info!("POST /debug: clean up the database");
+        let config = state.config.lock().unwrap().clone();
+        return match StateStore::new(config)
+            .cleanup(&state.db, logging::LOG_RETENTION)
+            .await
+        {
+            Ok(report) => DebugOutcome::Cleaned { report },
+            Err(ex) => DebugOutcome::Failed {
+                message: ex.to_string(),
+            },
+        };
+    }
     let description = match action.as_str() {
         "connect" => "test the connection".to_string(),
         "user" => format!("look up user {}", field("user")),
@@ -2830,9 +2953,23 @@ fn DebugPage(
     identities: Vec<(usize, String, String)>,
     /// The identity a just-run test used, so the picker keeps showing it.
     tested: Option<usize>,
+    /// The database's size and usage, as this page's first section reports.
+    usage: DbUsage,
 ) -> impl IntoView {
+    let usage_line = usage.summary_line();
     view! {
         <Page state=state running=running title="Debug".to_string() live=live refresh=None>
+            <section>
+                <h2>"Database"</h2>
+                <p class="muted">{usage_line}</p>
+                <p class="muted">
+                    "Clean up removes only what the app's own retention rules would remove: log lines beyond the retention, host info past the configured remember window, robots.txt entries past their refetch age, context entries past their week, and long-unseen recently checked users. The configuration, the connected accounts, the run history, and every account's recorded wishes are kept."
+                </p>
+                <form method="post" action="/debug">
+                    <input type="hidden" name="action" value="cleanup"/>
+                    <p><button type="submit">"Clean up DB"</button></p>
+                </form>
+            </section>
             <section>
                 <h2>"Test connection"</h2>
                 <p class="muted">
@@ -2898,6 +3035,16 @@ fn DebugPage(
 /// The result of a debug action, as a section at the bottom of the page.
 fn debug_result_view(outcome: &DebugOutcome) -> AnyView {
     match outcome {
+        DebugOutcome::Cleaned { report } => view! {
+            <section class="result">
+                <h2>"Database"</h2>
+                <p>
+                    <span class="badge ok">"ok"</span>
+                    {cleanup_report_line(report)}
+                </p>
+            </section>
+        }
+        .into_any(),
         DebugOutcome::Connected { instance, account } => {
             let instance_rows = [
                 ("title", text_field(instance, "title")),

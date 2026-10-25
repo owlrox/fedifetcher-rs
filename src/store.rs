@@ -172,6 +172,39 @@ impl StateStore {
         db::save_state(pool, state, MAX_ENTRIES).await
     }
 
+    /// Apply the retention rules a load applies — users, host info and
+    /// context entries past their windows, robots.txt entries past their
+    /// refetch age, and log lines beyond the retention — right now, so the
+    /// database does not have to wait for the next run to shrink. The
+    /// configuration, the OAuth rows, the run history, and the accounts'
+    /// recorded wishes (opt-outs and private posts) are never touched.
+    pub async fn cleanup(&self, pool: &SqlitePool, keep_logs: i64) -> Result<CleanupReport> {
+        let config = &self.config;
+        let mut state = db::load_state(pool).await?;
+
+        let users = state
+            .recently_checked_users_mut()
+            .expire_older_than(Duration::hours(config.remember_users_for_hours));
+        let hosts = state.seen_hosts_mut().expire(
+            Duration::days(config.remember_hosts_for_days),
+            SERVER_FAILURE_MAX_AGE,
+        );
+        let context = state
+            .recently_checked_context_mut()
+            .expire_older_than(CONTEXT_MAX_AGE);
+        db::save_state(pool, &state, MAX_ENTRIES).await?;
+
+        let logs = db::prune_logs(pool, keep_logs).await?;
+        let robots = db::robots_discard_stale(pool, ROBOTS_MAX_AGE).await?;
+        Ok(CleanupReport {
+            logs,
+            robots,
+            hosts: hosts as u64,
+            context: context as u64,
+            users: users as u64,
+        })
+    }
+
     /// Load state into a session, to be written back by `Session::finish`.
     pub async fn session(&self, pool: &SqlitePool) -> Result<Session> {
         Ok(Session {
@@ -182,6 +215,21 @@ impl StateStore {
             state: Some(self.load(pool).await?),
         })
     }
+}
+
+/// What cleaning the database removed, so the debug page can report it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CleanupReport {
+    /// Log lines beyond the retention.
+    pub logs: u64,
+    /// robots.txt entries past their refetch age.
+    pub robots: u64,
+    /// Host entries past the configured remember window.
+    pub hosts: u64,
+    /// Context entries past their week.
+    pub context: u64,
+    /// Recently checked users past the configured remember window.
+    pub users: u64,
 }
 
 /// A loaded state, written back by `finish` when the run ends. Dropping a

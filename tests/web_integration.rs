@@ -2731,3 +2731,66 @@ async fn a_data_page_whose_database_is_gone_warns_and_renders() {
         page_load_lines()
     );
 }
+
+/// The debug page reports the database's size and usage at the top.
+#[tokio::test]
+async fn the_debug_page_reports_the_database_size_and_usage() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let (base, _db) = spawn_ui_with(config).await;
+
+    let (status, page) = get(&format!("{base}/debug")).await;
+
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("Database"),
+        "the page has a database section: {page}"
+    );
+    assert!(
+        page.contains("fedifetcher.db"),
+        "the database file is named: {page}"
+    );
+    assert!(page.contains("B"), "a size is reported: {page}");
+    assert!(
+        page.contains("log lines") && page.contains("seen URLs"),
+        "the usage is broken down by table: {page}"
+    );
+}
+
+/// The Clean up DB button removes what the retention rules would remove,
+/// and the page reports what went.
+#[tokio::test]
+async fn the_cleanup_button_cleans_and_reports() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let (base, db) = spawn_ui_with(config).await;
+    for i in 0..5 {
+        fedifetcher::db::insert_log(
+            &db,
+            &fedifetcher::db::LogRow {
+                ts: "2026-01-01 00:00:00+00:00".to_string(),
+                level: "INFO".to_string(),
+                target: "t".to_string(),
+                message: format!("line {i}"),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let (status, page) = post_debug(base.as_str(), "action=cleanup").await;
+
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("Cleaned up the database"),
+        "the cleanup is reported: {page}"
+    );
+    let (status, page) = get(&format!("{base}/debug")).await;
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("Clean up DB"),
+        "the page offers the button again: {page}"
+    );
+}
