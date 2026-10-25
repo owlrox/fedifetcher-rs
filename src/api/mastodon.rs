@@ -950,4 +950,428 @@ mod tests {
             crate::db::memory_pool(),
         )
     }
+
+    /// A Mastodon client pointed at the mock server.
+    fn mock_api(host: &str) -> MastodonApi {
+        MastodonApi::with_scheme(host, "http", dummy_http())
+    }
+
+    fn response(status: u16, body: &str) -> crate::http::Response {
+        use axum::http::{HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        if !body.is_empty() {
+            headers.insert("content-type", HeaderValue::from_static("application/json"));
+        }
+        crate::http::Response {
+            status,
+            headers,
+            text: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_error_report_names_the_scope_and_the_token() {
+        // 401: the token itself is wrong
+        let err = report_mastodon_error("boom", 401, "read:statuses", Some("tok**********en"));
+        let message = err.to_string();
+        assert!(message.contains("access token is incorrect"), "{message}");
+        assert!(message.contains("tok**********en"), "{message}");
+
+        // 403 with a scope: the scope is named
+        let err = report_mastodon_error("boom", 403, "read:bookmarks", None);
+        assert!(
+            err.to_string().contains("Add the read:bookmarks scope"),
+            "{}",
+            err
+        );
+
+        // 403 without a scope: generic advice
+        let err = report_mastodon_error("boom", 403, "", None);
+        assert!(
+            err.to_string().contains("enabled the required scope(s)"),
+            "{}",
+            err
+        );
+
+        // any other code: no advice line
+        let err = report_mastodon_error("boom", 500, "read:statuses", None);
+        assert!(!err.to_string().contains('\n'), "{}", err);
+    }
+
+    #[test]
+    fn the_timeline_line_lists_the_uris_or_just_the_count() {
+        let post = |uri: &str| Post {
+            url: uri.to_string(),
+            uri: uri.to_string(),
+            created_at: crate::timeutil::now(),
+            is_public: true,
+            reblog: None,
+            in_reply_to_id: None,
+            in_reply_to_account_id: None,
+            reply_count: None,
+            account: None,
+            mentions: Vec::new(),
+        };
+        assert_eq!(
+            timeline_found_line(&[post("https://a/1"), post("https://a/2")]),
+            "Found 2 toots in timeline: https://a/1, https://a/2"
+        );
+        assert_eq!(timeline_found_line(&[]), "Found 0 toots in timeline");
+    }
+
+    #[test]
+    fn context_urls_need_both_halves_and_every_toot_to_carry_a_url() {
+        let ok = response(
+            200,
+            r#"{"ancestors": [{"url": "https://a/1"}], "descendants": [{"url": "https://a/2"}]}"#,
+        );
+        assert_eq!(
+            context_urls(&ok).unwrap(),
+            vec!["https://a/1", "https://a/2"]
+        );
+
+        // no ancestors key: the context is unusable
+        let half = response(200, r#"{"descendants": []}"#);
+        assert!(context_urls(&half).is_err());
+
+        // a toot without a url
+        let urlless = response(200, r#"{"ancestors": [{}], "descendants": []}"#);
+        assert!(context_urls(&urlless).is_err());
+
+        // a body that is not JSON at all
+        let garbage = response(200, "<not json");
+        assert!(context_urls(&garbage).is_err());
+    }
+
+    #[test]
+    fn wants_more_stops_on_count_since_and_all() {
+        use time::macros::datetime;
+        let entries = vec![serde_json::json!({"created_at": "2026-10-01T00:00:00Z"})];
+        assert!(wants_more(&entries, &StopAt::All).unwrap());
+        assert!(!wants_more(&entries, &StopAt::Count(1)).unwrap());
+        assert!(wants_more(&entries, &StopAt::Count(5)).unwrap());
+        // a post newer than the cutoff keeps the pages coming
+        assert!(wants_more(&entries, &StopAt::Since(datetime!(2025-01-01 00:00:00 UTC))).unwrap());
+        // one older stops it
+        assert!(!wants_more(&entries, &StopAt::Since(datetime!(2027-01-01 00:00:00 UTC))).unwrap());
+        // an entry with no readable date is an error, not a silent stop
+        let undated = vec![serde_json::json!({"nope": 1})];
+        assert!(wants_more(&undated, &StopAt::Since(datetime!(2025-01-01 00:00:00 UTC))).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_user_lookup_failure_is_reported_with_its_status() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // 404: the user is not there
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/lookup");
+                then.status(404).up_to_n_times(1);
+            })
+            .await;
+        let err = api.user_id("ghost").await.unwrap_err();
+        assert!(err.to_string().contains("was not found"), "{err}");
+
+        // 500: the server stumbled
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/lookup");
+                then.status(500).up_to_n_times(1);
+            })
+            .await;
+        let err = api.user_id("ghost").await.unwrap_err();
+        assert!(err.to_string().contains("Status code: 500"), "{err}");
+
+        // 200 without an id in the answer
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/lookup");
+                then.status(200).json_body(serde_json::json!({}));
+            })
+            .await;
+        let err = api.user_id("ghost").await.unwrap_err();
+        assert!(err.to_string().contains("no id"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn post_fetches_survive_every_failure_shape() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // the lookup answers fine...
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/lookup");
+                then.status(200)
+                    .json_body(serde_json::json!({"id": "7"}))
+                    .up_to_n_times(3);
+            })
+            .await;
+        // ...but the statuses call fails in every shape: a non-200
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/7/statuses");
+                then.status(503).up_to_n_times(1);
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+        // ...a 200 that is not a list
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/7/statuses");
+                then.status(200)
+                    .json_body(serde_json::json!({}))
+                    .up_to_n_times(1);
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+
+        // ...and a lookup that fails outright
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/lookup");
+                then.status(500).up_to_n_times(1);
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+
+        // a client whose server is not there at all
+        let dead = MastodonApi::with_scheme("127.0.0.1:9", "http", dummy_http());
+        assert!(dead.fetch_user_posts("alice", "", 5).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_full_page_is_followed_by_a_max_id_page() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/lookup");
+                then.status(200).json_body(serde_json::json!({"id": "7"}));
+            })
+            .await;
+        let status = |id: &str| serde_json::json!({"id": id, "url": format!("https://a/{id}"), "uri": format!("https://a/{id}"), "created_at": "2026-10-01T00:00:00Z", "visibility": "public"});
+        // a full first page (the pager only continues on a filled page)
+        let first_page: Vec<Value> = (1..=40).map(|n| status(&format!("s{n:03}"))).collect();
+        let first = server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/7/statuses");
+                then.status(200).json_body(first_page).up_to_n_times(1);
+            })
+            .await;
+        let last_of_first = "s040";
+        let second = server
+            .mock_async(move |when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/7/statuses")
+                    .query_param("max_id", last_of_first);
+                then.status(200).json_body(serde_json::json!([]));
+            })
+            .await;
+        let posts = api.fetch_user_posts("alice", "", 50).await.unwrap();
+        assert_eq!(posts.len(), 40, "the empty second page adds nothing");
+        assert_eq!(first.calls(), 1);
+        assert_eq!(
+            second.calls(),
+            1,
+            "the pager resumes from the first page's last status id"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_whose_last_status_has_no_id_stops_the_paging() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/lookup");
+                then.status(200).json_body(serde_json::json!({"id": "7"}));
+            })
+            .await;
+        // a filled page whose last status has no id: the pager cannot know
+        // where to resume
+        let mut page: Vec<Value> = (1..=39)
+            .map(|n| {
+                serde_json::json!({"id": format!("s{n:03}"), "url": format!("https://a/s{n:03}"), "uri": format!("https://a/s{n:03}"), "created_at": "2026-10-01T00:00:00Z", "visibility": "public"})
+            })
+            .collect();
+        page.push(
+            serde_json::json!({"created_at": "2026-10-02T00:00:00Z", "visibility": "public"}),
+        );
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/7/statuses");
+                then.status(200).json_body(page);
+            })
+            .await;
+        let posts = api.fetch_user_posts("alice", "", 50).await.unwrap();
+        assert_eq!(posts.len(), 39, "the idless status is unusable");
+    }
+
+    #[tokio::test]
+    async fn context_fetch_failures_are_quiet_and_empty() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // a non-200 context
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/statuses/9/context");
+                then.status(500);
+            })
+            .await;
+        assert!(api.fetch_context_urls("9", "https://a/9").await.is_empty());
+
+        // a context whose body is not JSON
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/statuses/9/context");
+                then.status(200).body("<not json").up_to_n_times(1);
+            })
+            .await;
+        assert!(api.fetch_context_urls("9", "https://a/9").await.is_empty());
+
+        // a server that is not there at all
+        let dead = MastodonApi::with_scheme("127.0.0.1:9", "http", dummy_http());
+        assert!(dead.fetch_context_urls("9", "https://a/9").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_reports_each_answer_shape() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let home = HomeServer::with_scheme(&host, "http", "secret-token", dummy_http());
+        // 200: resolved
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v2/search");
+                then.status(200)
+                    .json_body(serde_json::json!({}))
+                    .up_to_n_times(1);
+            })
+            .await;
+        assert!(home.resolve("https://a/1").await);
+        // 403: the scope is named in the log, still false
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v2/search");
+                then.status(403).up_to_n_times(1);
+            })
+            .await;
+        assert!(!home.resolve("https://a/2").await);
+        // any other status: false
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v2/search");
+                then.status(500).up_to_n_times(1);
+            })
+            .await;
+        assert!(!home.resolve("https://a/3").await);
+        // a server that is not there: false
+        let dead = HomeServer::with_scheme("127.0.0.1:9", "http", "secret-token", dummy_http());
+        assert!(!dead.resolve("https://a/4").await);
+    }
+
+    #[tokio::test]
+    async fn account_statuses_reports_a_failure_and_tolerates_a_non_list() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let home = HomeServer::with_scheme(&host, "http", "secret-token", dummy_http());
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/7/statuses");
+                then.status(403).up_to_n_times(1);
+            })
+            .await;
+        let err = home.account_statuses("7").await.unwrap_err();
+        assert!(
+            err.to_string().contains("Error getting replies for user 7"),
+            "{err}"
+        );
+        // a 200 that is not a list: empty, not an error
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/7/statuses");
+                then.status(200)
+                    .json_body(serde_json::json!({}))
+                    .up_to_n_times(1);
+            })
+            .await;
+        assert!(home.account_statuses("7").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_user_ids_skip_unreadable_entries_and_report_failures() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let home = HomeServer::with_scheme(&host, "http", "secret-token", dummy_http());
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/admin/accounts");
+                then.status(403).up_to_n_times(1);
+            })
+            .await;
+        let err = home.active_user_ids(1.0).await.unwrap_err();
+        assert!(err.to_string().contains("Error getting user IDs"), "{err}");
+
+        // an hour ago is inside the activity window the interval computes
+        let recent =
+            crate::timeutil::fmt_state_ts(crate::timeutil::now() - time::Duration::hours(1));
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/admin/accounts");
+                then.status(200).json_body(serde_json::json!([
+                    // no last_status_at: skipped
+                    {"id": "1"},
+                    // an unreadable last_status_at: skipped
+                    {"id": "2", "account": {"last_status_at": "not a date"}},
+                    // active, but no username: counted without a log line
+                    {"id": "3", "account": {"last_status_at": recent}},
+                    // active with a username: counted and logged
+                    {"id": "4", "username": "alice", "account": {"last_status_at": recent}},
+                ]));
+            })
+            .await;
+        let ids = home.active_user_ids(1.0).await.unwrap();
+        assert_eq!(ids, vec!["3".to_string(), "4".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_paginated_collection_reports_a_failed_page() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let home = HomeServer::with_scheme(&host, "http", "secret-token", dummy_http());
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v1/lists");
+                then.status(403).up_to_n_times(1);
+            })
+            .await;
+        let err = home.lists().await.unwrap_err();
+        assert!(
+            err.to_string().contains("Add the read:lists scope"),
+            "{err}"
+        );
+    }
 }

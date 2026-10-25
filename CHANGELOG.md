@@ -1,3 +1,19 @@
+## 1.3.11
+
+Cover the flavor clients' failure arms, and the database's absence.
+
+Every API client's answers now have their failure shapes pinned against
+mocks: misskey's user search and note paging (a full page continues
+with untilId, an idless last note stops it), lemmy's listings and
+comment threads, peertube's playlists and comment threads, mastodon's
+lookups, paging, context and resolve, and the mod-level pick's error
+spellings. The binary's binary tests cover what a database that
+cannot be created, was deleted, or is not a database does: the first
+exits critically, the second is recreated empty, the third is an
+error naming the file, never a silent wipe.
+
+Line coverage 95.05% to 95.85%; the api subtree 194 missed lines to 79.
+
 ## 1.3.10
 
 Move the big test modules into sibling tests.rs files.

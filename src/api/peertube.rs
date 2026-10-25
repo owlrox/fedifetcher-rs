@@ -330,4 +330,142 @@ mod tests {
         assert!(CHANNEL_PATH.is_match("https://peertube.example/c/dan"));
         assert!(!CHANNEL_PATH.is_match("https://peertube.example/accounts/alice"));
     }
+
+    /// A PeerTube client pointed at the mock server.
+    fn mock_api(host: &str) -> PeerTubeApi {
+        PeerTubeApi::with_scheme(
+            host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        )
+    }
+
+    #[tokio::test]
+    async fn post_id_from_refuses_a_playlist_where_a_video_was_expected() {
+        let api = mock_api("peertube.example");
+        // /w/p/... is a playlist, not a video
+        assert_eq!(api.post_id_from("https://peertube.example/w/p/abc"), None);
+        assert_eq!(
+            api.post_id_from("https://peertube.example/w/abc"),
+            Some("abc".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn video_listing_failures_yield_no_posts() {
+        // a server that is not there
+        let dead = mock_api("127.0.0.1:9");
+        assert!(
+            dead.fetch_user_posts("alice", "https://peertube.example/a/alice", 5)
+                .await
+                .is_none()
+        );
+
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // a non-200 listing
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/alice/videos");
+                then.status(503).up_to_n_times(1);
+            })
+            .await;
+        assert!(
+            api.fetch_user_posts("alice", "https://peertube.example/a/alice", 5)
+                .await
+                .is_none()
+        );
+        // a 200 whose body has no data in it
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/accounts/alice/videos");
+                then.status(200)
+                    .json_body(serde_json::json!({}))
+                    .up_to_n_times(1);
+            })
+            .await;
+        assert!(
+            api.fetch_user_posts("alice", "https://peertube.example/a/alice", 5)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_threads_handle_every_answer_shape() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // comments with urls, and without
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/videos/9/comment-threads");
+                then.status(200)
+                    .json_body(serde_json::json!({
+                        "data": [{"url": "https://peertube.example/w/abc"}, {}]
+                    }))
+                    .up_to_n_times(1);
+            })
+            .await;
+        let urls = api
+            .fetch_context_urls("9", "https://peertube.example/w/abc")
+            .await;
+        assert_eq!(urls, vec!["https://peertube.example/w/abc".to_string()]);
+
+        // a 200 whose body has no data
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/videos/9/comment-threads");
+                then.status(200)
+                    .json_body(serde_json::json!({}))
+                    .up_to_n_times(1);
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("9", "https://peertube.example/w/abc")
+                .await
+                .is_empty()
+        );
+
+        // a 200 that is not JSON
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/videos/9/comment-threads");
+                then.status(200).body("<not json").up_to_n_times(1);
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("9", "https://peertube.example/w/abc")
+                .await
+                .is_empty()
+        );
+
+        // a non-200
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/videos/9/comment-threads");
+                then.status(500);
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("9", "https://peertube.example/w/abc")
+                .await
+                .is_empty()
+        );
+
+        // a server that is not there
+        let dead = mock_api("127.0.0.1:9");
+        assert!(
+            dead.fetch_context_urls("9", "https://peertube.example/w/abc")
+                .await
+                .is_empty()
+        );
+    }
 }

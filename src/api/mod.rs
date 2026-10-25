@@ -249,4 +249,78 @@ mod tests {
             .unwrap_err();
         assert_eq!(reason.to_string(), "the URL has no host");
     }
+
+    /// A ServerInfo for a server known to run `software`.
+    fn known_server(software: &str) -> ServerInfo {
+        ServerInfo::from_nodeinfo(
+            "nya.social",
+            &serde_json::json!({
+                "software": {"name": software, "version": "4"},
+                "protocols": ["activitypub"],
+            }),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_flavor_knows_itself() {
+        let http = dummy_http();
+        assert_eq!(
+            client_for(&known_server("mastodon"), &http)
+                .unwrap()
+                .flavor(),
+            ApiFlavor::Mastodon
+        );
+        assert_eq!(
+            client_for(&known_server("lemmy"), &http).unwrap().flavor(),
+            ApiFlavor::Lemmy
+        );
+        assert_eq!(
+            client_for(&known_server("misskey"), &http)
+                .unwrap()
+                .flavor(),
+            ApiFlavor::Misskey
+        );
+        assert_eq!(
+            client_for(&known_server("peertube"), &http)
+                .unwrap()
+                .flavor(),
+            ApiFlavor::PeerTube
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_info_that_cannot_be_read_says_so_without_a_reason() {
+        // the cache holds an entry no ServerInfo can be built from, and it
+        // records no failure reason: the error is the bare fact
+        let mut seen_hosts = ServerCache::new();
+        seen_hosts.add("nya.social", serde_json::json!({"not": "a server info"}));
+        let http = dummy_http();
+
+        let reason = look_up_post(
+            "https://nya.social/notes/81a131a4b49fff235e0b0575",
+            &mut seen_hosts,
+            &http,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            reason.to_string(),
+            "server info for nya.social is unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_url_the_server_own_client_does_not_recognize_says_so() {
+        let mut seen_hosts = ServerCache::new();
+        seen_hosts.add("nya.social", known_server("mastodon").to_state());
+        let http = dummy_http();
+
+        let reason = look_up_post("https://nya.social/what-is-this", &mut seen_hosts, &http)
+            .await
+            .unwrap_err();
+
+        assert_eq!(reason.to_string(), "the URL is not a mastodon post URL");
+    }
 }

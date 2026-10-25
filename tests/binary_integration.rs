@@ -163,6 +163,82 @@ async fn a_run_with_a_saved_config_runs_once_and_exits_clean() {
 
 /// Running without a configured server or token is refused before anything
 /// is contacted, with a critical log and a failed exit.
+/// The state directory cannot be created when XDG_STATE_HOME names a file:
+/// the binary says so critically and exits 1.
+#[tokio::test]
+async fn a_binary_whose_state_dir_cannot_be_created_exits_critically() {
+    let tmp = tmp_dir();
+    // a file where the state directory would go: create_dir_all refuses
+    let blocker = tmp.join("blocker");
+    std::fs::write(&blocker, "not a directory").unwrap();
+
+    let mut command = child(&tmp, &["run"]);
+    command.env("XDG_STATE_HOME", &blocker);
+    let output = command.output().await.unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("CRITICAL:FediFetcher:") && stderr.contains("Could not create"),
+        "the uncreatable state dir is critical: {stderr}"
+    );
+}
+
+/// The database deleted out from under a stopped install is recreated
+/// empty on the next start: the schema returns, the data does not.
+#[tokio::test]
+async fn a_deleted_database_is_recreated_empty() {
+    let tmp = tmp_dir();
+    let (config, db) = state_db(&tmp).await;
+    // a configuration exists, so the deletion has something to lose
+    let saved = db::load_config(&db).await.unwrap();
+    let mut values = saved;
+    values.insert(
+        "server".to_string(),
+        serde_json::Value::String("example.social".to_string()),
+    );
+    db::save_config(&db, &values).await.unwrap();
+    db.close().await;
+
+    let db_file = state_dir(&tmp).join("fedifetcher.db");
+    assert!(db_file.exists());
+    std::fs::remove_file(&db_file).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let side = state_dir(&tmp).join(format!("fedifetcher.db{suffix}"));
+        if side.exists() {
+            std::fs::remove_file(&side).unwrap();
+        }
+    }
+
+    let reopened = db::open(&config).await.unwrap();
+    assert!(
+        db::load_config(&reopened).await.unwrap().is_empty(),
+        "the recreated database holds no configuration"
+    );
+}
+
+/// A database file that is not a database is an error, not a silent wipe.
+#[tokio::test]
+async fn a_corrupt_database_file_is_reported() {
+    let tmp = tmp_dir();
+    let config = Config {
+        state_dir: state_dir(&tmp),
+        ..Default::default()
+    };
+    std::fs::create_dir_all(state_dir(&tmp)).unwrap();
+    std::fs::write(
+        state_dir(&tmp).join("fedifetcher.db"),
+        "this is not a database",
+    )
+    .unwrap();
+
+    let err = db::open(&config).await.unwrap_err();
+    assert!(
+        err.to_string().contains("fedifetcher.db"),
+        "the error names the file: {err}"
+    );
+}
+
 #[tokio::test]
 async fn a_run_without_a_config_is_refused() {
     let tmp = tmp_dir();

@@ -378,4 +378,309 @@ mod tests {
         );
         assert_eq!(api.post_id_from("https://misskey.example/@alice"), None);
     }
+
+    #[tokio::test]
+    async fn a_user_search_failure_is_reported_and_yields_no_posts() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = MisskeyApi::with_scheme(
+            &host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/users/search-by-username-and-host");
+                then.status(500);
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_user_search_that_is_not_a_list_or_lacks_a_host_yields_no_posts() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = MisskeyApi::with_scheme(
+            &host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        // a JSON object instead of the list of users
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/users/search-by-username-and-host");
+                then.status(200).json_body(serde_json::json!({}));
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+
+        // a user entry without a host key fails the whole search
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/users/search-by-username-and-host");
+                then.status(200).json_body(serde_json::json!([{"id": "7"}]));
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+
+        // a user on another host is skipped, and the search ends empty
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/users/search-by-username-and-host");
+                then.status(200)
+                    .json_body(serde_json::json!([{"id": "7", "host": "other.example"}]));
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn notes_that_fill_the_page_are_paged_with_untilid() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = MisskeyApi::with_scheme(
+            &host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/users/search-by-username-and-host");
+                then.status(200)
+                    .json_body(serde_json::json!([{"id": "7", "host": null}]));
+            })
+            .await;
+        // a full first page (the pager only asks again when the page was
+        // filled) and a limit beyond it
+        let notes = |ids: Vec<String>| {
+            serde_json::Value::Array(
+                ids.iter()
+                    .map(|id| {
+                        serde_json::json!({"id": id, "createdAt": "2026-10-01T00:00:00Z", "visibility": "public"})
+                    })
+                    .collect(),
+            )
+        };
+        let first_page: Vec<String> = (1..=100).map(|n| format!("n{n:03}")).collect();
+        let last_of_first = first_page.last().unwrap().clone();
+        let first = server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/api/users/notes");
+                then.status(200)
+                    .json_body(notes(first_page))
+                    .up_to_n_times(1);
+            })
+            .await;
+        // second page: fewer than wanted, so the pager stops. The first
+        // mock retires after its one use, so only the resume request —
+        // carrying untilId from the first page's last note — lands here.
+        let second = server
+            .mock_async(move |when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/users/notes")
+                    .body_includes(format!("\"untilId\":\"{last_of_first}\""));
+                then.status(200)
+                    .json_body(notes((101..=150).map(|n| format!("n{n:03}")).collect()));
+            })
+            .await;
+        let posts = api.fetch_user_posts("alice", "", 150).await.unwrap();
+        assert_eq!(posts.len(), 150, "two pages gathered");
+        assert_eq!(first.calls(), 1, "the first page without untilId");
+        assert_eq!(
+            second.calls(),
+            1,
+            "the second page resumes from the first page's last note"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_whose_last_note_has_no_id_stops_the_paging() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = MisskeyApi::with_scheme(
+            &host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/users/search-by-username-and-host");
+                then.status(200)
+                    .json_body(serde_json::json!([{"id": "7", "host": null}]));
+            })
+            .await;
+        // a full page whose last note carries no id: the pager cannot know
+        // where to resume, so it stops with what it has
+        let page: Vec<Value> = (1..=100)
+            .map(|n| {
+                if n == 100 {
+                    serde_json::json!({"createdAt": "2026-10-02T00:00:00Z", "visibility": "public"})
+                } else {
+                    serde_json::json!({"id": format!("n{n:03}"), "createdAt": "2026-10-01T00:00:00Z", "visibility": "public"})
+                }
+            })
+            .collect();
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/api/users/notes");
+                then.status(200).json_body(page);
+            })
+            .await;
+        let posts = api.fetch_user_posts("alice", "", 104).await.unwrap();
+        assert_eq!(
+            posts.len(),
+            99,
+            "the idless note is unusable: {}",
+            posts.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_notes_request_that_fails_or_is_not_a_list_yields_none() {
+        // nothing listens on port 9: the request itself fails
+        let dead = MisskeyApi::with_scheme(
+            "127.0.0.1:9",
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        assert!(dead.fetch_user_posts("alice", "", 5).await.is_none());
+
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = MisskeyApi::with_scheme(
+            &host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/users/search-by-username-and-host");
+                then.status(200)
+                    .json_body(serde_json::json!([{"id": "7", "host": null}]));
+            })
+            .await;
+        // a non-200 notes answer
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/api/users/notes");
+                then.status(503);
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+
+        // a 200 that is not a list of notes
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/api/users/notes");
+                then.status(200).json_body(serde_json::json!({"oops": 1}));
+            })
+            .await;
+        assert!(api.fetch_user_posts("alice", "", 5).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn context_urls_come_from_children_and_conversation() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = MisskeyApi::with_scheme(
+            &host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/notes/children");
+                then.status(200)
+                    .json_body(serde_json::json!([{"id": "c1"}, {"no": "id"}]));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/notes/conversation");
+                then.status(200)
+                    .json_body(serde_json::json!([{"id": "c2"}]));
+            })
+            .await;
+        let urls = api.fetch_context_urls("9", "https://x/notes/9").await;
+        assert_eq!(
+            urls,
+            vec![
+                format!("http://{host}/notes/c1"),
+                format!("http://{host}/notes/c2")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn context_requests_that_fail_are_skipped_or_end_the_fetch() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = MisskeyApi::with_scheme(
+            &host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        // children answers 500: skipped, conversation still asked
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/notes/children");
+                then.status(500).up_to_n_times(1);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/notes/conversation");
+                then.status(200)
+                    .json_body(serde_json::json!([{"id": "c2"}]))
+                    .up_to_n_times(1);
+            })
+            .await;
+        let urls = api.fetch_context_urls("9", "https://x/notes/9").await;
+        assert_eq!(urls, vec![format!("http://{host}/notes/c2")]);
+
+        // a 200 whose body is not a list: noted, no urls
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/notes/children");
+                then.status(200).json_body(serde_json::json!("not a list"));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/api/notes/conversation");
+                then.status(200).json_body(serde_json::json!([]));
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("9", "https://x/notes/9")
+                .await
+                .is_empty()
+        );
+
+        // a request that cannot even be sent: the whole fetch is empty
+        let dead = MisskeyApi::with_scheme(
+            "127.0.0.1:9",
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        );
+        assert!(
+            dead.fetch_context_urls("9", "https://x/notes/9")
+                .await
+                .is_empty()
+        );
+    }
 }

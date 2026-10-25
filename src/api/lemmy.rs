@@ -425,4 +425,344 @@ mod tests {
         assert_eq!(account_entries(&account).unwrap().len(), 3);
         assert!(account_entries(&json!({"comments": []})).is_none());
     }
+
+    /// A Lemmy client pointed at the mock server.
+    fn mock_api(host: &str) -> LemmyApi {
+        LemmyApi::with_scheme(
+            host,
+            "http",
+            HttpClient::new(crate::config::Config::default(), crate::db::memory_pool()),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_unknown_profile_url_yields_no_posts() {
+        let api = mock_api("lemmy.example");
+        assert!(
+            api.fetch_user_posts("rust", "https://lemmy.example/other", 5)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn community_listing_failures_yield_no_posts() {
+        // a server that is not there
+        let dead = mock_api("127.0.0.1:9");
+        assert!(
+            dead.fetch_user_posts("rust", "https://lemmy.example/c/rust", 5)
+                .await
+                .is_none()
+        );
+
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // a non-200 listing
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post/list");
+                then.status(503).up_to_n_times(1);
+            })
+            .await;
+        assert!(
+            api.fetch_user_posts("rust", "https://lemmy.example/c/rust", 5)
+                .await
+                .is_none()
+        );
+        // a 200 whose body has no posts in it
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post/list");
+                then.status(200)
+                    .json_body(serde_json::json!({}))
+                    .up_to_n_times(1);
+            })
+            .await;
+        assert!(
+            api.fetch_user_posts("rust", "https://lemmy.example/c/rust", 5)
+                .await
+                .is_none()
+        );
+        // a 200 whose body is not JSON at all
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post/list");
+                then.status(200).body("<not json").up_to_n_times(1);
+            })
+            .await;
+        assert!(
+            api.fetch_user_posts("rust", "https://lemmy.example/c/rust", 5)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_context_url_type_yields_nothing() {
+        let api = mock_api("lemmy.example");
+        assert!(
+            api.fetch_context_urls("9", "https://lemmy.example/other")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_context_reads_the_post_id_or_gives_up() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // the comment names its post as a number: the post's comments follow
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/comment");
+                then.status(200)
+                    .json_body(serde_json::json!({
+                        "comment_view": {"comment": {"post_id": 42}}
+                    }))
+                    .up_to_n_times(1);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(200)
+                    .json_body(serde_json::json!({
+                        "post_view": {"counts": {"comments": 0}}
+                    }))
+                    .up_to_n_times(1);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v3/comment/list");
+                then.status(200)
+                    .json_body(serde_json::json!({
+                        "comments": [{"comment": {"ap_id": "https://lemmy.example/post/42"}}]
+                    }))
+                    .up_to_n_times(1);
+            })
+            .await;
+        let urls = api
+            .fetch_context_urls("9", "https://lemmy.example/comment/9")
+            .await;
+        assert_eq!(
+            urls,
+            Vec::<String>::new(),
+            "a post with no comments has no context"
+        );
+
+        // a comment answer without a post_id: the context ends there
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/comment");
+                then.status(200)
+                    .json_body(serde_json::json!({"comment_view": {}}));
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("9", "https://lemmy.example/comment/9")
+                .await
+                .is_empty()
+        );
+
+        // a non-200 comment answer
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/comment");
+                then.status(500);
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("9", "https://lemmy.example/comment/9")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn post_context_handles_every_answer_shape() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // the post's own ap_id, plus its comments' ap_ids
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(200).json_body(serde_json::json!({
+                    "post_view": {"counts": {"comments": 2}, "post": {"ap_id": "https://lemmy.example/post/42"}}
+                })).up_to_n_times(1);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v3/comment/list");
+                then.status(200)
+                    .json_body(serde_json::json!({
+                        "comments": [{"comment": {"ap_id": "https://lemmy.example/comment/1"}}]
+                    }))
+                    .up_to_n_times(1);
+            })
+            .await;
+        let urls = api
+            .fetch_context_urls("42", "https://lemmy.example/post/42")
+            .await;
+        assert_eq!(
+            urls,
+            vec![
+                "https://lemmy.example/post/42".to_string(),
+                "https://lemmy.example/comment/1".to_string()
+            ]
+        );
+
+        // a post with no comments at all: just the ap_id, no comment fetch
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(200).json_body(serde_json::json!({
+                    "post_view": {"counts": {"comments": 0}, "post": {"ap_id": "https://lemmy.example/post/43"}}
+                })).up_to_n_times(1);
+            })
+            .await;
+        let urls = api
+            .fetch_context_urls("43", "https://lemmy.example/post/43")
+            .await;
+        assert_eq!(urls, Vec::<String>::new(), "no comments, no context");
+
+        // a post answer without an ap_id: noted, no urls from it
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(200)
+                    .json_body(serde_json::json!({
+                        "post_view": {"counts": {"comments": 1}}
+                    }))
+                    .up_to_n_times(1);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v3/comment/list");
+                then.status(200)
+                    .json_body(serde_json::json!({"comments": []}));
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("44", "https://lemmy.example/post/44")
+                .await
+                .is_empty()
+        );
+
+        // a post answer that is not JSON
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(200).body("<not json").up_to_n_times(1);
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("45", "https://lemmy.example/post/45")
+                .await
+                .is_empty()
+        );
+
+        // a post that is not there
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(500);
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("46", "https://lemmy.example/post/46")
+                .await
+                .is_empty()
+        );
+
+        // a server that is not there at all
+        let dead = mock_api("127.0.0.1:9");
+        assert!(
+            dead.fetch_context_urls("47", "https://lemmy.example/post/47")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_comment_listing_without_ap_ids_or_that_fails_is_empty() {
+        let server = httpmock::MockServer::start_async().await;
+        let host = server.base_url().trim_start_matches("http://").to_string();
+        let api = mock_api(&host);
+        // comments without ap_ids: the parse fails, the fetch is empty
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(200).json_body(serde_json::json!({
+                    "post_view": {"counts": {"comments": 1}, "post": {"ap_id": "https://lemmy.example/post/50"}}
+                })).up_to_n_times(1);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v3/comment/list");
+                then.status(200).json_body(serde_json::json!({
+                    "comments": [{"comment": {}}]
+                }));
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("50", "https://lemmy.example/post/50")
+                .await
+                .is_empty()
+        );
+
+        // a comment listing that is not JSON
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(200).json_body(serde_json::json!({
+                    "post_view": {"counts": {"comments": 1}, "post": {"ap_id": "https://lemmy.example/post/51"}}
+                })).up_to_n_times(1);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v3/comment/list");
+                then.status(200).body("<not json");
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("51", "https://lemmy.example/post/51")
+                .await
+                .is_empty()
+        );
+
+        // a comment listing that is not there
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path("/api/v3/post");
+                then.status(200).json_body(serde_json::json!({
+                    "post_view": {"counts": {"comments": 1}, "post": {"ap_id": "https://lemmy.example/post/52"}}
+                })).up_to_n_times(1);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v3/comment/list");
+                then.status(500);
+            })
+            .await;
+        assert!(
+            api.fetch_context_urls("52", "https://lemmy.example/post/52")
+                .await
+                .is_empty()
+        );
+    }
 }
