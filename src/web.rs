@@ -1184,7 +1184,7 @@ async fn save_error(
     let running = run_in_progress(&state).await;
     let body = render(move || {
         view! {
-            <Page state=state running=running title="Config".to_string() live=live refresh=None>
+            <Page state=state running=running page="/config" title="Config".to_string() live=live refresh=None>
                 <section>
                     <h2>"Could not save the configuration"</h2>
                     <p><code>{message}</code></p>
@@ -1931,19 +1931,20 @@ fn log_level_row(value: &str) -> AnyView {
 const CSS: &str = r#"
 :root { color-scheme: light dark; }
 body { font-family: system-ui, sans-serif; margin: 0; }
-header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; background: linear-gradient(to right, #3a3a3a, #757575); color: #eee; }
+header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; background: linear-gradient(to right, #333333, #585858); color: #eee; }
 header h1 { font-size: 1.1rem; margin: 0; }
 header h1 a { color: #eee; text-decoration: none; }
 .version { color: #888; font-weight: normal; }
 nav { display: flex; gap: 1rem; }
 nav a { color: #06c; }
+nav a.here { border-bottom: 2px solid #fff; padding-bottom: 0.25rem; }
 header .run { display: flex; gap: 0.5rem; align-items: center; margin-left: auto; }
 header .run form { margin: 0; }
 header .run button { font-size: 0.8rem; padding: 0.1rem 0.6rem; }
 header a.live { color: #9cf; border: 1px solid rgba(153, 204, 255, 0.4); border-radius: 0.4rem; padding: 0.1rem 0.6rem; text-decoration: none; white-space: nowrap; }
 nav.tabs { gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #8884; margin-bottom: 1.5rem; }
-nav.tabs a { color: #06c; text-decoration: none; padding: 0.15rem 0.6rem 0.25rem; border-radius: 0.4rem 0.4rem 0 0; }
-nav.tabs a.active { color: inherit; font-weight: 600; background: #8881; border-bottom: 2px solid currentColor; }
+nav.tabs a { color: #06c; text-decoration: none; padding-bottom: 0.25rem; }
+nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
 main { padding: 1rem 1.5rem; max-width: 64rem; }
 section { margin-bottom: 1.75rem; }
 h2 { font-size: 1rem; }
@@ -2001,6 +2002,9 @@ fn Page(
     /// history's newest row — the one source of run status, so the top
     /// bar's pill can never disagree with the dashboard's history.
     running: Option<String>,
+    /// The path of the page being shown, so the top bar can underline
+    /// the nav link you are on.
+    page: &'static str,
     title: String,
     /// Whether live updates are on: the top bar's toggle shows the choice,
     /// and `refresh` decides whether this page reloads itself.
@@ -2029,11 +2033,11 @@ fn Page(
                         <a class="version" href="/about" title="About FediFetcher-rs">"v"{VERSION}</a>
                     </h1>
                     <nav>
-                        <a href="/">"Dashboard"</a>
-                        <a href="/data">"Data"</a>
-                        <a href="/logs">"Logs"</a>
-                        <a href="/config">"Config"</a>
-                        <a href="/debug">"Debug"</a>
+                        <a class=("here", page == "/") href="/">"Dashboard"</a>
+                        <a class=("here", page == "/data") href="/data">"Data"</a>
+                        <a class=("here", page == "/logs") href="/logs">"Logs"</a>
+                        <a class=("here", page == "/config") href="/config">"Config"</a>
+                        <a class=("here", page == "/debug") href="/debug">"Debug"</a>
                     </nav>
                     <RunControls state=state running=running/>
                     {live_toggle(live)}
@@ -2145,7 +2149,7 @@ fn Dashboard(
         None
     };
     view! {
-        <Page state=state running=running title="Dashboard".to_string() live=live refresh=refresh>
+        <Page state=state running=running page="/" title="Dashboard".to_string() live=live refresh=refresh>
             <section>
                 <h2>"State"</h2>
                 <table>
@@ -2271,7 +2275,7 @@ fn DataPage(
         None
     };
     view! {
-        <Page state=state running=running title="Data".to_string() live=live refresh=refresh>
+        <Page state=state running=running page="/data" title="Data".to_string() live=live refresh=refresh>
             <nav class="tabs">{links}</nav>
             {section}
         </Page>
@@ -2622,7 +2626,7 @@ fn LogsPage(
         LogOrder::Desc,
     );
     view! {
-        <Page state=state running=running title="Logs".to_string() live=live refresh=refresh>
+        <Page state=state running=running page="/logs" title="Logs".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Recent log"</h2>
                 <p class="muted">
@@ -2897,7 +2901,7 @@ fn ConfigPage(
     rows.push(text_row("log_format", &config.log_format));
     rows.push(bool_row("log_page_loads", config.log_page_loads));
     view! {
-        <Page state=state running=running title="Config".to_string() live=live refresh=None>
+        <Page state=state running=running page="/config" title="Config".to_string() live=live refresh=None>
             {oauth_message.map(|message| {
                 view! { <p class="muted">{message}</p> }
             })}
@@ -2999,7 +3003,7 @@ fn DebugPage(
         None
     };
     view! {
-        <Page state=state running=running title="Debug".to_string() live=live refresh=refresh>
+        <Page state=state running=running page="/debug" title="Debug".to_string() live=live refresh=refresh>
             <section>
                 <h2>"Database"</h2>
                 <p class="muted">{usage_line}</p>
@@ -3306,7 +3310,7 @@ fn snippet(html: &str) -> String {
 #[component]
 fn AboutPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl IntoView {
     view! {
-        <Page state=state running=running title="About".to_string() live=live refresh=None>
+        <Page state=state running=running page="/about" title="About".to_string() live=live refresh=None>
             <section>
                 <h2>"About"</h2>
                 <p>

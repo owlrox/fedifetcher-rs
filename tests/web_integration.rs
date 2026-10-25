@@ -3284,7 +3284,7 @@ async fn the_top_bar_is_a_grey_gradient() {
     let (status, page) = get(&format!("{base}/")).await;
     assert_eq!(status, 200);
     assert!(
-        page.contains("header {") && page.contains("linear-gradient(to right, #3a3a3a, #757575)"),
+        page.contains("header {") && page.contains("linear-gradient(to right, #333333, #585858)"),
         "the header carries the grey gradient: {page}"
     );
     assert!(
@@ -3309,5 +3309,29 @@ async fn the_config_names_carry_the_same_tooltip_as_their_fields() {
     assert!(
         page.contains(&format!("<td title=\"{prefix}")),
         "the name cell carries the field's tooltip: {page}"
+    );
+}
+
+#[tokio::test]
+async fn the_top_bar_underlines_the_page_you_are_on() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, body) = get(&format!("{base}/data")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("<a href=\"/data\" class=\"here\">"),
+        "/data should mark its own nav link as the current page"
+    );
+    assert!(
+        !body.contains("<a href=\"/logs\" class=\"here\">"),
+        "/data should not mark the Logs link as the current page"
+    );
+
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("<a href=\"/\" class=\"here\">"),
+        "the dashboard should mark its own nav link as the current page"
     );
 }
