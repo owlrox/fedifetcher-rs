@@ -3396,11 +3396,46 @@ async fn the_pages_meet_the_accessibility_basics() {
         "muted text adapts to the scheme"
     );
     assert!(
-        body.contains("nav a { color: #cde; }"),
+        body.contains("nav a { color: #cde; text-decoration: none; }"),
         "the top bar's links are light on its dark gradient"
     );
     assert!(
         body.contains(".badge.ok { background: #1e7e34; }"),
         "badges keep white text at contrast"
+    );
+}
+
+#[tokio::test]
+async fn the_page_is_a_centered_card_with_scroll_hints() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, body) = get(&format!("{base}/")).await;
+    assert_eq!(status, 200);
+
+    // the page sits centered, on a surface that stands off the background
+    assert!(
+        body.contains("main {") && body.contains("margin: 1.5rem auto"),
+        "main centers itself: {body}"
+    );
+    assert!(
+        body.contains("--surface: light-dark(") && body.contains("--page: light-dark("),
+        "the page and surface colors adapt to the scheme"
+    );
+
+    // a scrollable table shows a shadow edge only while more is off-screen
+    assert!(
+        body.contains("background-attachment: local"),
+        "table scroll shadows hide when the edge is reached"
+    );
+
+    // top bar links lose their underlines; the version keeps one
+    assert!(
+        body.contains("nav a { color: #cde; text-decoration: none; }"),
+        "top bar links are not underlined"
+    );
+    assert!(
+        body.contains(".version { color: #ccc; font-weight: normal; text-decoration: underline; margin-left: 0.3rem; }"),
+        "the version number is underlined, spaced off the app name"
     );
 }

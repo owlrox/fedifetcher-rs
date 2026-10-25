@@ -1929,14 +1929,14 @@ fn log_level_row(value: &str) -> AnyView {
 }
 
 const CSS: &str = r#"
-:root { color-scheme: light dark; --link: light-dark(#06c, #7ab8ff); --muted: light-dark(#666, #999); }
-body { font-family: system-ui, sans-serif; margin: 0; }
-header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; background: linear-gradient(to right, #333333, #585858); color: #eee; }
+:root { color-scheme: light dark; --link: light-dark(#06c, #7ab8ff); --muted: light-dark(#666, #999); --page: light-dark(#ececec, #161616); --surface: light-dark(#ffffff, #222222); }
+body { font-family: system-ui, sans-serif; margin: 0; background: var(--page); }
+header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem max(1.5rem, calc((100% - 64rem) / 2)); border-bottom: 1px solid #8884; flex-wrap: wrap; background: linear-gradient(to right, #333333, #585858); color: #eee; }
 header h1 { font-size: 1.1rem; margin: 0; }
 header h1 a { color: #eee; text-decoration: none; }
-.version { color: #ccc; font-weight: normal; }
+.version { color: #ccc; font-weight: normal; text-decoration: underline; margin-left: 0.3rem; }
 nav { display: flex; gap: 1rem; }
-nav a { color: #cde; }
+nav a { color: #cde; text-decoration: none; }
 nav a.here { border-bottom: 2px solid #fff; padding-bottom: 0.25rem; }
 header .run { display: flex; gap: 0.5rem; align-items: center; margin-left: auto; }
 header .run form { margin: 0; }
@@ -1945,7 +1945,7 @@ header a.live { color: #9cf; border: 1px solid rgba(153, 204, 255, 0.4); border-
 nav.tabs { gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #8884; margin-bottom: 1.5rem; }
 nav.tabs a { color: var(--link); text-decoration: none; padding-bottom: 0.25rem; }
 nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
-main { padding: 1rem 1.5rem; max-width: 64rem; }
+main { padding: 1rem 1.5rem; max-width: 64rem; margin: 1.5rem auto; background: var(--surface); border: 1px solid #8884; border-radius: 0.75rem; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08); }
 section { margin-bottom: 1.75rem; }
 h2 { font-size: 1rem; }
 table { border-collapse: collapse; width: 100%; }
@@ -1992,7 +1992,7 @@ form.run { margin: 0.25rem 0; }
 .badge.off.warning { color: light-dark(#b45309, #e8a04c); box-shadow: inset 0 0 0 1px currentColor; }
 .badge.off.error { color: light-dark(#c0392b, #e07070); box-shadow: inset 0 0 0 1px currentColor; }
 .badge.off.all { color: var(--muted); box-shadow: inset 0 0 0 1px currentColor; }
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; background: radial-gradient(farthest-side at 0 50%, light-dark(rgba(0,0,0,0.15), rgba(0,0,0,0.55)), transparent) left / 12px 100%, radial-gradient(farthest-side at 100% 50%, light-dark(rgba(0,0,0,0.15), rgba(0,0,0,0.55)), transparent) right / 12px 100%, linear-gradient(90deg, var(--surface), var(--surface)) left / 12px 100%, linear-gradient(90deg, var(--surface), var(--surface)) right / 12px 100%; background-repeat: no-repeat; background-attachment: local, local, scroll, scroll; }
 .muted { color: var(--muted); }
 "#;
 
