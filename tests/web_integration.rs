@@ -215,8 +215,22 @@ async fn the_config_page_has_tooltips_from_the_docs() {
         "the log level field has a tooltip"
     );
     assert!(
-        body.contains("title=\"Required: tokens generated at"),
+        body.contains("title=\"Required: one token per user whose timelines you fetch"),
         "the access tokens field has a tooltip"
+    );
+    // the tooltips carry the documented defaults and the scopes the
+    // option's task spends, on their own lines
+    assert!(
+        body.contains("Default: 0 (off)"),
+        "the task fields state their default: {body}"
+    );
+    assert!(
+        body.contains("Scopes: read:lists (asked only while lists are enabled)"),
+        "the lists field names its scope"
+    );
+    assert!(
+        body.contains("Scopes: admin:read:accounts (asked only while this is enabled)"),
+        "the reply field names its scope"
     );
     assert!(
         body.contains("name=\"hide_server_in_user_agent\""),
@@ -2233,4 +2247,46 @@ async fn reconnecting_replaces_the_dead_token() {
         .unwrap()
         .expect("the fresh row is recorded");
     assert!(!row.needs_reconnect, "the fresh token needs no reconnect");
+}
+
+/// A connected account whose registration predates a task's scopes says so
+/// on its row and offers the reconnect that fixes it.
+#[tokio::test]
+async fn a_row_missing_a_new_tasks_scopes_warns_and_offers_reconnect() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec!["oauth-token-aaaa".to_string()];
+    config.from_lists = true;
+    let (base, pool) = spawn_ui_with(config).await;
+    fedifetcher::db::save_oauth_account(
+        &pool,
+        "oauth-token-aaaa",
+        "example.social",
+        "alice",
+        "http://avatar.example/alice.png",
+    )
+    .await
+    .unwrap();
+    // the registration the token was granted under: no read:lists, which
+    // the now-enabled lists task needs
+    fedifetcher::db::save_oauth_app(
+        &pool,
+        "example.social",
+        "the-client-id",
+        "the-secret",
+        "read:search read:statuses read:accounts",
+    )
+    .await
+    .unwrap();
+
+    let (status, body) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("more permissions"),
+        "the row says what is missing: {body}"
+    );
+    assert!(
+        body.contains("Reconnect"),
+        "the row offers the reconnect: {body}"
+    );
 }

@@ -1,3 +1,41 @@
+## 1.2.27
+
+Cleared fields reset to default, rows warn on missing scopes, richer tooltips.
+
+Three findings from the user's live round.
+
+Clearing a number field and saving errored ("\"\" is not an integer").
+For the numbers, booleans, and lists, a cleared field now means the
+documented default: apply substitutes the value from Config::default
+itself — the one table of defaults, which the README documents and a
+test keeps honest — so clearing reply_interval_in_hours saves 0. The
+optional strings keep their "empty is unset", the required fields keep
+their refusal, and rate_limit_cooldown's empty string means the
+default series while an explicit empty list still means no retries.
+
+The connected-accounts rows now say when a connection is short of
+permissions: the page compares the config's current scope ask against
+the scopes the account's registration was granted under, and a row
+whose connection predates a task's scopes reads "The enabled tasks
+need more permissions than this connection has — reconnect:" with the
+Reconnect button (the dance recomputes the ask, re-registers, and
+re-consents). A reconnect also attempts the stale tokens' revoke
+upstream — best effort, refusal logged; a scope growth re-registers
+the app, so the old app's revocation can be refused, and the log says
+so.
+
+The tooltips now carry three lines: what the option does, its
+documented default (spelled from the crate's own defaults — "0 (off)",
+"true (enabled)", the cooldown series comma-separated), and the API
+scopes the option's task spends, with whether they are always granted
+or asked only while the task is enabled. The lines are newlines in the
+title attribute, which browsers render as line breaks; bolding is not
+possible in a title attribute and would take a CSS-tooltip rework.
+The inline "(default: …)" fragments the uniform line replaces are
+gone, and the access-tokens tooltip's stale scope list is corrected.
+
+384 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.26
 
 Ask only for the scopes the enabled tasks need.

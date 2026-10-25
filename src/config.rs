@@ -438,12 +438,69 @@ pub fn is_known_option(name: &str) -> bool {
 }
 
 /// What an option does, as the original documentation puts it — shown as the
-/// config page's hover tooltips.
-pub fn option_description(name: &str) -> Option<&'static str> {
+/// config page's hover tooltips, followed by the option's documented default
+/// and the API scopes it spends. The lines are newlines in the title
+/// attribute, which browsers render as line breaks; there is no bolding in
+/// a title attribute.
+pub fn option_description(name: &str) -> Option<String> {
+    let base: &'static str = base_description(name)?;
+    let mut text = String::from(base);
+    if name != "server"
+        && name != "access_tokens"
+        && let Some(default) = option_default(name)
+    {
+        text.push_str("\nDefault: ");
+        text.push_str(&default_spelling(&default));
+    }
+    if let Some(scopes) = option_scopes(name) {
+        text.push_str("\nScopes: ");
+        text.push_str(scopes);
+    }
+    Some(text)
+}
+
+/// The default, spelled the way the README's table spells it.
+fn default_spelling(value: &Value) -> String {
+    match value {
+        Value::Bool(enabled) => {
+            format!(
+                "{enabled} ({})",
+                if *enabled { "enabled" } else { "disabled" }
+            )
+        }
+        Value::Number(n) if n.as_i64() == Some(0) => "0 (off)".to_string(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        other => other.to_string(),
+    }
+}
+
+/// The API scope an option's task spends, with how the ask treats it.
+fn option_scopes(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "reply_interval_in_hours" => "admin:read:accounts (asked only while this is enabled)",
+        "from_lists" | "max_list_length" | "max_list_accounts" => {
+            "read:lists (asked only while lists are enabled)"
+        }
+        "from_notifications" => "read:notifications (asked only while this is enabled)",
+        "max_bookmarks" => "read:bookmarks (asked only while this is enabled)",
+        "max_favorites" => "read:favourites (asked only while this is enabled)",
+        "max_followings" | "max_followers" | "max_follow_requests" | "user" => {
+            "read:follows (asked only while a follow backfill is enabled)"
+        }
+        "home_timeline_length" | "streaming" => "read:statuses (always granted)",
+        _ => return None,
+    })
+}
+
+fn base_description(name: &str) -> Option<&'static str> {
     Some(match name {
         "server" => "Required: the name of your server (e.g. mstdn.thms.uk)",
         "access_tokens" => {
-            "Required: tokens generated at https://<server>/settings/applications, needing read:search, read:statuses and admin:read:accounts scopes. Add one per user whose timelines you fetch."
+            "Required: one token per user whose timelines you fetch — connected with the button above, or created at https://<server>/settings/applications with the scopes the enabled tasks need."
         }
         "reply_interval_in_hours" => {
             "Fetch remote replies to posts that have received replies from users on your own instance in this period"
@@ -452,7 +509,7 @@ pub fn option_description(name: &str) -> Option<&'static str> {
             "Look for replies to posts in the API key owner's home timeline, up to this many posts"
         }
         "streaming" => {
-            "Stream the home timeline over a long-lived connection, and fetch context for new posts as they arrive instead of waiting for the next run. Serve mode only, with the first access token; applies on restart (default: disabled)"
+            "Stream the home timeline over a long-lived connection, and fetch context for new posts as they arrive instead of waiting for the next run. Serve mode only, with the first access token; applies on restart"
         }
         "user" => {
             "Use together with max_followings or max_followers to backfill a specific user's followings/followers. If omitted, we use the account that owns the access token."
@@ -475,9 +532,7 @@ pub fn option_description(name: &str) -> Option<&'static str> {
         "from_notifications" => {
             "Backfill accounts of anyone appearing in your notifications, during the last hours"
         }
-        "from_lists" => {
-            "Fetch missing replies and/or backfill accounts from your lists. Disabled by default"
-        }
+        "from_lists" => "Fetch missing replies and/or backfill accounts from your lists",
         "max_list_length" => {
             "How many posts to fetch replies for in each list. Ignored unless from_lists is set. Set to 0 to only backfill profiles in lists"
         }
@@ -487,17 +542,13 @@ pub fn option_description(name: &str) -> Option<&'static str> {
         "max_posts_per_account" => {
             "How many posts to fetch from each account we backfill. Above the 40 fetched by default means more requests to the remote server, and to your own server to pull each post in, so raising this makes FediFetcher considerably slower"
         }
-        "backfill_with_context" => {
-            "Fetch remote replies when backfilling profiles (default: enabled)"
-        }
+        "backfill_with_context" => "Fetch remote replies when backfilling profiles",
         "backfill_mentioned_users" => {
-            "Backfill any mentioned users when fetching remote replies to timeline posts (default: enabled)"
+            "Backfill any mentioned users when fetching remote replies to timeline posts"
         }
-        "respect_robots_txt" => {
-            "Respect robots.txt when fetching from remote servers (default: enabled)"
-        }
+        "respect_robots_txt" => "Respect robots.txt when fetching from remote servers",
         "respect_user_opt_out" => {
-            "Skip accounts that have opted out (nobot tag, or not indexable or discoverable) when backfilling (default: enabled)"
+            "Skip accounts that have opted out (nobot tag, or not indexable or discoverable) when backfilling"
         }
         "remember_users_for_hours" => {
             "How long to remember users that you aren't following for, before trying to backfill them again"
@@ -505,10 +556,10 @@ pub fn option_description(name: &str) -> Option<&'static str> {
         "remember_hosts_for_days" => "How long to remember host info for, before checking again",
         "http_timeout" => "The timeout for any HTTP requests to your own, or other instances",
         "rate_limit_cooldown" => {
-            "Seconds to wait between retries when a server rate limits us (HTTP 429): a comma-separated list, one entry per retry step, tried in order. When the list runs out, the request fails. Default: 0.5,2,8,32,128"
+            "Seconds to wait between retries when a server rate limits us (HTTP 429): a comma-separated list, one entry per retry step, tried in order. When the list runs out, the request fails"
         }
         "hide_server_in_user_agent" => {
-            "Omit your server's name from the User-Agent FediFetcher sends to other servers (default: disabled)"
+            "Omit your server's name from the User-Agent FediFetcher sends to other servers"
         }
         "instance_blocklist" => {
             "A comma-separated list of instances that FediFetcher should never try to connect to"
@@ -533,15 +584,63 @@ pub fn option_description(name: &str) -> Option<&'static str> {
             "Severity of events to log: DEBUG, INFO, WARNING, ERROR or CRITICAL. Applies on restart"
         }
         "log_format" => "The log format. Applies on restart",
-        "log_page_loads" => {
-            "Log a line for every page load of the web UI, at DEBUG (default: disabled)"
-        }
+        "log_page_loads" => "Log a line for every page load of the web UI, at DEBUG",
         _ => return None,
     })
 }
 
+/// Options whose empty form field means "back to the documented default":
+/// the numbers, booleans, and lists. The optional strings' empty means
+/// unset instead, and server and access_tokens are required outright.
+pub fn empty_resets_to_default(name: &str) -> bool {
+    matches!(
+        name,
+        "reply_interval_in_hours"
+            | "home_timeline_length"
+            | "streaming"
+            | "max_followings"
+            | "max_followers"
+            | "max_follow_requests"
+            | "max_bookmarks"
+            | "max_favorites"
+            | "from_notifications"
+            | "from_lists"
+            | "max_list_length"
+            | "max_list_accounts"
+            | "max_posts_per_account"
+            | "backfill_with_context"
+            | "backfill_mentioned_users"
+            | "respect_robots_txt"
+            | "respect_user_opt_out"
+            | "remember_users_for_hours"
+            | "remember_hosts_for_days"
+            | "http_timeout"
+            | "rate_limit_cooldown"
+            | "hide_server_in_user_agent"
+            | "instance_blocklist"
+            | "log_page_loads"
+    )
+}
+
+/// An option's default value, as the crate's own defaults spell it — the
+/// one table of defaults is `Config::default`, which the README documents
+/// and a test keeps honest.
+pub fn option_default(name: &str) -> Option<Value> {
+    Config::default().to_raw_values().get(name).cloned()
+}
+
 fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
     for (name, value) in values {
+        // a cleared field for the numbers, booleans, and lists means the
+        // documented default — the same value the field starts with — not
+        // a parse error; the optional strings keep their "empty is unset"
+        let substituted;
+        let value = if value == &Value::String(String::new()) && empty_resets_to_default(name) {
+            substituted = option_default(name).unwrap_or(Value::Null);
+            &substituted
+        } else {
+            value
+        };
         let result = match name.as_str() {
             "server" => coerce_string(value).map(|v| config.server = v),
             "access_tokens" => coerce_list(value).map(|v| config.access_tokens = v),
@@ -742,6 +841,21 @@ mod tests {
     }
 
     #[test]
+    fn a_cleared_number_returns_to_its_default() {
+        let mut config = Config {
+            reply_interval_in_hours: 10,
+            ..Default::default()
+        };
+        config
+            .apply_values(&values(vec![("reply_interval_in_hours", json!(""))]))
+            .expect("a cleared field saves");
+        assert_eq!(
+            config.reply_interval_in_hours, 0,
+            "clearing the field means the documented default, not an error"
+        );
+    }
+
+    #[test]
     fn requires_server_and_token() {
         assert!(Config::from_values(RawValues::new()).is_err());
         assert!(Config::from_values(values(vec![("server", json!("x"))])).is_err());
@@ -915,11 +1029,23 @@ mod tests {
         .unwrap();
         assert_eq!(config.rate_limit_cooldown, vec![1.0, 2.5, 10.0]);
 
-        // an empty list means no retries at all
+        // a cleared field means the documented default series
         let config = Config::from_values(values(vec![
             ("server", json!("x")),
             ("access_tokens", json!(["t"])),
             ("rate_limit_cooldown", json!("")),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.rate_limit_cooldown,
+            Config::default().rate_limit_cooldown
+        );
+
+        // an explicit empty list means no retries at all
+        let config = Config::from_values(values(vec![
+            ("server", json!("x")),
+            ("access_tokens", json!(["t"])),
+            ("rate_limit_cooldown", json!([])),
         ]))
         .unwrap();
         assert!(config.rate_limit_cooldown.is_empty());
