@@ -226,7 +226,8 @@ async fn mock_the_exchange(server: &MockServer) {
     server
         .mock_async(|when, then| {
             when.method(Method::GET)
-                .path("/api/v1/accounts/verify_credentials");
+                .path("/api/v1/accounts/verify_credentials")
+                .header("Authorization", "Bearer the-new-token");
             then.status(200).json_body(serde_json::json!({
                 "acct": "alice",
                 "avatar": "http://avatar.example/alice.png",

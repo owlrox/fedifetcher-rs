@@ -116,7 +116,10 @@ pub async fn exchange_code(
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Fetch("the token answer has no access_token".to_string()))?;
 
-    let who = http
+    // whose token is it? the fresh token travels with the ask — the
+    // instance names an account only to a bearer it just minted
+    let authed = http.authenticated(token);
+    let who = authed
         .get(
             &format!(
                 "{scheme}://{server}/api/v1/accounts/verify_credentials",

@@ -1,3 +1,22 @@
+## 1.2.21
+
+Send the fresh token when asking whose it is.
+
+The first real round of the dance failed where the tests had not:
+"checking whose token it is failed with status 401". exchange_code
+traded the code for the token correctly and then asked
+verify_credentials with a bare client — no Authorization header — and
+the instance, correctly, declined to name an account to an unauthenticated
+caller. The e2e dance test's verify_credentials mock accepted any
+request, so the omission passed every gate.
+
+Prove-it: the mock now demands Authorization: Bearer <the fresh token>,
+the dance test failed exactly as the live one did, and the fix sends
+the ask through http.authenticated(token) — the same bearer treatment
+every home-server call gets, robots.txt included.
+
+375 tests pass; clippy -D warnings and fmt clean. Tested by hand.
+
 ## 1.2.20
 
 Add the reconnect lifecycle: a dead token asks to be re-authorized.
