@@ -128,7 +128,7 @@ pub async fn serve(config: Config, bind: &str, port: u16, db: SqlitePool) -> std
     let addr: std::net::SocketAddr = format!("{bind}:{port}")
         .parse()
         .map_err(|ex| std::io::Error::new(std::io::ErrorKind::InvalidInput, ex))?;
-    tracing::info!("FediFetcher v{VERSION} web UI listening on http://{addr}");
+    tracing::info!("FediFetcher-rs v{VERSION} web UI listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
 }

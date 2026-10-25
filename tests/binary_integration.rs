@@ -140,6 +140,10 @@ async fn the_version_flag_prints_the_version() {
         text.contains(env!("CARGO_PKG_VERSION")),
         "--version names the version: {text}"
     );
+    assert!(
+        text.contains("FediFetcher-rs"),
+        "--version carries the project's name: {text}"
+    );
 }
 
 /// A saved config with nothing enabled: the run finishes immediately,

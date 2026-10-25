@@ -13,7 +13,7 @@ use fedifetcher::{db, logging, run, web};
 
 #[derive(Parser)]
 #[command(
-    name = "fedifetcher",
+    name = "FediFetcher-rs",
     version,
     about = "Pull missing posts and profiles into your Mastodon instance",
     long_about = "Pull missing posts and profiles into your Mastodon instance.\n\n\
