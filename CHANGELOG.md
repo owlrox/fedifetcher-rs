@@ -1,3 +1,18 @@
+## 1.2.13
+
+Sharpen the wafrn note with what their own API serves.
+
+Reading wafrn's backend on Codeberg: the Mastodon-compatible context
+route needs the requesting user's id to compute visibility and speaks
+obfuscated status ids, so unauthenticated /api/v1 reads are a design
+decision, not an oversight. Their own API does read public posts
+unauthenticated (GET /api/v2/post/{uuid}, verified live; swagger.json
+sits in their repo), but serves the post alone — no replies — so it is
+no context source either. The known-incompatible note now says all of
+this, so nobody "just uses their own API" without checking.
+
+cargo test (360), clippy -D warnings and fmt pass.
+
 ## 1.2.12
 
 Record wafrn as known-incompatible, with the evidence.

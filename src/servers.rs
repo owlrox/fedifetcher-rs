@@ -61,9 +61,15 @@ impl ApiFlavor {
 /// * wafrn - its Mastodon-compatible API (which calls itself 4.3.0
 ///   compatible) refuses every unauthenticated request with 401 —
 ///   timelines, account lookup, statuses, context; only /api/v1/instance
-///   answers (verified against app.wafrn.net, 2026-10-24). FediFetcher's
-///   remote fetches are deliberately unauthenticated, so there is nothing
-///   to talk to; a post URL's context is skipped with a logged reason.
+///   answers (verified against app.wafrn.net, 2026-10-24). The context
+///   route's handler also needs the requesting user's id to compute
+///   visibility, and its status ids are obfuscated encodings, not the
+///   UUIDs in /fediverse/post/ URLs. Wafrn's own API reads public posts
+///   unauthenticated (GET /api/v2/post/{uuid}; swagger.json in their
+///   repo), but serves no replies, so there is no context to fetch either
+///   way. FediFetcher's remote fetches are deliberately unauthenticated;
+///   support would need wafrn to open unauthenticated public reads on the
+///   Mastodon-compatible layer — the ask to bring them.
 pub fn software_apis(flavor: ApiFlavor) -> &'static [&'static str] {
     match flavor {
         ApiFlavor::Mastodon => &[
