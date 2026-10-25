@@ -1811,7 +1811,7 @@ fn text_row(name: &str, value: &str) -> AnyView {
     view! {
         <tr>
             <td title={tooltip.clone()}><code>{name.to_string()}</code></td>
-            <td><input type="text" name={name.to_string()} value={value.to_string()} title=tooltip/></td>
+            <td><input type="text" name={name.to_string()} aria-label={tooltip.clone()} value={value.to_string()} title=tooltip/></td>
         </tr>
     }
     .into_any()
@@ -1824,7 +1824,7 @@ fn int_row(name: &str, value: i64) -> AnyView {
     view! {
         <tr>
             <td title={tooltip.clone()}><code>{name.to_string()}</code></td>
-            <td><input type="number" name={name.to_string()} value={value.to_string()} title=tooltip/></td>
+            <td><input type="number" name={name.to_string()} aria-label={tooltip.clone()} value={value.to_string()} title=tooltip/></td>
         </tr>
     }
     .into_any()
@@ -1849,7 +1849,7 @@ fn bool_row(name: &str, value: bool) -> AnyView {
         <tr>
             <td title={tooltip.clone()}><code>{name.to_string()}</code></td>
             <td>
-                <select name={name.to_string()} title=tooltip>
+                <select name={name.to_string()} aria-label={tooltip.clone()} title=tooltip>
                     {yes}
                     {no}
                 </select>
@@ -1893,7 +1893,7 @@ fn tokens_row(config: &Config) -> AnyView {
                 }}
                 <p>
                     <input type="password" name="new_access_token" placeholder="new access token"
-                        autocomplete="new-password"
+                        autocomplete="new-password" aria-label="New access token"
                         title=option_description("access_tokens")/>
                 </p>
             </td>
@@ -1910,7 +1910,7 @@ fn log_level_row(value: &str) -> AnyView {
         <tr>
             <td title={tooltip.clone()}><code>"log_level"</code></td>
             <td>
-                <select name="log_level" title=tooltip>
+                <select name="log_level" aria-label={tooltip.clone()} title=tooltip>
                     {levels
                         .iter()
                         .map(|level| {
@@ -1929,21 +1929,21 @@ fn log_level_row(value: &str) -> AnyView {
 }
 
 const CSS: &str = r#"
-:root { color-scheme: light dark; }
+:root { color-scheme: light dark; --link: light-dark(#06c, #7ab8ff); --muted: light-dark(#666, #999); }
 body { font-family: system-ui, sans-serif; margin: 0; }
 header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem 1.5rem; border-bottom: 1px solid #8884; flex-wrap: wrap; max-width: 64rem; background: linear-gradient(to right, #333333, #585858); color: #eee; }
 header h1 { font-size: 1.1rem; margin: 0; }
 header h1 a { color: #eee; text-decoration: none; }
-.version { color: #888; font-weight: normal; }
+.version { color: #ccc; font-weight: normal; }
 nav { display: flex; gap: 1rem; }
-nav a { color: #06c; }
+nav a { color: #cde; }
 nav a.here { border-bottom: 2px solid #fff; padding-bottom: 0.25rem; }
 header .run { display: flex; gap: 0.5rem; align-items: center; margin-left: auto; }
 header .run form { margin: 0; }
 header .run button { font-size: 0.8rem; padding: 0.1rem 0.6rem; }
 header a.live { color: #9cf; border: 1px solid rgba(153, 204, 255, 0.4); border-radius: 0.4rem; padding: 0.1rem 0.6rem; text-decoration: none; white-space: nowrap; }
 nav.tabs { gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #8884; margin-bottom: 1.5rem; }
-nav.tabs a { color: #06c; text-decoration: none; padding-bottom: 0.25rem; }
+nav.tabs a { color: var(--link); text-decoration: none; padding-bottom: 0.25rem; }
 nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
 main { padding: 1rem 1.5rem; max-width: 64rem; }
 section { margin-bottom: 1.75rem; }
@@ -1960,7 +1960,7 @@ form input[type="text"] { width: 22rem; max-width: 100%; }
 form input[type="number"] { width: 6rem; }
 pre { white-space: pre-wrap; }
 ul.tokens { margin: 0.2rem 0; padding-left: 1.2rem; }
-ul.tokens label { color: #888; }
+ul.tokens label { color: var(--muted); }
 ul.tokens li.token-row { display: flex; align-items: center; gap: 0.75rem; }
 ul.tokens li.token-row label.token-remove { margin-left: auto; margin-right: 0.25rem; white-space: nowrap; }
 pre.json { max-height: 16rem; overflow: auto; margin: 0; font-size: 0.75rem; }
@@ -1968,31 +1968,32 @@ li.account { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; 
 li.account form.account-actions { margin: 0; }
 li.account form.account-actions:first-of-type { margin-left: auto; }
 li.account form.account-actions button { font-size: 0.8rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
-.warn-box { border: 2px solid #c44; border-radius: 0.4rem; padding: 0.15rem 0.5rem; color: #c44; }
+.warn-box { border: 2px solid #c0392b; border-radius: 0.4rem; padding: 0.15rem 0.5rem; color: #c0392b; }
 form.fetch { margin: 0; }
 form.fetch button { font-size: 0.8rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
 form.run { margin: 0.25rem 0; }
 .badge { padding: 0.1rem 0.5rem; border-radius: 0.4rem; font-size: 0.8rem; color: #fff; }
-.badge.ok { background: #2a8; }
-.badge.error { background: #c44; }
-.badge.running { background: #c83; }
-.badge.paused { background: #48c; }
-.badge.stopped { background: #777; }
-.badge.debug { background: #777; }
-.badge.info { background: #48c; }
-.badge.warning { background: #c83; }
-.badge.unknown { background: #777; }
+.badge.ok { background: #1e7e34; }
+.badge.error { background: #c0392b; }
+.badge.running { background: #b45309; }
+.badge.paused { background: #3a6ea5; }
+.badge.stopped { background: #666; }
+.badge.debug { background: #666; }
+.badge.info { background: #3a6ea5; }
+.badge.warning { background: #b45309; }
+.badge.unknown { background: #666; }
 .levels { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin: 0.5rem 0 1rem; }
 .levels a { text-decoration: none; }
-.levels .label { color: #888; }
-.badge.all { background: #06c; }
+.levels .label { color: var(--muted); }
+.badge.all { background: #3a6ea5; }
 .badge.off { background: transparent; }
-.badge.off.debug { color: #777; box-shadow: inset 0 0 0 1px #777; }
-.badge.off.info { color: #48c; box-shadow: inset 0 0 0 1px #48c; }
-.badge.off.warning { color: #c83; box-shadow: inset 0 0 0 1px #c83; }
-.badge.off.error { color: #c44; box-shadow: inset 0 0 0 1px #c44; }
-.badge.off.all { color: #888; box-shadow: inset 0 0 0 1px #8888; }
-.muted { color: #888; }
+.badge.off.debug { color: var(--muted); box-shadow: inset 0 0 0 1px currentColor; }
+.badge.off.info { color: light-dark(#3a6ea5, #7ab8ff); box-shadow: inset 0 0 0 1px currentColor; }
+.badge.off.warning { color: light-dark(#b45309, #e8a04c); box-shadow: inset 0 0 0 1px currentColor; }
+.badge.off.error { color: light-dark(#c0392b, #e07070); box-shadow: inset 0 0 0 1px currentColor; }
+.badge.off.all { color: var(--muted); box-shadow: inset 0 0 0 1px currentColor; }
+.table-wrap { overflow-x: auto; }
+.muted { color: var(--muted); }
 "#;
 
 #[component]
@@ -2174,13 +2175,14 @@ fn Dashboard(
                     view! { <p class="muted">"No runs yet."</p> }.into_any()
                 } else {
                     view! {
+                        <div class="table-wrap">
                         <table>
                             <thead>
                                 <tr>
-                                    <th>"Started"</th>
-                                    <th>"Finished"</th>
-                                    <th>"Outcome"</th>
-                                    <th>"Message"</th>
+                                    <th scope="col">"Started"</th>
+                                    <th scope="col">"Finished"</th>
+                                    <th scope="col">"Outcome"</th>
+                                    <th scope="col">"Message"</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2223,6 +2225,7 @@ fn Dashboard(
                                     .collect::<Vec<_>>()}
                             </tbody>
                         </table>
+                        </div>
                     }.into_any()
                 }}
             </section>
@@ -2378,15 +2381,16 @@ fn hosts_tab(
                 view! { <p class="muted">"No hosts seen yet."</p> }.into_any()
             } else {
                 view! {
+                    <div class="table-wrap">
                     <table>
                         <thead>
                             <tr>
-                                <th>{sort_link("Host", HostSort::Host.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
-                                <th>{sort_link("Software", HostSort::Software.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
-                                <th>{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
-                                <th>{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
-                                <th>{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
-                                <th>"Actions"</th>
+                                <th scope="col">{sort_link("Host", HostSort::Host.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th scope="col">{sort_link("Software", HostSort::Software.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th scope="col">{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th scope="col">{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th scope="col">{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
+                                <th scope="col">"Actions"</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -2410,6 +2414,7 @@ fn hosts_tab(
                                 .collect::<Vec<_>>()}
                         </tbody>
                     </table>
+                    </div>
                 }
                 .into_any()
             }}
@@ -2457,13 +2462,13 @@ fn table_tab(
                     .iter()
                     .map(|column| {
                         view! {
-                            <th>{sort_link(column, column, &sort, order, &base, LogOrder::Asc)}</th>
+                            <th scope="col">{sort_link(column, column, &sort, order, &base, LogOrder::Asc)}</th>
                         }
                         .into_any()
                     })
                     .collect();
                 if action.is_some() {
-                    header.push(view! { <th>"Actions"</th> }.into_any());
+                    header.push(view! { <th scope="col">"Actions"</th> }.into_any());
                 }
                 let body: Vec<AnyView> = rows
                     .into_iter()
@@ -2498,10 +2503,12 @@ fn table_tab(
                     })
                     .collect();
                 view! {
+                    <div class="table-wrap">
                     <table>
                         <thead><tr>{header}</tr></thead>
                         <tbody>{body}</tbody>
                     </table>
+                    </div>
                 }
                 .into_any()
             }}
@@ -2648,12 +2655,13 @@ fn LogsPage(
                     }
                 } else {
                     view! {
+                        <div class="table-wrap">
                         <table>
                             <thead>
                                 <tr>
-                                    <th>{time_link}</th>
-                                    <th>{level_link}</th>
-                                    <th>{message_link}</th>
+                                    <th scope="col">{time_link}</th>
+                                    <th scope="col">{level_link}</th>
+                                    <th scope="col">{message_link}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2671,6 +2679,7 @@ fn LogsPage(
                                     .collect::<Vec<_>>()}
                             </tbody>
                         </table>
+                        </div>
                     }.into_any()
                 }}
             </section>
@@ -2954,6 +2963,7 @@ fn ConfigPage(
                             name="server"
                             placeholder="example.social"
                             required
+                            aria-label="Your instance's name"
                             title="Required: the name of your instance, e.g. example.social. FediFetcher registers itself there and you approve it on the instance's own site."
                         />
                         <button type="submit">"Connect your Fediverse account"</button>
@@ -3054,7 +3064,7 @@ fn DebugPage(
                 <form method="post" action="/debug">
                     <input type="hidden" name="action" value="user"/>
                     <p>
-                        <input type="text" name="user" placeholder="user@example.social" required/>
+                        <input type="text" name="user" placeholder="user@example.social" required aria-label="Account to look up"/>
                         <button type="submit">"Look up"</button>
                     </p>
                 </form>
@@ -3064,8 +3074,8 @@ fn DebugPage(
                 <form method="post" action="/debug">
                     <input type="hidden" name="action" value="posts"/>
                     <p>
-                        <input type="text" name="user" placeholder="user@example.social" required/>
-                        <input type="number" name="limit" value="10" min="1" max="40"/>
+                        <input type="text" name="user" placeholder="user@example.social" required aria-label="Account to fetch posts for"/>
+                        <input type="number" name="limit" value="10" min="1" max="40" aria-label="How many posts to fetch"/>
                         " posts"
                         <button type="submit">"Fetch posts"</button>
                     </p>
@@ -3180,19 +3190,21 @@ fn debug_result_view(outcome: &DebugOutcome) -> AnyView {
                         view! { <p class="muted">"No posts."</p> }.into_any()
                     } else {
                         view! {
+                            <div class="table-wrap">
                             <table>
                                 <thead>
                                     <tr>
-                                        <th>"Created"</th>
-                                        <th>"Visibility"</th>
-                                        <th>"Replies"</th>
-                                        <th>"Boosts"</th>
-                                        <th>"Favorites"</th>
-                                        <th>"Post"</th>
+                                        <th scope="col">"Created"</th>
+                                        <th scope="col">"Visibility"</th>
+                                        <th scope="col">"Replies"</th>
+                                        <th scope="col">"Boosts"</th>
+                                        <th scope="col">"Favorites"</th>
+                                        <th scope="col">"Post"</th>
                                     </tr>
                                 </thead>
                                 <tbody>{rows}</tbody>
                             </table>
+                            </div>
                         }
                         .into_any()
                     }}

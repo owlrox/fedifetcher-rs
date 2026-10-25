@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "fedifetcher-rs"
-version = "1.3.29"
+version = "1.3.30"
 dependencies = [
  "axum",
  "clap",

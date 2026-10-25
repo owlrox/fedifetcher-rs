@@ -3335,3 +3335,72 @@ async fn the_top_bar_underlines_the_page_you_are_on() {
         "the dashboard should mark its own nav link as the current page"
     );
 }
+
+#[tokio::test]
+async fn the_pages_meet_the_accessibility_basics() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    // every config input is named for screen readers
+    let (status, body) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("<input type=\"text\" name=\"server\" aria-label="),
+        "the server input carries an accessible name: {body}"
+    );
+    assert!(
+        body.contains("aria-label="),
+        "config inputs carry accessible names"
+    );
+
+    // table headers say they head columns
+    for path in ["/", "/data", "/logs"] {
+        let (status, body) = get(&format!("{base}{path}")).await;
+        assert_eq!(status, 200, "{path}");
+        assert!(
+            !body.contains("<th>"),
+            "{path} leaves no column header unmarked"
+        );
+    }
+    // a table with rows marks them; seed one log line so /logs has a table
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    let (base, db) = spawn_ui_with(config).await;
+    sqlx::query("INSERT INTO logs (ts, level, target, message) VALUES ('2026-01-01T00:00:00Z', 'INFO', 'test', 'seeded line')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let (status, body) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("<th scope=\"col\">"),
+        "/logs marks its column headers"
+    );
+
+    // wide tables scroll instead of blowing out the page; the logs table
+    // fetched above is wrapped (a fresh /data has no tables to wrap)
+    assert!(
+        body.contains("<div class=\"table-wrap\">"),
+        "data tables sit in a scroll wrapper"
+    );
+
+    // colors adapt to the color scheme and keep their contrast
+    let (_, body) = get(&format!("{base}/")).await;
+    assert!(
+        body.contains("--link: light-dark("),
+        "links adapt to the scheme"
+    );
+    assert!(
+        body.contains("--muted: light-dark("),
+        "muted text adapts to the scheme"
+    );
+    assert!(
+        body.contains("nav a { color: #cde; }"),
+        "the top bar's links are light on its dark gradient"
+    );
+    assert!(
+        body.contains(".badge.ok { background: #1e7e34; }"),
+        "badges keep white text at contrast"
+    );
+}
