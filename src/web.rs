@@ -1051,6 +1051,8 @@ async fn save_error(
     message: &str,
     live: bool,
 ) -> (StatusCode, Html<String>) {
+    // the user sees this page; the logs table should say the same thing
+    tracing::error!("{message}");
     let message = message.to_string();
     let state = state.clone();
     let running = run_in_progress(&state).await;

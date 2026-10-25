@@ -480,3 +480,53 @@ async fn both_ends_of_the_dance_agree_on_the_public_origin_behind_a_proxy() {
         "both ends of the dance name the public origin"
     );
 }
+
+/// The app on an instance is registered with a scope set; when the dance's
+/// ask grows (a new scope), the cached registration is stale — the instance
+/// would refuse the authorize with "invalid scope". Re-register.
+#[tokio::test]
+async fn an_app_registered_with_other_scopes_is_registered_again() {
+    let server = MockServer::start_async().await;
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, &host(&server));
+    let db = fixture::test_db(&config).await;
+    let http = http(&config, &db);
+
+    // a registration from an earlier build, with a smaller scope ask
+    fedifetcher::db::save_oauth_app(
+        &db,
+        &host(&server),
+        "old-client-id",
+        "old-client-secret",
+        "read:search read:statuses",
+    )
+    .await
+    .unwrap();
+    let registration_mock = server
+        .mock_async(|when, then| {
+            when.method(Method::POST).path("/api/v1/apps");
+            then.status(200).json_body(serde_json::json!({
+                "id": "18",
+                "client_id": "fresh-client-id",
+                "client_secret": "fresh-client-secret",
+            }));
+        })
+        .await;
+
+    let origin = format!("http://{}", host(&server));
+    let app = oauth::registered_app(&db, &host(&server), &http, &origin)
+        .await
+        .expect("the re-registration answers");
+
+    assert_eq!(app.client_id, "fresh-client-id");
+    assert_eq!(
+        registration_mock.calls(),
+        1,
+        "the stale-scope registration is replaced, not reused"
+    );
+    let row = fedifetcher::db::oauth_app(&db, &host(&server))
+        .await
+        .unwrap()
+        .expect("the row is updated");
+    assert_eq!(row.scopes, oauth::SCOPES, "the row carries the new scopes");
+}

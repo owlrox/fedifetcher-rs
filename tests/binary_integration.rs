@@ -310,3 +310,55 @@ async fn serve_on_a_taken_port_fails_with_the_reason() {
     );
     assert_state_stayed_in_the_sandbox(&tmp);
 }
+
+/// A failed step of the dance is logged into the logs table the /logs page
+/// reads — the user saw the error page; the run history's neighbor should
+/// say the same thing.
+#[tokio::test]
+async fn a_failed_dance_step_is_logged_into_the_logs_table() {
+    let tmp = tmp_dir();
+    let (config, db) = state_db(&tmp).await;
+    drop(db);
+
+    let port = free_port();
+    let ui = child(&tmp, &["serve", "--port", &port.to_string()])
+        .spawn()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let _ = healthz(&base).await;
+
+    // connect to a server that is not there: the registration fails, the
+    // error page says so, and the logs table records it
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/oauth/connect"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("server=127.0.0.1:9")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+
+    let db = db::open(&config).await.unwrap();
+    for _ in 0..100 {
+        let rows = db::recent_logs(&db, 100, LogSort::Time, LogOrder::Desc, None)
+            .await
+            .unwrap();
+        if rows.iter().any(|row| {
+            row.message.contains("127.0.0.1:9/api/v1/apps")
+                && row.message.contains("Connection refused")
+        }) {
+            stop_ui(&tmp, ui).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let rows = db::recent_logs(&db, 100, LogSort::Time, LogOrder::Desc, None)
+        .await
+        .unwrap();
+    stop_ui(&tmp, ui).await;
+    panic!(
+        "the failed dance step is not in the logs table: {:?}",
+        rows.iter().map(|row| &row.message).collect::<Vec<_>>()
+    );
+}

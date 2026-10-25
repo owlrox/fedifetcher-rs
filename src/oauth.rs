@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 use sqlx::SqlitePool;
+use tracing::info;
 
 use crate::db;
 use crate::error::{Error, Result};
@@ -33,12 +34,18 @@ pub async fn registered_app(
     http: &HttpClient,
     origin: &str,
 ) -> Result<RegisteredApp> {
+    // a cached registration is reused only when its scope ask still is
+    // ours: the instance validates the authorize-time scopes against the
+    // registered ones, so a stale registration means "invalid scope"
     if let Some(cached) = db::oauth_app(db, server).await? {
-        return Ok(RegisteredApp {
-            server: server.to_string(),
-            client_id: cached.client_id,
-            client_secret: cached.client_secret,
-        });
+        if cached.scopes == SCOPES {
+            return Ok(RegisteredApp {
+                server: server.to_string(),
+                client_id: cached.client_id,
+                client_secret: cached.client_secret,
+            });
+        }
+        info!("The app registered on {server} asks for different scopes; registering again");
     }
 
     let form = [
@@ -72,7 +79,7 @@ pub async fn registered_app(
         client_id: client_id.to_string(),
         client_secret: client_secret.to_string(),
     };
-    db::save_oauth_app(db, &app.server, &app.client_id, &app.client_secret).await?;
+    db::save_oauth_app(db, &app.server, &app.client_id, &app.client_secret, SCOPES).await?;
     Ok(app)
 }
 

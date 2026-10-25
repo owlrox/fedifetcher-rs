@@ -2012,9 +2012,15 @@ async fn disconnecting_revokes_the_token_and_removes_the_account() {
         })
         .await;
     // the app registration the revoke needs, answered from the cache
-    fedifetcher::db::save_oauth_app(&pool, &instance_host, "the-client-id", "the-secret")
-        .await
-        .unwrap();
+    fedifetcher::db::save_oauth_app(
+        &pool,
+        &instance_host,
+        "the-client-id",
+        "the-secret",
+        fedifetcher::oauth::SCOPES,
+    )
+    .await
+    .unwrap();
 
     let app = fedifetcher::web::app_with_scheme(config, pool.clone(), "http");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

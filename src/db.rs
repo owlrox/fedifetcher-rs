@@ -176,11 +176,13 @@ async fn create_schema(pool: &SqlitePool) -> Result<()> {
             server TEXT PRIMARY KEY,
             client_id TEXT NOT NULL,
             client_secret TEXT NOT NULL,
+            scopes TEXT NOT NULL DEFAULT '',
             registered_at TEXT NOT NULL
         )",
     )
     .execute(pool)
     .await?;
+    migrate_oauth_apps(pool).await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS seen_urls (
             uri TEXT PRIMARY KEY,
@@ -265,6 +267,19 @@ async fn create_seen_hosts(pool: &SqlitePool) -> Result<()> {
 
 /// Add the columns an older trigger_posts table is missing, keeping the rows
 /// it already has (the new columns read as a public, non-boost post).
+/// The oauth_apps table of an earlier build knows nothing of the scopes
+/// its registration asked for — which is how a stale registration is
+/// recognized.
+async fn migrate_oauth_apps(pool: &SqlitePool) -> Result<()> {
+    let columns = table_columns(pool, "oauth_apps").await?;
+    if !columns.iter().any(|name| name == "scopes") {
+        sqlx::query("ALTER TABLE oauth_apps ADD COLUMN scopes TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 async fn migrate_trigger_posts(pool: &SqlitePool) -> Result<()> {
     let columns = table_columns(pool, "trigger_posts").await?;
     let missing = [
@@ -387,19 +402,22 @@ pub struct OauthAppRow {
     pub server: String,
     pub client_id: String,
     pub client_secret: String,
+    pub scopes: String,
 }
 
 /// The app registered on the given server, if it is.
 pub async fn oauth_app(pool: &SqlitePool, server: &str) -> Result<Option<OauthAppRow>> {
-    let row =
-        sqlx::query("SELECT server, client_id, client_secret FROM oauth_apps WHERE server = ?")
-            .bind(server)
-            .fetch_optional(pool)
-            .await?;
+    let row = sqlx::query(
+        "SELECT server, client_id, client_secret, scopes FROM oauth_apps WHERE server = ?",
+    )
+    .bind(server)
+    .fetch_optional(pool)
+    .await?;
     Ok(row.map(|row| OauthAppRow {
         server: row.get("server"),
         client_id: row.get("client_id"),
         client_secret: row.get("client_secret"),
+        scopes: row.get("scopes"),
     }))
 }
 
@@ -409,16 +427,19 @@ pub async fn save_oauth_app(
     server: &str,
     client_id: &str,
     client_secret: &str,
+    scopes: &str,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO oauth_apps (server, client_id, client_secret, registered_at)
-         VALUES (?, ?, ?, ?)
+        "INSERT INTO oauth_apps (server, client_id, client_secret, scopes, registered_at)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(server) DO UPDATE SET client_id = excluded.client_id,
-         client_secret = excluded.client_secret, registered_at = excluded.registered_at",
+         client_secret = excluded.client_secret, scopes = excluded.scopes,
+         registered_at = excluded.registered_at",
     )
     .bind(server)
     .bind(client_id)
     .bind(client_secret)
+    .bind(scopes)
     .bind(crate::timeutil::fmt_state_ts(crate::timeutil::now()))
     .execute(pool)
     .await?;

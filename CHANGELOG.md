@@ -1,3 +1,31 @@
+## 1.2.23
+
+Re-register stale-scope apps and log the dance's failures.
+
+Two findings from the third live round.
+
+The instance refused the authorize with "The requested scope is
+invalid, unknown, or malformed": the dance asked for four scopes —
+1.2.22's read:accounts joined — but the app registered on the instance
+back in the 1.2.21 round carried the old three, and an instance
+validates the authorize-time scopes against the registered ones. The
+cached registration now carries its scope ask (oauth_apps gains a
+scopes column, migrated the trigger_posts way on existing databases),
+and registered_app re-registers — and updates the row — whenever the
+cached ask differs from the current one. A future scope change heals
+itself the same way. The re-registration creates a second app entry on
+the instance's applications page; the old one is inert and deletable
+by hand.
+
+The dance's failures were also invisible on the Logs page: save_error
+rendered the message and said nothing to the logs table. It now
+emits an ERROR event with the same message, so every failed save and
+every failed dance step lands where the run history's failures live.
+The binary test proves it end to end: connect to an unreachable
+instance, and the logs table records the refused registration.
+
+377 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.22
 
 Ask for read:accounts: verify_credentials requires it.
