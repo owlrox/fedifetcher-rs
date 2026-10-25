@@ -2974,8 +2974,8 @@ fn DebugPage(
                 </p>
                 <form method="post" action="/debug">
                     <p>
-                        <button type="submit" name="action" value="cleanup">"Clean up DB"</button>
                         <button type="submit" name="action" value="trim">"Trim 10%"</button>
+                        <button type="submit" name="action" value="cleanup">"Clean up DB"</button>
                     </p>
                 </form>
             </section>
