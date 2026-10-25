@@ -1,3 +1,13 @@
+## 1.3.1
+
+Trim the token row's hints.
+
+The removed "Tokens are never shown in full" line said what the
+tooltip already says, and its extra space goes with it. The remove
+checkbox's label now reads left of the checkbox instead of after it.
+
+384 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.3.0
 
 Polish the config page's accounts and tokens.

@@ -1603,8 +1603,8 @@ fn tokens_row(config: &Config) -> AnyView {
                 <li class="token-row">
                     <code>{masked}</code>
                     <label class="token-remove">
+                        "remove "
                         <input type="checkbox" name="remove_access_token" value={index.to_string()}/>
-                        "remove"
                     </label>
                 </li>
             }
@@ -1625,7 +1625,6 @@ fn tokens_row(config: &Config) -> AnyView {
                         autocomplete="new-password"
                         title=option_description("access_tokens")/>
                 </p>
-                <p class="muted">"Tokens are never shown in full; add one, or tick remove."</p>
             </td>
         </tr>
     }
