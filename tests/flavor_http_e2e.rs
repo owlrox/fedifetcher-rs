@@ -459,7 +459,7 @@ async fn a_403_names_the_missing_permission() {
     assert!(err.contains("read:bookmarks"), "the scope is named: {err}");
 
     let err = home.favorites(10).await.unwrap_err().to_string();
-    assert!(err.contains("read:favorites"), "the scope is named: {err}");
+    assert!(err.contains("read:favourites"), "the scope is named: {err}");
 
     let err = home.follow_requests(10).await.unwrap_err().to_string();
     assert!(err.contains("read:follows"), "the scope is named: {err}");

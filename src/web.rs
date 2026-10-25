@@ -872,7 +872,8 @@ async fn oauth_connect(
 
     let origin = oauth::public_origin(&headers);
     let http = state.http.ignoring_robots();
-    let app = match oauth::registered_app(&state.db, &server, &http, &origin).await {
+    let scopes = oauth::scopes_for(&state.config.lock().unwrap().clone());
+    let app = match oauth::registered_app(&state.db, &server, &http, &origin, &scopes).await {
         Ok(app) => app,
         Err(ex) => {
             return Err(save_error(&state, StatusCode::BAD_REQUEST, &ex.to_string(), live).await);
@@ -881,7 +882,7 @@ async fn oauth_connect(
 
     tracing::info!("Starting the OAuth dance for {server}");
     let oauth_state = uuid::Uuid::new_v4().to_string();
-    let authorize = oauth::authorize_url(&app, state.http.scheme(), &origin, &oauth_state);
+    let authorize = oauth::authorize_url(&app, state.http.scheme(), &origin, &oauth_state, &scopes);
     // the cookie remembers both the state and the server the dance is on
     // with: the instance's redirect back carries only the code and state
     let cookie = format!(
@@ -931,7 +932,8 @@ async fn oauth_callback(
 
     let origin = oauth::public_origin(&headers);
     let http = state.http.ignoring_robots();
-    let app = match oauth::registered_app(&state.db, &server, &http, &origin).await {
+    let scopes = oauth::scopes_for(&state.config.lock().unwrap().clone());
+    let app = match oauth::registered_app(&state.db, &server, &http, &origin, &scopes).await {
         Ok(app) => app,
         Err(ex) => {
             return Err(save_error(&state, StatusCode::BAD_REQUEST, &ex.to_string(), live).await);
@@ -1048,14 +1050,21 @@ async fn oauth_disconnect(
         .await);
     }
 
-    let origin = oauth::public_origin(&headers);
     let http = state.http.ignoring_robots();
     for row in rows {
-        match oauth::registered_app(&state.db, &row.server, &http, &origin).await {
-            Ok(app) => {
+        match oauth::cached_app(&state.db, &row.server).await {
+            // the registration the token was issued under, from the cache:
+            // a revoke with a different app's credentials would be refused
+            Ok(Some(app)) => {
                 if let Err(ex) = oauth::revoke_token(&http, &app, &row.token).await {
                     tracing::warn!("Disconnecting @{acct}: the instance refused the revoke: {ex}");
                 }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "Disconnecting @{acct}: {server_of} has no cached app registration; the token cannot be revoked",
+                    server_of = row.server
+                );
             }
             Err(ex) => {
                 tracing::warn!(
@@ -2649,6 +2658,7 @@ fn ConfigPage(
                             type="text"
                             name="server"
                             placeholder="example.social"
+                            required
                             title="Required: the name of your instance, e.g. example.social. FediFetcher registers itself there and you approve it on the instance's own site."
                         />
                         <button type="submit">"Connect your Mastodon account"</button>

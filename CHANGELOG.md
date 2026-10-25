@@ -1,3 +1,40 @@
+## 1.2.26
+
+Ask only for the scopes the enabled tasks need.
+
+The user asked whether too many scopes ride along with the connect —
+auditing every HomeServer call against its enabling option answered
+yes, and found the mirror-image bug too.
+
+The scope ask is now derived from the config at connect time
+(oauth::scopes_for): the core three the context work cannot do without
+(read:search, read:statuses, and read:accounts for the dance), plus
+one scope per enabled task that needs its own — read:lists (from_lists),
+read:notifications (from_notifications), read:bookmarks (max_bookmarks),
+read:favourites (max_favorites), read:follows (the follow backfills),
+admin:read:accounts (reply_interval_in_hours, whose admin API is that
+scope's only consumer). A default install asks for three scopes where
+it asked for four; the scary admin scope appears only when the task
+that uses it is on. The registration cache's scopes column makes a
+changed ask self-healing — enable a task, reconnect, and the instance
+re-consents on the wider set — and the disconnect path now uses the
+cached registration alone (cached_app), since revoking with a
+re-registered app's credentials would orphan the token from its app.
+
+The audit also found the under-granting: five task scopes were in
+neither the OAuth ask nor the README's manual-token list, so those
+tasks 403'd for users who followed the docs. The README's setup and
+config-table entries now carry the full option-to-scope map, and the
+403 message for the favourites task names read:favourites — the scope
+that exists — instead of the invented read:favorites, whose own test
+was pinning the misspelling and now asserts the fix.
+
+The connect form's server field carries the required attribute: the
+browser refuses an empty submit before anything moves, with the
+server-side 400 as the backstop for anything that is not a browser.
+
+382 tests pass; clippy -D warnings and fmt clean.
+
 ## 1.2.25
 
 Finish the OAuth onboarding: README, checkboxes, coverage.

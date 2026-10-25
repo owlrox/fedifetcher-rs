@@ -2017,7 +2017,7 @@ async fn disconnecting_revokes_the_token_and_removes_the_account() {
         &instance_host,
         "the-client-id",
         "the-secret",
-        fedifetcher::oauth::SCOPES,
+        "read:search read:statuses read:accounts",
     )
     .await
     .unwrap();

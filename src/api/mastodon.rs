@@ -562,8 +562,12 @@ impl HomeServer {
     }
 
     pub async fn favorites(&self, limit: i64) -> Result<Vec<Post>> {
-        self.posts("/api/v1/favourites", StopAt::Count(limit), "read:favorites")
-            .await
+        self.posts(
+            "/api/v1/favourites",
+            StopAt::Count(limit),
+            "read:favourites",
+        )
+        .await
     }
 
     async fn accounts(

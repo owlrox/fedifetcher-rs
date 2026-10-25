@@ -7,14 +7,37 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 use tracing::info;
 
+use crate::config::Config;
 use crate::db;
 use crate::error::{Error, Result};
 use crate::http::HttpClient;
 
-/// The permissions FediFetcher asks the instance for, one consent screen.
-/// One more than the fetching needs: `read:accounts` is verify_credentials's
-/// price, and the dance asks whose token it just minted.
-pub const SCOPES: &str = "read:search read:statuses admin:read:accounts read:accounts";
+/// The permissions FediFetcher asks the instance for: the core three the
+/// context work cannot do without, plus one scope per enabled task that
+/// needs its own. Asked for at connect time, so a task enabled later is
+/// covered by the next reconnect — the registration follows the ask.
+pub fn scopes_for(config: &Config) -> String {
+    let mut scopes = vec!["read:search", "read:statuses", "read:accounts"];
+    if config.from_lists {
+        scopes.push("read:lists");
+    }
+    if config.from_notifications > 0 {
+        scopes.push("read:notifications");
+    }
+    if config.max_bookmarks > 0 {
+        scopes.push("read:bookmarks");
+    }
+    if config.max_favorites > 0 {
+        scopes.push("read:favourites");
+    }
+    if config.max_followings > 0 || config.max_followers > 0 || config.max_follow_requests > 0 {
+        scopes.push("read:follows");
+    }
+    if config.reply_interval_in_hours > 0 {
+        scopes.push("admin:read:accounts");
+    }
+    scopes.join(" ")
+}
 
 /// The app as an instance knows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +45,19 @@ pub struct RegisteredApp {
     pub server: String,
     pub client_id: String,
     pub client_secret: String,
+}
+
+/// The app as an instance knows it, from the cache alone: the right ask for
+/// a token the instance already issued (a revoke) — re-registering there
+/// would only orphan the token from its app.
+pub async fn cached_app(db: &SqlitePool, server: &str) -> Result<Option<RegisteredApp>> {
+    Ok(db::oauth_app(db, server)
+        .await?
+        .map(|cached| RegisteredApp {
+            server: cached.server,
+            client_id: cached.client_id,
+            client_secret: cached.client_secret,
+        }))
 }
 
 /// The app registered on `server` — from the cache when it is registered
@@ -33,12 +69,13 @@ pub async fn registered_app(
     server: &str,
     http: &HttpClient,
     origin: &str,
+    scopes: &str,
 ) -> Result<RegisteredApp> {
     // a cached registration is reused only when its scope ask still is
     // ours: the instance validates the authorize-time scopes against the
     // registered ones, so a stale registration means "invalid scope"
     if let Some(cached) = db::oauth_app(db, server).await? {
-        if cached.scopes == SCOPES {
+        if cached.scopes == scopes {
             return Ok(RegisteredApp {
                 server: server.to_string(),
                 client_id: cached.client_id,
@@ -54,7 +91,7 @@ pub async fn registered_app(
             "redirect_uris".to_string(),
             format!("{origin}/oauth/callback"),
         ),
-        ("scopes".to_string(), SCOPES.to_string()),
+        ("scopes".to_string(), scopes.to_string()),
     ];
     let url = format!("{scheme}://{server}/api/v1/apps", scheme = http.scheme());
     let resp = http.post_form(&url, &form, None).await?;
@@ -79,7 +116,7 @@ pub async fn registered_app(
         client_id: client_id.to_string(),
         client_secret: client_secret.to_string(),
     };
-    db::save_oauth_app(db, &app.server, &app.client_id, &app.client_secret, SCOPES).await?;
+    db::save_oauth_app(db, &app.server, &app.client_id, &app.client_secret, scopes).await?;
     Ok(app)
 }
 
@@ -189,12 +226,18 @@ pub async fn revoke_token(http: &HttpClient, app: &RegisteredApp, token: &str) -
 /// The instance's own consent screen, pointed at with everything the dance
 /// needs. The scheme is the http client's: https in production, and http
 /// when the tests play the instance.
-pub fn authorize_url(app: &RegisteredApp, scheme: &str, origin: &str, state: &str) -> String {
+pub fn authorize_url(
+    app: &RegisteredApp,
+    scheme: &str,
+    origin: &str,
+    state: &str,
+    scopes: &str,
+) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &app.client_id)
         .append_pair("redirect_uri", &format!("{origin}/oauth/callback"))
         .append_pair("response_type", "code")
-        .append_pair("scope", SCOPES)
+        .append_pair("scope", scopes)
         .append_pair("state", state)
         .finish();
     format!("{scheme}://{}/oauth/authorize?{query}", app.server)
@@ -215,4 +258,63 @@ pub fn public_origin(headers: &reqwest::header::HeaderMap) -> String {
         .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))
         .unwrap_or("127.0.0.1:8080");
     format!("{proto}://{host}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn the_default_ask_is_the_core_three() {
+        let config = Config::default();
+        assert_eq!(
+            scopes_for(&config),
+            "read:search read:statuses read:accounts",
+            "no task scopes are asked for when no task needs them"
+        );
+    }
+
+    #[test]
+    fn each_task_adds_only_its_own_scope() {
+        let lists = Config {
+            from_lists: true,
+            ..Default::default()
+        };
+        assert!(scopes_for(&lists).contains("read:lists"));
+        assert!(!scopes_for(&lists).contains("admin:read:accounts"));
+
+        let replies = Config {
+            reply_interval_in_hours: 24,
+            ..Default::default()
+        };
+        assert!(
+            scopes_for(&replies).contains("admin:read:accounts"),
+            "the admin scope is asked for only when the reply task needs it"
+        );
+
+        let bookmarks = Config {
+            max_bookmarks: 10,
+            ..Default::default()
+        };
+        assert!(scopes_for(&bookmarks).contains("read:bookmarks"));
+
+        let favourites = Config {
+            max_favorites: 10,
+            ..Default::default()
+        };
+        assert!(scopes_for(&favourites).contains("read:favourites"));
+
+        let notifications = Config {
+            from_notifications: 10,
+            ..Default::default()
+        };
+        assert!(scopes_for(&notifications).contains("read:notifications"));
+
+        let followings = Config {
+            max_followings: 10,
+            ..Default::default()
+        };
+        assert!(scopes_for(&followings).contains("read:follows"));
+    }
 }

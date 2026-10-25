@@ -98,7 +98,7 @@ First-run setup — the easy way, no token to copy:
 
 The manual way, unchanged — for headless installs, or instances that restrict OAuth applications:
 
-1. Create an application for your account at `https://<your-server>/settings/applications`. The access token needs the `read:search`, `read:statuses`, and `admin:read:accounts` scopes.
+1. Create an application for your account at `https://<your-server>/settings/applications`. The access token needs the scopes the tasks you enable ask for — `read:search` and `read:statuses` always, plus `read:lists` (from_lists), `read:notifications` (from_notifications), `read:bookmarks` (max_bookmarks), `read:favourites` (max_favorites), `read:follows` (the followings/followers backfills), and `admin:read:accounts` (reply_interval_in_hours). A token missing a scope gets a 403 naming it.
 2. Open the **Config** page (`/config`) in the web UI and fill in:
    - **server** — your server's name, e.g. `mstdn.thms.uk`
    - **access_tokens** — one token per user whose timelines you fetch
@@ -160,7 +160,7 @@ The configuration is stored in the database and edited through the web UI's conf
 | Option | Default | Description |
 | --- | --- | --- |
 | `server` | *(required)* | Your server's name, e.g. `mstdn.thms.uk` |
-| `access_tokens` | *(required)* | One token per user — connected through the config page's **Connect your Mastodon account** (which asks for `read:search`, `read:statuses`, `admin:read:accounts`, and `read:accounts`), or created by hand at `https://<server>/settings/applications` with `read:search`, `read:statuses`, and `admin:read:accounts` scopes |
+| `access_tokens` | *(required)* | One token per user — connected through the config page's **Connect your Mastodon account** (which asks only for the scopes your enabled tasks need, plus `read:accounts` for the connection itself), or created by hand at `https://<server>/settings/applications` with the scopes the enabled tasks need (see the setup steps above) |
 | `reply_interval_in_hours` | `0` (off) | Fetch remote replies to posts that received replies from users on your instance in this period |
 | `home_timeline_length` | `0` (off) | Look for replies to posts in the API key owner's home timeline, up to this many posts |
 | `streaming` | `false` | Stream the home timeline over a long-lived connection and fetch context for new posts as they arrive, instead of waiting for the next run. Serve mode only, with the first access token; applies on restart |

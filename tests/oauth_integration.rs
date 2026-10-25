@@ -51,17 +51,21 @@ async fn a_new_server_is_registered_with_name_callback_and_scopes() {
                 .body_includes("client_name=FediFetcher-rs")
                 .body_includes(format!("redirect_uris=http%3A%2F%2F{encoded_host}").as_str())
                 .body_includes("%2Foauth%2Fcallback")
-                .body_includes(
-                    "read%3Asearch+read%3Astatuses+admin%3Aread%3Aaccounts+read%3Aaccounts",
-                );
+                .body_includes("read%3Asearch+read%3Astatuses+read%3Aaccounts");
             then.status(200).json_body(registration());
         })
         .await;
 
     let origin = format!("http://{}", host(&server));
-    let app = oauth::registered_app(&db, &host(&server), &http, &origin)
-        .await
-        .expect("the registration answers");
+    let app = oauth::registered_app(
+        &db,
+        &host(&server),
+        &http,
+        &origin,
+        &oauth::scopes_for(&config),
+    )
+    .await
+    .expect("the registration answers");
 
     assert_eq!(app.client_id, "the-client-id");
     assert_eq!(registration_mock.calls(), 1);
@@ -85,12 +89,24 @@ async fn a_registered_server_is_not_registered_again() {
         .await;
 
     let origin = format!("http://{}", host(&server));
-    let first = oauth::registered_app(&db, &host(&server), &http, &origin)
-        .await
-        .expect("the first registration answers");
-    let second = oauth::registered_app(&db, &host(&server), &http, &origin)
-        .await
-        .expect("the cached registration answers");
+    let first = oauth::registered_app(
+        &db,
+        &host(&server),
+        &http,
+        &origin,
+        &oauth::scopes_for(&config),
+    )
+    .await
+    .expect("the first registration answers");
+    let second = oauth::registered_app(
+        &db,
+        &host(&server),
+        &http,
+        &origin,
+        &oauth::scopes_for(&config),
+    )
+    .await
+    .expect("the cached registration answers");
 
     assert_eq!(first.client_id, second.client_id);
     assert_eq!(registration_mock.calls(), 1, "asked once");
@@ -114,11 +130,18 @@ async fn the_authorize_url_carries_every_parameter_the_dance_needs() {
         .await;
 
     let origin = format!("http://{}", host(&server));
-    let app = oauth::registered_app(&db, &host(&server), &http, &origin)
-        .await
-        .expect("the registration answers");
+    let app = oauth::registered_app(
+        &db,
+        &host(&server),
+        &http,
+        &origin,
+        &oauth::scopes_for(&config),
+    )
+    .await
+    .expect("the registration answers");
 
-    let url = oauth::authorize_url(&app, "http", &origin, "the-state-value");
+    let scopes = oauth::scopes_for(&config);
+    let url = oauth::authorize_url(&app, "http", &origin, "the-state-value", &scopes);
     let url = url::Url::parse(&url).expect("the authorize URL parses");
 
     let with_port = match url.port() {
@@ -140,7 +163,7 @@ async fn the_authorize_url_carries_every_parameter_the_dance_needs() {
     );
     assert_eq!(
         pairs.get("scope").unwrap(),
-        "read:search read:statuses admin:read:accounts read:accounts"
+        "read:search read:statuses read:accounts"
     );
 }
 
@@ -514,9 +537,15 @@ async fn an_app_registered_with_other_scopes_is_registered_again() {
         .await;
 
     let origin = format!("http://{}", host(&server));
-    let app = oauth::registered_app(&db, &host(&server), &http, &origin)
-        .await
-        .expect("the re-registration answers");
+    let app = oauth::registered_app(
+        &db,
+        &host(&server),
+        &http,
+        &origin,
+        &oauth::scopes_for(&config),
+    )
+    .await
+    .expect("the re-registration answers");
 
     assert_eq!(app.client_id, "fresh-client-id");
     assert_eq!(
@@ -528,7 +557,11 @@ async fn an_app_registered_with_other_scopes_is_registered_again() {
         .await
         .unwrap()
         .expect("the row is updated");
-    assert_eq!(row.scopes, oauth::SCOPES, "the row carries the new scopes");
+    assert_eq!(
+        row.scopes,
+        oauth::scopes_for(&config),
+        "the row carries the new scopes"
+    );
 }
 
 /// The OAuth lifecycle speaks in the logs table, like the runs do: a
@@ -640,9 +673,15 @@ async fn each_way_the_dance_can_fail_is_reported_with_its_step() {
             then.status(500).up_to_n_times(1);
         })
         .await;
-    let err = oauth::registered_app(&db, &host_string, &http, &origin)
-        .await
-        .unwrap_err();
+    let err = oauth::registered_app(
+        &db,
+        &host_string,
+        &http,
+        &origin,
+        &oauth::scopes_for(&config),
+    )
+    .await
+    .unwrap_err();
     assert!(
         err.to_string().contains("registering the app on") && err.to_string().contains("500"),
         "{err}"
@@ -656,9 +695,15 @@ async fn each_way_the_dance_can_fail_is_reported_with_its_step() {
                 .up_to_n_times(1);
         })
         .await;
-    let err = oauth::registered_app(&db, &host_string, &http, &origin)
-        .await
-        .unwrap_err();
+    let err = oauth::registered_app(
+        &db,
+        &host_string,
+        &http,
+        &origin,
+        &oauth::scopes_for(&config),
+    )
+    .await
+    .unwrap_err();
     assert!(
         err.to_string().contains("no client_secret"),
         "an answer without the secret is refused: {err}"
@@ -671,9 +716,15 @@ async fn each_way_the_dance_can_fail_is_reported_with_its_step() {
             then.status(200).json_body(registration());
         })
         .await;
-    let app = oauth::registered_app(&db, &host_string, &http, &origin)
-        .await
-        .expect("the registration answers");
+    let app = oauth::registered_app(
+        &db,
+        &host_string,
+        &http,
+        &origin,
+        &oauth::scopes_for(&config),
+    )
+    .await
+    .expect("the registration answers");
 
     server
         .mock_async(|when, then| {
