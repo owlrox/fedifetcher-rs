@@ -1,3 +1,34 @@
+## 1.2.10
+
+Test the binary as a process and Lemmy's failures, closing the audit.
+
+The test audit left three gaps deliberately dark; this lights all three.
+
+The Lemmy client's error arms (71.8% lines) were mockable all along —
+they just had no tests. Six e2e tests now cover the community listing
+path, the unknown profile and post URL shapes, each way a paged fetch
+can fail (500, unreadable JSON, entries without posts), a comment's
+context resolved through its post (with the post id arriving as a
+number and as a string), and the unreadable post and comment list
+shapes. Lemmy is now 90.6% of lines with every function executed.
+
+main.rs (0%) and web.rs's serve() startup are covered by a new
+binary_integration suite that runs the real binary as a child process
+(via CARGO_BIN_EXE) with its own state home through XDG_STATE_HOME: the
+version flag; a run with a saved config finishing clean and recording
+itself; a run without a config refused critically with exit 1; serve
+answering /healthz with no configuration at all; the startup sweep
+marking a dead process's run row interrupted; the streaming refusal
+warning reaching the logs table; the stream listener spawning when the
+config asks (and reconnecting on its growing delays when the server is
+unreachable); and a taken port failing with the reason and exit 1.
+main.rs is now 85.5% of lines with every function executed; its
+remaining dark lines are the db-open failure arms, which would need a
+database the process cannot open.
+
+Coverage is 92.2% of lines and 95.7% of functions (was 91.0%/94.3%).
+360 tests pass three times over; clippy -D warnings and fmt are clean.
+
 ## 1.2.9
 
 Mock server discovery end to end and close the audit's coverage gaps.
