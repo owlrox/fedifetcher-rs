@@ -2990,3 +2990,46 @@ async fn the_remove_token_checkbox_stays_inside_its_row() {
         "the checkbox is pulled inside the row's edge: {page}"
     );
 }
+
+/// A cell holding a JSON document renders pretty-printed, so the hosts
+/// table's raw_nodeinfo is readable instead of a dense one-liner.
+#[tokio::test]
+async fn a_json_cell_renders_pretty_printed() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let pool = fedifetcher::db::open(&config).await.unwrap();
+    sqlx::query(
+        "INSERT INTO seen_hosts (host, webserver, software, version, mastodon_api,
+         misskey_api, lemmy_api, peertube_api, last_checked, error, raw_nodeinfo)
+         VALUES ('pretty.example', 'pretty.example', 'mastodon', '4.2.0', 1, 0, 0, 0,
+         '2026-10-22 16:05:07+00:00', NULL,
+         '{\"software\":{\"name\":\"mastodon\",\"version\":\"4.2.0\"},\"protocols\":[\"activitypub\"]}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = web::app(config, pool);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    let base = format!("http://{addr}");
+
+    let (status, page) = get(&format!("{base}/data?tab=seen_hosts")).await;
+
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("<pre class=\"json\">"),
+        "the JSON cell is a pre block: {page}"
+    );
+    // pretty-printed: a space after each colon, one key per line
+    assert!(
+        page.contains("\"name\": \"mastodon\""),
+        "the document is pretty-printed: {page}"
+    );
+    assert!(page.contains('\n'), "the document spans lines");
+    // plain cells are not wrapped in pre
+    assert!(
+        !page.contains("<pre class=\"json\">mastodon<"),
+        "the software column stays a plain cell: {page}"
+    );
+}

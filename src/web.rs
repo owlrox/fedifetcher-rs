@@ -1961,6 +1961,7 @@ ul.tokens { margin: 0.2rem 0; padding-left: 1.2rem; }
 ul.tokens label { color: #888; }
 ul.tokens li.token-row { display: flex; align-items: center; gap: 0.75rem; }
 ul.tokens li.token-row label.token-remove { margin-left: auto; margin-right: 0.25rem; white-space: nowrap; }
+pre.json { max-height: 16rem; overflow: auto; margin: 0; font-size: 0.75rem; }
 li.account { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 li.account form.account-actions { margin: 0; }
 li.account form.account-actions:first-of-type { margin-left: auto; }
@@ -2524,7 +2525,13 @@ fn table_tab(
                         let mut cells: Vec<AnyView> = row
                             .into_iter()
                             .map(|cell| match cell {
-                                Some(value) => view! { <td>{value}</td> }.into_any(),
+                                Some(value) => match json_cell(&value) {
+                                    Some(pretty) => {
+                                        view! { <td><pre class="json">{pretty}</pre></td> }
+                                            .into_any()
+                                    }
+                                    None => view! { <td>{value}</td> }.into_any(),
+                                },
                                 None => view! { <td><span class="muted">"NULL"</span></td> }.into_any(),
                             })
                             .collect();
@@ -2549,6 +2556,23 @@ fn table_tab(
         </section>
     }
     .into_any()
+}
+
+/// A table cell's content, pretty-printed when it is a JSON document —
+/// the raw nodeinfo the seen_hosts table keeps would otherwise be a dense
+/// one-liner. Anything that is not a JSON object or array renders as it
+/// is; the document stays stored as the server sent it.
+fn json_cell(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(json @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+            serde_json::to_string_pretty(&json).ok()
+        }
+        _ => None,
+    }
 }
 
 /// The per-row button that asks the server to fetch one thing now: a form
