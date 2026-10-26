@@ -3334,6 +3334,13 @@ async fn the_top_bar_underlines_the_page_you_are_on() {
         body.contains("<a href=\"/\" class=\"here\">"),
         "the dashboard should mark its own nav link as the current page"
     );
+
+    // every nav link reserves the underline's space, so the top bar is
+    // the same height on pages with no current-page mark (like About)
+    assert!(
+        body.contains("border-bottom: 2px solid transparent"),
+        "nav links reserve the underline space: {body}"
+    );
 }
 
 #[tokio::test]
@@ -3396,7 +3403,7 @@ async fn the_pages_meet_the_accessibility_basics() {
         "muted text adapts to the scheme"
     );
     assert!(
-        body.contains("nav a { color: #cde; text-decoration: none; }"),
+        body.contains("nav a { color: #cde; text-decoration: none; padding-bottom: 0.25rem; border-bottom: 2px solid transparent; }"),
         "the top bar's links are light on its dark gradient"
     );
     assert!(
@@ -3431,11 +3438,33 @@ async fn the_page_is_a_centered_card_with_scroll_hints() {
 
     // top bar links lose their underlines; the version keeps one
     assert!(
-        body.contains("nav a { color: #cde; text-decoration: none; }"),
+        body.contains("nav a { color: #cde; text-decoration: none; padding-bottom: 0.25rem; border-bottom: 2px solid transparent; }"),
         "top bar links are not underlined"
     );
     assert!(
         body.contains(".version { color: #ccc; font-weight: normal; text-decoration: underline; margin-left: 0.3rem; }"),
         "the version number is underlined, spaced off the app name"
+    );
+}
+
+#[tokio::test]
+async fn the_debug_page_shows_the_memory_next_to_the_database() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+
+    let (status, body) = get(&format!("{base}/debug")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(">Memory</h2>"),
+        "the debug page has a Memory section: {body}"
+    );
+    assert!(
+        body.contains("resident") && body.contains("peak resident") && body.contains("heap"),
+        "the Memory section carries the same numbers the exit line does"
+    );
+    // the two sections sit side by side
+    assert!(
+        body.contains("<div class=\"columns\">"),
+        "Database and Memory share a row"
     );
 }

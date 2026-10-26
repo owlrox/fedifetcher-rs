@@ -1961,8 +1961,8 @@ header h1 { font-size: 1.1rem; margin: 0; }
 header h1 a { color: #eee; text-decoration: none; }
 .version { color: #ccc; font-weight: normal; text-decoration: underline; margin-left: 0.3rem; }
 nav { display: flex; gap: 1rem; }
-nav a { color: #cde; text-decoration: none; }
-nav a.here { border-bottom: 2px solid #fff; padding-bottom: 0.25rem; }
+nav a { color: #cde; text-decoration: none; padding-bottom: 0.25rem; border-bottom: 2px solid transparent; }
+nav a.here { border-bottom-color: #fff; }
 header .run { display: flex; gap: 0.5rem; align-items: center; margin-left: auto; }
 header .run form { margin: 0; }
 header .run button { font-size: 0.8rem; padding: 0.1rem 0.6rem; }
@@ -1972,6 +1972,8 @@ nav.tabs a { color: var(--link); text-decoration: none; padding-bottom: 0.25rem;
 nav.tabs a.active { color: inherit; font-weight: 600; border-bottom: 2px solid currentColor; }
 main { padding: 1rem 1.5rem; max-width: 64rem; margin: 1.5rem auto; background: var(--surface); border: 1px solid #8884; border-radius: 0.75rem; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08); }
 section { margin-bottom: 1.75rem; }
+.columns { display: flex; gap: 2.5rem; flex-wrap: wrap; align-items: flex-start; }
+.columns > section { flex: 1 1 18rem; }
 h2 { font-size: 1rem; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; overflow-wrap: break-word; }
@@ -3016,6 +3018,45 @@ fn ConfigPage(
     }
 }
 
+/// The Debug page's Memory section: the same numbers the exit line
+/// reports, taken live from the running process.
+fn memory_section() -> AnyView {
+    let memory = mem::snapshot();
+    let mut rows: Vec<(String, String)> = Vec::new();
+    if let Some(bytes) = memory.resident {
+        rows.push(("resident".to_string(), mem::human(bytes)));
+    }
+    if let Some(bytes) = memory.peak_resident {
+        rows.push(("peak resident".to_string(), mem::human(bytes)));
+    }
+    match (memory.heap, memory.heap_peak) {
+        (Some(bytes), Some(peak)) => rows.push((
+            "heap".to_string(),
+            format!("{} (peak {})", mem::human(bytes), mem::human(peak)),
+        )),
+        (Some(bytes), None) => rows.push(("heap".to_string(), mem::human(bytes))),
+        _ => {}
+    }
+    view! {
+        <section>
+            <h2>"Memory"</h2>
+            <table>
+                <tbody>
+                    {rows
+                        .iter()
+                        .map(|(name, value)| {
+                            let name = name.clone();
+                            let value = value.clone();
+                            view! { <tr><td>{name}</td><td>{value}</td></tr> }.into_any()
+                        })
+                        .collect::<Vec<_>>()}
+                </tbody>
+            </table>
+        </section>
+    }
+    .into_any()
+}
+
 #[component]
 fn DebugPage(
     state: Arc<AppState>,
@@ -3039,6 +3080,7 @@ fn DebugPage(
     };
     view! {
         <Page state=state running=running page="/debug" title="Debug".to_string() live=live refresh=refresh>
+            <div class="columns">
             <section>
                 <h2>"Database"</h2>
                 <p class="muted">{usage_line}</p>
@@ -3049,6 +3091,8 @@ fn DebugPage(
                     </p>
                 </form>
             </section>
+            {memory_section()}
+            </div>
             <section>
                 <h2>"Test connection"</h2>
                 <p class="muted">
