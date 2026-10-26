@@ -26,7 +26,7 @@ FediFetcher-rs is a Rust port of the Python [FediFetcher](https://github.com/nan
 ## Building from source
 
 ```sh
-git clone <repo-url>
+git clone https://github.com/owlrox/fedifetcher-rs.git
 cd fedifetcher-rs
 cargo build --release
 ```
