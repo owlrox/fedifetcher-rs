@@ -124,6 +124,9 @@ pub struct Config {
     /// as-is; when set, `hide_server_in_user_agent` is ignored
     /// (default: unset)
     pub user_agent_override: Option<String>,
+    /// Include the version in the User-Agent sent to other servers
+    /// (default: enabled)
+    pub user_agent_include_version: bool,
     /// Whether the web UI shows the Data page (default: shown). The
     /// dashboard and the config page are always shown — hiding them
     /// would lock you out.
@@ -190,6 +193,7 @@ impl Default for Config {
             rate_limit_cooldown: vec![0.5, 2.0, 8.0, 32.0, 128.0],
             hide_server_in_user_agent: false,
             user_agent_override: None,
+            user_agent_include_version: true,
             show_data: true,
             show_logs: true,
             show_debug: true,
@@ -375,6 +379,10 @@ impl Config {
         if let Some(agent) = &self.user_agent_override {
             put("user_agent_override", Value::String(agent.clone()));
         }
+        put(
+            "user_agent_include_version",
+            Value::Bool(self.user_agent_include_version),
+        );
         put("show_data", Value::Bool(self.show_data));
         put("show_logs", Value::Bool(self.show_logs));
         put("show_debug", Value::Bool(self.show_debug));
@@ -486,6 +494,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
             | "user_agent_override"
+            | "user_agent_include_version"
             | "show_data"
             | "show_logs"
             | "show_debug"
@@ -630,6 +639,9 @@ fn base_description(name: &str) -> Option<String> {
         "http_timeout" => "The timeout for any HTTP requests to your own, or other instances",
         "rate_limit_cooldown" => {
             "Seconds to wait between retries when a server rate limits us (HTTP 429): a comma-separated list, one entry per retry step, tried in order. When the list runs out, the request fails"
+        }
+        "user_agent_include_version" => {
+            "Include the FediFetcher version in the User-Agent sent to other servers"
         }
         "hide_server_in_user_agent" => {
             "Omit your server's name from the User-Agent FediFetcher sends to other servers"
@@ -783,6 +795,9 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
             }
             "user_agent_override" => {
                 coerce_optional_string(value).map(|v| config.user_agent_override = v)
+            }
+            "user_agent_include_version" => {
+                coerce_bool(value).map(|v| config.user_agent_include_version = v)
             }
             "show_data" => coerce_bool(value).map(|v| config.show_data = v),
             "show_logs" => coerce_bool(value).map(|v| config.show_logs = v),

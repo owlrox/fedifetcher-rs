@@ -1,6 +1,6 @@
 [package]
 name = "fedifetcher-rs"
-version = "1.5.3"
+version = "1.5.4"
 authors = ["owlrox"]
 repository = "https://github.com/owlrox/fedifetcher-rs"
 homepage = "https://github.com/owlrox/fedifetcher-rs"

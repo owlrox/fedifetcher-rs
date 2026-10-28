@@ -1,5 +1,13 @@
 ## 1.5.3
 
+Split the README: build, run, and roadmap details move to docs/.
+
+The README also shows the prebuilt release binary, untar and run.
+
+The deployment section shows the run-it-straight-from-git one-liner.
+
+The deployment command names this repository's URL.
+
 The README and the about page say whose fork this is.
 
 The README now says why this fork exists: the Python original wants a

@@ -3553,7 +3553,11 @@ fn AboutPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl 
                     " in the source distribution."
                 </p>
                 <p class="muted">
-                    "FediFetcher-rs is Copyright (C) 2026 owlrox (github.com/owlrox/fedifetcher-rs). The original FediFetcher is Copyright (C) Michael Thomas and is MIT-licensed (github.com/nanos/FediFetcher); this port keeps its notice in "
+                    "FediFetcher-rs is Copyright (C) 2026 owlrox ("
+                    <a href="https://github.com/owlrox/fedifetcher-rs">"github.com/owlrox/fedifetcher-rs"</a>
+                    "). The original FediFetcher is Copyright (C) Michael Thomas and is MIT-licensed ("
+                    <a href="https://github.com/nanos/FediFetcher">"github.com/nanos/FediFetcher"</a>
+                    "); this port keeps its notice in "
                     <code>"NOTICE.md"</code>
                     "."
                 </p>

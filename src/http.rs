@@ -537,19 +537,24 @@ impl RobotsCache {
 /// unless the server's name is hidden — or the whole thing is replaced by
 /// the config's override, when one is set.
 fn user_agent_string(config: &Config) -> String {
+    // a blank override is refused or ignored by servers, so a blank
+    // override is unset: the default agent is sent, never empty
     if let Some(agent) = &config.user_agent_override {
-        // a blank agent is refused or ignored by servers, so a blank
-        // override is unset: the default agent is sent, never empty
         let agent = agent.trim();
         if !agent.is_empty() {
             return agent.to_string();
         }
     }
+    let name_version = if config.user_agent_include_version {
+        format!("FediFetcher-rs/{VERSION}")
+    } else {
+        "FediFetcher-rs".to_string()
+    };
     if config.hide_server_in_user_agent {
-        format!("FediFetcher/{VERSION} (+https://github.com/owlrox/fedifetcher-rs)")
+        format!("{name_version} (+https://github.com/owlrox/fedifetcher-rs)")
     } else {
         format!(
-            "FediFetcher/{VERSION}; +{} (+https://github.com/owlrox/fedifetcher-rs)",
+            "{name_version}; +{} (+https://github.com/owlrox/fedifetcher-rs)",
             config.server
         )
     }
