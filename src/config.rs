@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::VERSION;
 use crate::error::{Error, Result};
 
 const TRUTHY: &[&str] = &["1", "true", "yes", "on"];
@@ -67,6 +68,9 @@ pub struct Config {
     /// context for new posts as they arrive instead of at the next run
     /// (serve mode only, with the first access token)
     pub streaming: bool,
+    /// A cron expression for FediFetcher to run itself on, so no external
+    /// cron job is needed; empty means runs happen only when asked
+    pub run_schedule: Option<String>,
     /// Optional. Use together with max_followings or max_followers to backfill
     /// a specific user's followings/followers. If omitted, we use the account
     /// that owns the access token.
@@ -120,10 +124,15 @@ pub struct Config {
     /// as-is; when set, `hide_server_in_user_agent` is ignored
     /// (default: unset)
     pub user_agent_override: Option<String>,
-    /// Which pages the web UI shows: `all`, `no-debug` (Data and Logs),
-    /// or `logs-only` (default: `all`). The config page itself is never
-    /// hidden — that would lock you out.
-    pub ui_pages: String,
+    /// Whether the web UI shows the Data page (default: shown). The
+    /// dashboard and the config page are always shown — hiding them
+    /// would lock you out.
+    pub show_data: bool,
+    /// Whether the web UI shows the Logs page (default: shown)
+    pub show_logs: bool,
+    /// Whether the web UI offers the Debug page. It shows only when both
+    /// this and `debug_mode` are on (default: shown)
+    pub show_debug: bool,
     /// Show the debug tooling: the Debug page, the Data page's Actions
     /// column, and the options that stand between FediFetcher and the
     /// politeness rules. Turning it off writes those options' defaults
@@ -156,6 +165,7 @@ impl Default for Config {
         Config {
             server: String::new(),
             access_tokens: Vec::new(),
+            run_schedule: None,
             reply_interval_in_hours: 0,
             home_timeline_length: 0,
             streaming: false,
@@ -180,7 +190,9 @@ impl Default for Config {
             rate_limit_cooldown: vec![0.5, 2.0, 8.0, 32.0, 128.0],
             hide_server_in_user_agent: false,
             user_agent_override: None,
-            ui_pages: "all".to_string(),
+            show_data: true,
+            show_logs: true,
+            show_debug: true,
             debug_mode: true,
             instance_blocklist: Vec::new(),
             state_dir: default_state_dir(),
@@ -270,16 +282,13 @@ impl Config {
         self.user_agent_override = defaults.user_agent_override.clone();
     }
 
-    /// Whether the web UI shows the page at `path` — the `ui_pages`
-    /// setting's answer. The config page itself is never hidden: that
-    /// would lock you out.
+    /// Whether the web UI shows the page at `path`. The dashboard and the
+    /// config page are always shown — hiding them would lock you out.
     pub fn shows_page(&self, page: &str) -> bool {
-        if page == "/config" {
-            return true;
-        }
-        match self.ui_pages.as_str() {
-            "no-debug" => page != "/debug",
-            "logs-only" => page == "/logs",
+        match page {
+            "/data" => self.show_data,
+            "/logs" => self.show_logs,
+            "/debug" => self.show_debug,
             _ => true,
         }
     }
@@ -311,6 +320,9 @@ impl Config {
             Value::from(self.home_timeline_length),
         );
         put("streaming", Value::Bool(self.streaming));
+        if let Some(schedule) = &self.run_schedule {
+            put("run_schedule", Value::String(schedule.clone()));
+        }
         put("user", Value::String(self.user.clone()));
         put("max_followings", Value::from(self.max_followings));
         put("max_followers", Value::from(self.max_followers));
@@ -363,7 +375,9 @@ impl Config {
         if let Some(agent) = &self.user_agent_override {
             put("user_agent_override", Value::String(agent.clone()));
         }
-        put("ui_pages", Value::String(self.ui_pages.clone()));
+        put("show_data", Value::Bool(self.show_data));
+        put("show_logs", Value::Bool(self.show_logs));
+        put("show_debug", Value::Bool(self.show_debug));
         put("debug_mode", Value::Bool(self.debug_mode));
         put(
             "instance_blocklist",
@@ -450,6 +464,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "reply_interval_in_hours"
             | "home_timeline_length"
             | "streaming"
+            | "run_schedule"
             | "user"
             | "max_followings"
             | "max_followers"
@@ -471,7 +486,9 @@ pub fn is_known_option(name: &str) -> bool {
             | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
             | "user_agent_override"
-            | "ui_pages"
+            | "show_data"
+            | "show_logs"
+            | "show_debug"
             | "debug_mode"
             | "instance_blocklist"
             | "state_dir"
@@ -492,8 +509,7 @@ pub fn is_known_option(name: &str) -> bool {
 /// attribute, which browsers render as line breaks; there is no bolding in
 /// a title attribute.
 pub fn option_description(name: &str) -> Option<String> {
-    let base: &'static str = base_description(name)?;
-    let mut text = String::from(base);
+    let mut text = base_description(name)?;
     if name != "server"
         && name != "access_tokens"
         && let Some(default) = option_default(name)
@@ -545,8 +561,13 @@ fn option_scopes(name: &str) -> Option<&'static str> {
     })
 }
 
-fn base_description(name: &str) -> Option<&'static str> {
-    Some(match name {
+fn base_description(name: &str) -> Option<String> {
+    if name == "user_agent_override" {
+        return Some(format!(
+            "Send this User-Agent to other servers instead of the default one, as-is. When set, hide_server_in_user_agent is ignored. It cannot be blank: a blank value falls back to the default, which is \"FediFetcher/{VERSION}; +https://<your server>\". A common choice, if you would rather look like a browser: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+        ));
+    }
+    let base = match name {
         "server" => "Required: the name of your server (e.g. mstdn.thms.uk)",
         "access_tokens" => {
             "Required: one token per user whose timelines you fetch — connected with the button above, or created at https://<server>/settings/applications with the scopes the enabled tasks need."
@@ -559,6 +580,9 @@ fn base_description(name: &str) -> Option<&'static str> {
         }
         "streaming" => {
             "Stream the home timeline over a long-lived connection, and fetch context for new posts as they arrive instead of waiting for the next run. Serve mode only, with the first access token; applies on restart"
+        }
+        "run_schedule" => {
+            "A cron expression for FediFetcher to run itself on, so no external cron job is needed. Up to five fields (minute hour day-of-month month day-of-week), missing ones meaning every; or @hourly, @daily, or @weekly. Examples: */15 — every 15 minutes; 0 * — hourly, on the hour; 0 */6 — every 6 hours; 30 4 * * * — daily at 04:30; @daily — every day at midnight. Leave empty to run only when asked"
         }
         "user" => {
             "Use together with max_followings or max_followers to backfill a specific user's followings/followers. If omitted, we use the account that owns the access token."
@@ -611,7 +635,7 @@ fn base_description(name: &str) -> Option<&'static str> {
             "Omit your server's name from the User-Agent FediFetcher sends to other servers"
         }
         "user_agent_override" => {
-            "Send this User-Agent to other servers instead of the default one, as-is. When set, hide_server_in_user_agent is ignored. Leave empty to use the default"
+            "Send this User-Agent to other servers instead of the default one, as-is. When set, hide_server_in_user_agent is ignored. It cannot be blank: a blank value falls back to the default, which is \"FediFetcher/{VERSION}; +https://<your server>\". A common choice, if you would rather look like a browser: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
         }
         "instance_blocklist" => {
             "A comma-separated list of instances that FediFetcher should never try to connect to"
@@ -640,11 +664,18 @@ fn base_description(name: &str) -> Option<&'static str> {
         "debug_mode" => {
             "Show the debug tooling: the Debug page, the Data page's Actions column, and the options that stand between FediFetcher and the politeness rules (respect_robots_txt, respect_user_opt_out, hide_server_in_user_agent, user_agent_override). Turning it off writes those options' defaults back, so the hidden options are the documented defaults"
         }
-        "ui_pages" => {
-            "Which pages the web UI shows: all, no-debug (Data and Logs), or logs-only. The config page itself is always shown"
+        "show_data" => {
+            "Show the Data page (the hosts and the database's tables) in the web UI. The dashboard and the config page are always shown"
+        }
+        "show_logs" => {
+            "Show the Logs page (the log lines and the run history) in the web UI. The dashboard and the config page are always shown"
+        }
+        "show_debug" => {
+            "Offer the Debug page in the web UI. It shows only when this and debug_mode are both on. The dashboard and the config page are always shown"
         }
         _ => return None,
-    })
+    };
+    Some(base.to_string())
 }
 
 /// The options the debug mode gates: the ones that stand between
@@ -689,7 +720,9 @@ pub fn empty_resets_to_default(name: &str) -> bool {
             | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
             | "debug_mode"
-            | "ui_pages"
+            | "show_data"
+            | "show_logs"
+            | "show_debug"
             | "instance_blocklist"
             | "log_page_loads"
     )
@@ -722,6 +755,7 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
             }
             "home_timeline_length" => coerce_int(value).map(|v| config.home_timeline_length = v),
             "streaming" => coerce_bool(value).map(|v| config.streaming = v),
+            "run_schedule" => coerce_schedule(value).map(|v| config.run_schedule = v),
             "user" => coerce_string(value).map(|v| config.user = v),
             "max_followings" => coerce_int(value).map(|v| config.max_followings = v),
             "max_followers" => coerce_int(value).map(|v| config.max_followers = v),
@@ -753,7 +787,9 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
             "user_agent_override" => {
                 coerce_optional_string(value).map(|v| config.user_agent_override = v)
             }
-            "ui_pages" => coerce_ui_pages(value).map(|v| config.ui_pages = v),
+            "show_data" => coerce_bool(value).map(|v| config.show_data = v),
+            "show_logs" => coerce_bool(value).map(|v| config.show_logs = v),
+            "show_debug" => coerce_bool(value).map(|v| config.show_debug = v),
             "debug_mode" => coerce_bool(value).map(|v| config.debug_mode = v),
             "instance_blocklist" => coerce_list(value).map(|v| config.instance_blocklist = v),
             "state_dir" => coerce_path(value).map(|v| config.state_dir = v),
@@ -817,23 +853,35 @@ fn coerce_string(value: &Value) -> Result<String> {
 fn coerce_optional_string(value: &Value) -> Result<Option<String>> {
     match value {
         Value::Null => Ok(None),
-        other => coerce_string(other).map(Some),
+        other => coerce_string(other).map(|text| {
+            // a blank value is unset, not a string of spaces: an empty
+            // User-Agent would be refused or ignored by servers, and an
+            // empty ping url is no url
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }),
     }
+}
+
+/// A schedule: the cron expression the runs fire on, parsed once here so
+/// a bad expression is refused at save time with the reason.
+fn coerce_schedule(value: &Value) -> Result<Option<String>> {
+    let text = match value {
+        Value::Null => return Ok(None),
+        other => coerce_string(other)?,
+    };
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    crate::schedule::Schedule::parse(&text)
+        .map_err(|ex| Error::Config(format!("{text:?} is not a schedule: {ex}")))?;
+    Ok(Some(text))
 }
 
 /// Which pages the web UI shows: one of the three named sets, or an error
 /// naming them — a typo would otherwise hide pages with no way back in
 /// except the API.
-fn coerce_ui_pages(value: &Value) -> Result<String> {
-    let text = coerce_string(value)?;
-    match text.trim() {
-        "all" | "no-debug" | "logs-only" => Ok(text.trim().to_string()),
-        other => Err(Error::Config(format!(
-            "{other:?} is not one of: all, no-debug, logs-only"
-        ))),
-    }
-}
-
 fn coerce_path(value: &Value) -> Result<PathBuf> {
     match value {
         Value::String(s) => Ok(PathBuf::from(s)),

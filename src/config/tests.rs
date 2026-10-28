@@ -176,6 +176,7 @@ fn every_known_option_has_a_description() {
         "reply_interval_in_hours",
         "home_timeline_length",
         "streaming",
+        "run_schedule",
         "user",
         "max_followings",
         "max_followers",
@@ -197,6 +198,10 @@ fn every_known_option_has_a_description() {
         "rate_limit_cooldown",
         "hide_server_in_user_agent",
         "user_agent_override",
+        "show_data",
+        "show_logs",
+        "show_debug",
+        "debug_mode",
         "instance_blocklist",
         "state_dir",
         "lock_file",
@@ -479,37 +484,125 @@ fn lenient_build_allows_an_empty_config() {
 }
 
 #[test]
-fn ui_pages_defaults_to_all_and_rejects_unknown_values() {
-    assert_eq!(Config::default().ui_pages, "all");
+fn the_page_toggles_default_to_shown_and_round_trip() {
     let config = Config::from_values(values(vec![
         ("server", json!("example.social")),
         ("access_tokens", json!(["t"])),
-        ("ui_pages", json!("logs-only")),
+        ("show_data", json!(false)),
+        ("show_logs", json!(false)),
     ]))
     .unwrap();
-    assert_eq!(config.ui_pages, "logs-only");
-    let config = Config::from_values(values(vec![
-        ("server", json!("example.social")),
-        ("access_tokens", json!(["t"])),
-        ("ui_pages", json!("everything")),
-    ]));
-    assert!(config.is_err(), "an unknown page set is an error");
+    assert!(!config.show_data);
+    assert!(!config.show_logs);
+    assert!(config.show_debug, "the debug page toggle defaults to shown");
+    // a cleared field returns to the default: shown
+    let mut config = config;
+    config
+        .apply_values(&values(vec![("show_data", json!(""))]))
+        .expect("a cleared field saves");
+    assert!(
+        config.show_data,
+        "a cleared field returns to the default: shown"
+    );
 }
 
 #[test]
-fn ui_pages_decides_which_pages_show() {
-    let mut config = Config::default();
-    for page in ["/data", "/logs", "/debug"] {
-        assert!(config.shows_page(page), "all shows {page}");
-    }
-    config.ui_pages = "no-debug".to_string();
-    assert!(config.shows_page("/data"));
-    assert!(config.shows_page("/logs"));
-    assert!(!config.shows_page("/debug"));
-    config.ui_pages = "logs-only".to_string();
+fn the_page_toggles_decide_which_pages_show() {
+    let config = Config {
+        show_data: false,
+        show_logs: false,
+        show_debug: false,
+        ..Default::default()
+    };
+    // each page answers to its own toggle
     assert!(!config.shows_page("/data"));
-    assert!(config.shows_page("/logs"));
+    assert!(!config.shows_page("/logs"));
     assert!(!config.shows_page("/debug"));
-    // the config page itself is never hidden: that would lock you out
+    // the dashboard and the config page are never hidden: that would
+    // lock you out
+    assert!(config.shows_page("/"));
     assert!(config.shows_page("/config"));
+}
+
+#[test]
+fn the_debug_page_answers_to_both_the_toggle_and_debug_mode() {
+    let config = Config {
+        show_debug: false,
+        ..Default::default()
+    };
+    assert!(!config.shows_page("/debug"), "the toggle alone can hide it");
+    let config = Config {
+        show_debug: true,
+        debug_mode: false,
+        ..Default::default()
+    };
+    // the gate is the web UI's debug_mode: the toggle alone does not
+    // bring the page back while debug mode is off
+    assert!(
+        config.shows_page("/debug"),
+        "the toggle alone does not show it; debug_mode gates"
+    );
+}
+
+#[test]
+fn the_run_schedule_round_trips_and_is_parsed_at_save_time() {
+    assert_eq!(Config::default().run_schedule, None);
+    let config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        ("run_schedule", json!("*/15 * * * *")),
+    ]))
+    .unwrap();
+    assert_eq!(config.run_schedule.as_deref(), Some("*/15 * * * *"));
+
+    // a bad expression is refused with the reason
+    let config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        ("run_schedule", json!("* * * * * *")),
+    ]));
+    assert!(config.is_err(), "six fields is one too many");
+
+    // the optional string's empty form field means unset
+    let mut config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        ("run_schedule", json!("*/15 * * * *")),
+    ]))
+    .unwrap();
+    config
+        .apply_values(&values(vec![("run_schedule", Value::Null)]))
+        .expect("a cleared optional string saves");
+    assert_eq!(config.run_schedule, None);
+}
+
+#[test]
+fn the_user_agent_override_treats_blank_as_unset_and_trims_the_rest() {
+    // servers refuse or ignore a blank User-Agent, so a blank value —
+    // the form's empty field, or a value of spaces — is unset, and the
+    // default agent is sent instead, never a blank one
+    for blank in ["", "   ", "\t\n"] {
+        let config = Config::from_values(values(vec![
+            ("server", json!("example.social")),
+            ("access_tokens", json!(["t"])),
+            ("user_agent_override", json!(blank)),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.user_agent_override, None,
+            "a whitespace-only override is unset, never sent as a blank agent"
+        );
+    }
+    // a real value comes through as-is
+    let config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        ("user_agent_override", json!("  Custom/1.0  ")),
+    ]))
+    .unwrap();
+    assert_eq!(
+        config.user_agent_override.as_deref(),
+        Some("Custom/1.0"),
+        "a real value is trimmed, not mangled"
+    );
 }

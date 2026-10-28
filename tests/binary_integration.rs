@@ -258,6 +258,8 @@ async fn a_corrupt_database_file_is_reported() {
     );
 }
 
+/// A run on a fresh install — no server, no token — is refused, with the
+/// message pointing at the web UI where the account connects itself.
 #[tokio::test]
 async fn a_run_without_a_config_is_refused() {
     let tmp = tmp_dir();
@@ -267,9 +269,11 @@ async fn a_run_without_a_config_is_refused() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.starts_with("CRITICAL:FediFetcher:"),
-        "the refusal is critical: {stderr}"
+        !stderr.contains("CRITICAL"),
+        "a fresh install gets onboarding, not a critical line: {stderr}"
     );
+    assert!(stderr.contains("serve"), "{stderr}");
+    assert!(stderr.contains("/config"), "{stderr}");
     assert_state_stayed_in_the_sandbox(&tmp);
 }
 

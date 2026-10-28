@@ -325,3 +325,49 @@ fn a_lock_from_a_version_that_recorded_no_process_is_reclaimed() {
     drop(guard_lock);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_live_holders_lock_is_held_and_a_stale_or_dead_holders_is_not() {
+    let dir = temp_dir();
+    let config = test_config(&dir);
+    let path = config.lock_path();
+
+    // no lock file: nothing holds it
+    assert!(!a_process_holds_lock(&config));
+
+    // a live pid, a fresh timestamp: the lock is held — the holder here
+    // is this test's own process, standing in for the external cron job
+    let _guard = lock(&config).unwrap();
+    assert!(
+        a_process_holds_lock(&config),
+        "a live process's lock is a held lock, whoever holds it"
+    );
+
+    // a stale lock: old enough to be reclaimed, so it does not hold
+    let stale = timeutil::now() - Duration::hours(config.lock_hours + 1);
+    let content = json!({
+        "pid": std::process::id(),
+        "created": timeutil::fmt_lock_ts(stale),
+    });
+    std::fs::write(&path, content.to_string()).unwrap();
+    assert!(!a_process_holds_lock(&config), "a stale lock does not hold");
+
+    // a dead holder: the pid is gone, so the lock would be reclaimed
+    #[cfg(unix)]
+    {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let content = json!({
+            "pid": dead_pid,
+            "created": timeutil::fmt_lock_ts(timeutil::now()),
+        });
+        std::fs::write(&path, content.to_string()).unwrap();
+        assert!(
+            !a_process_holds_lock(&config),
+            "a dead holder does not hold"
+        );
+    }
+
+    std::fs::remove_file(&path).ok();
+}

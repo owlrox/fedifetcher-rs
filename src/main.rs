@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use fedifetcher::config::Config;
-use fedifetcher::{db, logging, mem, run, web};
+use fedifetcher::{db, logging, mem, run, schedule, web};
 
 #[derive(Parser)]
 #[command(
@@ -38,11 +38,16 @@ enum Command {
         #[arg(long = "port", default_value_t = 8080)]
         port: u16,
     },
+    /// Run on the config's schedule, headless: no web UI, one run at a
+    /// time, until the process is stopped. The schedule is the
+    /// `run_schedule` config value.
+    Schedule,
 }
 
 enum Mode {
     Run,
     Serve { bind: String, port: u16 },
+    Schedule,
 }
 
 #[tokio::main]
@@ -52,6 +57,7 @@ async fn main() -> ExitCode {
     let mode = match cli.command {
         Some(Command::Run) => Mode::Run,
         Some(Command::Serve { bind, port }) => Mode::Serve { bind, port },
+        Some(Command::Schedule) => Mode::Schedule,
         None => Mode::Run,
     };
 
@@ -75,12 +81,26 @@ async fn main() -> ExitCode {
     // Serving only needs a config the page can edit; running needs a server
     // and an access token.
     let config = match &mode {
-        Mode::Run => Config::from_values(stored),
+        Mode::Run | Mode::Schedule => Config::from_values(stored),
         Mode::Serve { .. } => Config::from_values_lenient(stored),
     };
     let config = match config {
         Ok(config) => config,
-        Err(ex) => return config_error(ex),
+        Err(ex) => {
+            // a first run on a fresh install: the message points at the
+            // web UI, where the account connects itself
+            if ex.to_string().contains("You must supply") {
+                eprintln!("FediFetcher is not configured yet.");
+                eprintln!();
+                eprintln!("  1. Start the web UI:  fedifetcher-rs serve");
+                eprintln!("  2. Open http://127.0.0.1:8080/config in a browser.");
+                eprintln!("  3. Connect your Mastodon account and press Run.");
+                eprintln!();
+                eprintln!("After that, `fedifetcher-rs run` works on its own.");
+                return ExitCode::from(1);
+            }
+            return config_error(ex);
+        }
     };
 
     // Every log line is written to the database, which the web UI reads for
@@ -104,6 +124,13 @@ async fn main() -> ExitCode {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(_) => ExitCode::from(1),
             }
+        }
+        Mode::Schedule => {
+            // the headless scheduler runs until the process is stopped,
+            // so this only returns when the process is ending
+            schedule::forever(config, db).await;
+            log_db.shutdown().await;
+            ExitCode::SUCCESS
         }
         Mode::Serve { bind, port } => match web::serve(config, &bind, port, db).await {
             Ok(reason) => {

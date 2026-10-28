@@ -123,13 +123,62 @@ A run takes a lock, performs the configured tasks, and exits. The exit status is
 
 ### Scheduling regular runs
 
-The usual deployment is a cron job, e.g. hourly:
+The easy way: set the `run_schedule` config value in the web UI and let FediFetcher run itself. It takes a cron expression — five fields (minute, hour, day-of-month, month, day-of-week), or the presets `@hourly`, `@daily`, and `@weekly`:
+
+```cron
+*/15   # every 15 minutes
+0 *    # hourly, on the hour
+0 */6  # every six hours
+30 4 * * *  # daily at 04:30
+@daily      # daily at midnight
+```
+
+With `serve` running, a background tick reads the schedule and starts a run when a firing minute passes — logged as `Scheduled run: ...` in the run history, indistinguishable from a button-triggered run. If a run is already going when the schedule fires, the firing is skipped, not queued; the lock file keeps the schedule, the **Run** button, and any external cron job from doubling up. With the `schedule` subcommand instead, FediFetcher runs headless on the same schedule, no web UI:
+
+```sh
+fedifetcher-rs schedule
+```
+
+Times are read in the server's local timezone, so `@daily` means the local midnight. Both at once is fine: the lock file serializes the schedule, the **Run** button, and any external cron job — when a firing minute passes while an external run is going, the firing is skipped (logged as `Scheduled run: ... skipped`), and the schedule catches up at its next firing rather than piling failed runs into the history. So the usual setup is one or the other, but both at once also just works — e.g. external cron while you trial the built-in schedule. One caveat: schedules are evaluated in the local timezone as read at each poll, so a run scheduled near a daylight-saving change fires an hour off wall time on the change day itself.
+
+The old way still works, if you'd rather keep the scheduling in cron:
 
 ```cron
 0 * * * * /path/to/fedifetcher-rs run
 ```
 
-Log lines go to stderr and to the database, where the web UI's **Logs** page shows them. Keep `serve` running (under systemd, Docker, or similar) if you want the dashboard, the run/pause/stop controls, and the logs — the **Run** button triggers the same run in the background. With `serve` running, the optional `streaming` setting also connects to your server's home timeline stream and fetches new posts' context as they arrive, so the cron interval matters less.
+### Running as a service
+
+The recommended setup is `serve` under a service manager — it gives you the dashboard, the run controls, the logs, streaming, and the built-in schedule in one process. `deploy.sh` sets this up on Linux (systemd, or OpenRC on Alpine); for the rest:
+
+| Platform | Run `serve` as a service | Run `schedule` headless |
+| --- | --- | --- |
+| Linux (systemd) | `deploy.sh` sets it up, or the unit below | A `systemd` timer or the cron entry above |
+| Linux (OpenRC/Alpine) | `deploy.sh` handles OpenRC | An OpenRC cron or the cron entry above |
+| macOS (launchd) | A `KeepAlive` `LaunchAgent`/`LaunchDaemon` plist running `fedifetcher-rs serve` | A `StartCalendarInterval` plist running `fedifetcher-rs schedule` |
+| Windows | [NSSM] or [WinSW] wrapping `fedifetcher-rs serve` | Task Scheduler: `schtasks /create /sc minute /mo 15 /tn FediFetcher /tr "...\fedifetcher-rs.exe schedule"` |
+
+A systemd unit, for the record:
+
+```ini
+[Unit]
+Description=FediFetcher-rs
+After=network-online.target
+
+[Service]
+User=fedifetcher
+ExecStart=/usr/local/bin/fedifetcher-rs serve
+WorkingDirectory=/var/lib/fedifetcher
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+[NSSM]: https://nssm.cc
+[WinSW]: https://github.com/winsw/winsw
+
+Log lines go to stderr and to the database, where the web UI's **Logs** page shows them. Keep `serve` running (under systemd, Docker, or similar) if you want the dashboard, the run/pause/stop controls, and the logs — the **Run** button triggers the same run in the background. With `serve` running, the optional `streaming` setting also connects to your server's home timeline stream and fetches new posts' context as they arrive, so the interval matters less — with streaming on, `@hourly` is plenty.
 
 ### Command line
 
@@ -137,6 +186,7 @@ Log lines go to stderr and to the database, where the web UI's **Logs** page sho
 | --- | --- |
 | `fedifetcher` / `fedifetcher run` | Run FediFetcher once, then exit |
 | `fedifetcher serve [--bind ADDR] [--port PORT]` | Serve the web UI (default `127.0.0.1:8080`) |
+| `fedifetcher schedule` | Run on the `run_schedule` config value, headless, until stopped |
 | `fedifetcher --help` | Print help |
 | `fedifetcher --version` | Print the version |
 
@@ -164,6 +214,7 @@ The configuration is stored in the database and edited through the web UI's conf
 | `reply_interval_in_hours` | `0` (off) | Fetch remote replies to posts that received replies from users on your instance in this period |
 | `home_timeline_length` | `0` (off) | Look for replies to posts in the API key owner's home timeline, up to this many posts |
 | `streaming` | `false` | Stream the home timeline over a long-lived connection and fetch context for new posts as they arrive, instead of waiting for the next run. Serve mode only, with the first access token; applies on restart |
+| `run_schedule` | *(empty)* | A cron expression for FediFetcher to run itself on: five fields (minute hour day-of-month month day-of-week), or `@hourly`, `@daily`, `@weekly`. Empty means no schedule. See [Scheduling regular runs](#scheduling-regular-runs) |
 | `user` | *(token owner)* | Use with `max_followings`/`max_followers` to backfill a specific user's followings/followers |
 | `max_followings` | `0` (off) | Backfill posts for new accounts followed by `user`, at most this many |
 | `max_followers` | `0` (off) | Backfill posts for new accounts following `user`, at most this many |

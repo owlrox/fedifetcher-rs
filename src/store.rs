@@ -329,5 +329,22 @@ impl Drop for LockGuard {
     }
 }
 
+/// Whether a live process — this one or another — holds the lock file:
+/// the schedulers' pre-check before starting a scheduled run, so a
+/// firing that collides with an external cron job, or with another
+/// FediFetcher process, is skipped before it starts — skipped, not
+/// recorded as a failed run. No lock file, a stale lock, or a dead
+/// holder means nothing holds it.
+pub fn a_process_holds_lock(config: &Config) -> bool {
+    let Some(content) = std::fs::read_to_string(config.lock_path())
+        .ok()
+        .and_then(|text| parse_lock_content(&text))
+    else {
+        return false;
+    };
+    let age = timeutil::now() - content.created;
+    age < Duration::hours(config.lock_hours) && content.pid.map(process_alive).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests;

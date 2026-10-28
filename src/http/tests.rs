@@ -23,6 +23,13 @@ fn the_user_agent_names_the_server_unless_hidden_or_overridden() {
     assert_eq!(user_agent_string(&config), "MyFetcher/1.0");
     config.hide_server_in_user_agent = false;
     assert_eq!(user_agent_string(&config), "MyFetcher/1.0");
+    // a blank override never reaches the wire: unset means the default,
+    // so the agent is never sent empty — servers refuse or ignore blanks
+    config.user_agent_override = Some("   ".to_string());
+    assert_eq!(
+        user_agent_string(&config),
+        format!("FediFetcher/{VERSION}; +example.social (https://go.thms.uk/ff)")
+    );
 }
 
 #[test]

@@ -1,3 +1,38 @@
+## 1.4.0
+
+A schedule, page toggles, a user-agent choice, onboarding, and B612.
+
+The appliance features, as one feature set on top of the config page:
+
+- `run_schedule`, a cron expression (up to five fields — missing
+  trailing fields mean "every", so `*/15` alone is every 15 minutes —
+  or @hourly, @daily, @weekly) that FediFetcher runs itself on, no
+  external cron job needed. Serve mode ticks it in the background; the
+  `schedule` subcommand does the same headless; the lock file keeps
+  both, the Run button, and an external cron job from doubling up, and
+  a firing that collides with a run already going is skipped, not
+  recorded as a failure. Hand-rolled cron parsing: no new dependency.
+
+- The page toggles: show_data, show_logs, and show_debug, three
+  yes/no rows at the top of the config page. Each page answers to its
+  own toggle; the dashboard and the config page are never hidden. The
+  Debug page shows only when both its toggle and debug_mode are on,
+  and its toggle's row hides while debug mode is off.
+
+- The User-Agent: `user_agent_override` sends any agent, verbatim; a
+  blank value falls back to the default (FediFetcher, with your
+  server's address), which the tooltip names, along with a
+  browser-shaped suggestion. The tooltip's cron examples are valid
+  input too: an expression shorter than five fields pads the missing
+  trailing fields with `*`.
+
+- A first `run` on a fresh install points at the web UI — start
+  serve, open /config, connect the account — instead of a bare
+  CRITICAL line.
+
+- The web UI is set in B612 and B612 Mono, embedded in the binary and
+  served from it, with system-ui and monospace fallbacks behind them.
+
 ## 1.3.38
 
 The config page decides which pages the web UI shows.

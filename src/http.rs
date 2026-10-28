@@ -538,7 +538,12 @@ impl RobotsCache {
 /// the config's override, when one is set.
 fn user_agent_string(config: &Config) -> String {
     if let Some(agent) = &config.user_agent_override {
-        return agent.clone();
+        // a blank agent is refused or ignored by servers, so a blank
+        // override is unset: the default agent is sent, never empty
+        let agent = agent.trim();
+        if !agent.is_empty() {
+            return agent.to_string();
+        }
     }
     if config.hide_server_in_user_agent {
         format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")

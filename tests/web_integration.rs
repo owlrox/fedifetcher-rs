@@ -3561,48 +3561,210 @@ async fn the_data_page_shows_the_actions_column_only_in_debug_mode() {
     assert!(!body.contains(">Actions<"), "{body}");
 }
 
-/// The `ui_pages` setting hides the pages it names: no nav link, and a
-/// direct visit redirects to the dashboard. The config page itself is
+/// The page toggles hide their pages: no nav link, and a direct visit
+/// redirects to the dashboard. The dashboard and the config page are
 /// never hidden — that would lock you out.
 #[tokio::test]
-async fn ui_pages_hides_the_pages_it_names() {
+async fn the_page_toggles_hide_their_pages() {
     let dir = common::tmp_dir();
     let mut config = common::test_config(&dir, "example.social");
     config.access_tokens = vec![TOKEN.to_string()];
-    config.ui_pages = "logs-only".to_string();
+    config.show_data = false;
+    config.show_logs = false;
+    config.show_debug = false;
+    config.debug_mode = false;
     let (base, _pool) = spawn_ui_with(config).await;
 
     // the hidden pages redirect to the dashboard
-    for path in ["/data", "/debug"] {
+    for path in ["/data", "/logs", "/debug"] {
         let resp = client().get(format!("{base}{path}")).send().await.unwrap();
         assert_eq!(resp.status().as_u16(), 303, "{path}");
         assert_eq!(resp.headers().get("Location").unwrap(), "/");
     }
-    // the logs page still shows
+
+    // the nav bar shows only Dashboard and Config
+    let (_, body) = get(&format!("{base}/")).await;
+    assert!(!body.contains("href=\"/data\""), "{body}");
+    assert!(!body.contains("href=\"/logs\""), "{body}");
+    assert!(!body.contains("href=\"/debug\""), "{body}");
+    assert!(body.contains("href=\"/config\""), "{body}");
+
+    // the config page itself still shows, and offers the toggles
+    let (status, body) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("name=\"show_data\""), "{body}");
+    assert!(body.contains("name=\"show_logs\""), "{body}");
+    // show_debug's row hides while debug mode is off: the debug page is
+    // off anyway, and toggling debug mode back on restores the toggle
+    assert!(!body.contains("name=\"show_debug\""), "{body}");
+}
+
+/// The Data page can be hidden on its own, with the Logs page still
+/// showing — each page answers to its own toggle.
+#[tokio::test]
+async fn the_data_page_hides_on_its_own() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    config.show_data = false;
+    let (base, _pool) = spawn_ui_with(config).await;
+
+    let resp = client().get(format!("{base}/data")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    assert_eq!(resp.headers().get("Location").unwrap(), "/");
+
+    // the logs page still shows, and the nav bar drops only Data
     let (status, _) = get(&format!("{base}/logs")).await;
     assert_eq!(status, 200);
-
-    // the nav bar shows only Dashboard, Logs, and Config
     let (_, body) = get(&format!("{base}/")).await;
     assert!(!body.contains("href=\"/data\""), "{body}");
     assert!(body.contains("href=\"/logs\""), "{body}");
-    assert!(body.contains("href=\"/config\""), "{body}");
-
-    // the config page itself still shows, and offers ui_pages
-    let (status, body) = get(&format!("{base}/config")).await;
-    assert_eq!(status, 200);
-    assert!(body.contains("name=\"ui_pages\""), "{body}");
+    assert!(body.contains("href=\"/debug\""), "{body}");
 }
 
-/// An unknown `ui_pages` value is refused with the accepted values named.
+/// The headless scheduler fires runs on its own: a config with
+/// `run_schedule` of "every minute" gains run history rows with nobody
+/// pressing Run. The run itself fails fast — the server name does not
+/// resolve — which is fine: the test asks for a run row, not a
+/// successful run. (The serve mode's background tick reads the same
+/// `due_in_window`, and is wired in `serve`, which the tests cannot
+/// spawn; the headless loop here covers the scheduling logic itself.)
 #[tokio::test]
-async fn an_unknown_ui_pages_value_is_refused() {
+async fn the_scheduler_runs_on_its_own() {
     let dir = common::tmp_dir();
-    let config = common::test_config(&dir, "example.social");
-    let (base, pool) = spawn_ui_with(config).await;
+    let mut config = common::test_config(&dir, "invalid.example");
+    config.access_tokens = vec![TOKEN.to_string()];
+    config.run_schedule = Some("* * * * *".to_string());
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    tokio::spawn(fedifetcher::schedule::forever(config, db.clone()));
 
-    let (status, _, body) = post_config(&base, "ui_pages=everything").await;
-    assert_eq!(status, 400, "{body}");
-    let saved = saved_config(&pool).await;
-    assert_eq!(saved.ui_pages, "all", "the bad value was not saved");
+    // a run row appears within the next firing minute plus one poll
+    for _ in 0..900 {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        if count > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the scheduler never fired a run");
+}
+
+/// The serve mode's scheduler, end to end: a firing that collides with an
+/// external cron job — a lock file held by a live process — is skipped,
+/// not recorded as a failed run, and the first firing after the lock goes
+/// away starts a run.
+#[tokio::test]
+async fn the_serve_scheduler_skips_a_firing_while_the_lock_is_held_and_fires_when_it_is_free() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "invalid.example");
+    config.access_tokens = vec![TOKEN.to_string()];
+    config.run_schedule = Some("* * * * *".to_string());
+    // an external cron job, simulated by a lock file this test writes
+    // itself: this test process's pid is a live one
+    let held = serde_json::json!({
+        "pid": std::process::id(),
+        "created": fedifetcher::timeutil::fmt_lock_ts(fedifetcher::timeutil::now()),
+    });
+    std::fs::write(config.lock_path(), held.to_string()).unwrap();
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let (serve_config, serve_db) = (config.clone(), db.clone());
+    tokio::spawn(async move {
+        let _ = web::serve(serve_config, "127.0.0.1", 0, serve_db).await;
+    });
+
+    // wait past the next minute boundary: the firing there is skipped —
+    // the lock is held, so nothing is recorded
+    let secs = u64::from(fedifetcher::timeutil::now().second());
+    tokio::time::sleep(std::time::Duration::from_secs(60 - secs + 2)).await;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "no scheduled run while another process holds the lock"
+    );
+
+    // the lock released: the next firing starts a run
+    std::fs::remove_file(config.lock_path()).ok();
+    let secs = u64::from(fedifetcher::timeutil::now().second());
+    tokio::time::sleep(std::time::Duration::from_secs(60 - secs + 2)).await;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(count >= 1, "a scheduled run starts once the lock is free");
+}
+
+/// The serve mode's scheduler, end to end: `serve` starts it, the
+/// schedule fires, and the run lands in the run history — the same
+/// polling the headless `schedule` subcommand does, from the web UI's
+/// process.
+#[tokio::test]
+async fn the_serve_mode_scheduler_runs_on_its_own() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "invalid.example");
+    config.access_tokens = vec![TOKEN.to_string()];
+    config.run_schedule = Some("* * * * *".to_string());
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let (serve_config, serve_db) = (config.clone(), db.clone());
+    tokio::spawn(async move {
+        // an ephemeral port: the test reads the runs table, not the UI
+        let _ = web::serve(serve_config, "127.0.0.1", 0, serve_db).await;
+    });
+
+    // a run row appears within the next firing minute plus one poll
+    for _ in 0..900 {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        if count > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the serve mode's scheduler never fired a run");
+}
+
+/// The web UI ships its own typeface: the three B612 faces serve from
+/// the binary, as font files, and every page's CSS names the family
+/// with its fallbacks behind it.
+#[tokio::test]
+async fn the_web_ui_serves_its_own_fonts() {
+    let dir = common::tmp_dir();
+    let base = spawn_ui(&dir).await;
+    for path in [
+        "/fonts/b612-regular.woff2",
+        "/fonts/b612-bold.woff2",
+        "/fonts/b612-mono-regular.woff2",
+    ] {
+        let resp = client().get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "{path}");
+        assert_eq!(
+            resp.headers().get("Content-Type").unwrap(),
+            "font/woff2",
+            "{path}"
+        );
+        // a long cache lifetime: the bytes are pinned by this version
+        assert!(
+            resp.headers()
+                .get("Cache-Control")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("immutable"),
+            "{path}"
+        );
+        let bytes = resp.bytes().await.unwrap();
+        assert!(bytes.len() > 1000, "{path} is suspiciously small");
+        // the woff2 magic
+        assert_eq!(&bytes[0..4], b"wOF2", "{path}");
+    }
+    // the pages name the family
+    let (_, body) = get(&format!("{base}/config")).await;
+    assert!(body.contains("B612"), "{body}");
 }

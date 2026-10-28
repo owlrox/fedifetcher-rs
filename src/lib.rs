@@ -20,6 +20,7 @@ pub mod oauth;
 pub mod posts;
 pub mod robots;
 pub mod run;
+pub mod schedule;
 pub mod servers;
 pub mod state;
 pub mod store;
