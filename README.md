@@ -60,6 +60,16 @@ curl -fsSL https://raw.githubusercontent.com/owlrox/fedifetcher-rs/main/deploy.s
   | sudo sh -s -- https://github.com/owlrox/fedifetcher-rs.git   # branch defaults to main
 ```
 
+Prefer no build at all? Grab a release binary, untar it, and run it — the tarball holds just the executable:
+
+```sh
+curl -fsSL -o /tmp/fedifetcher-rs.tar.gz \
+  https://github.com/owlrox/fedifetcher-rs/releases/download/v1.5.3/fedifetcher-rs-x86_64-unknown-linux-musl.tar.gz
+tar -xzf /tmp/fedifetcher-rs.tar.gz && sudo install fedifetcher-rs /usr/local/bin/fedifetcher-rs
+cd /var/lib/fedifetcher 2>/dev/null || sudo mkdir -p /var/lib/fedifetcher && cd /var/lib/fedifetcher
+fedifetcher-rs serve --bind 127.0.0.1 --port 8080
+```
+
 The script uses the distribution's own Rust toolchain when it is new enough and falls back to rustup when it is not. Distro Rust versions as of this writing:
 
 | Distribution | Rust shipped | Toolchain used |
