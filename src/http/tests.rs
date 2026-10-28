@@ -4,6 +4,28 @@
 use super::*;
 
 #[test]
+fn the_user_agent_names_the_server_unless_hidden_or_overridden() {
+    let mut config = Config {
+        server: "example.social".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        user_agent_string(&config),
+        format!("FediFetcher/{VERSION}; +example.social (https://go.thms.uk/ff)")
+    );
+    config.hide_server_in_user_agent = true;
+    assert_eq!(
+        user_agent_string(&config),
+        format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")
+    );
+    // the override replaces the whole agent, whatever hide_server says
+    config.user_agent_override = Some("MyFetcher/1.0".to_string());
+    assert_eq!(user_agent_string(&config), "MyFetcher/1.0");
+    config.hide_server_in_user_agent = false;
+    assert_eq!(user_agent_string(&config), "MyFetcher/1.0");
+}
+
+#[test]
 fn callback_url_replaces_and_adds_params() {
     assert_eq!(
         build_callback_url(

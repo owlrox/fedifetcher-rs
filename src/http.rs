@@ -178,14 +178,7 @@ impl HttpClient {
     }
 
     pub fn user_agent(&self) -> String {
-        if self.config.hide_server_in_user_agent {
-            format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")
-        } else {
-            format!(
-                "FediFetcher/{VERSION}; +{} (https://go.thms.uk/ff)",
-                self.config.server
-            )
-        }
+        user_agent_string(&self.config)
     }
 
     /// Make a get request while providing our user agent, and respecting rate
@@ -540,6 +533,23 @@ impl RobotsCache {
 }
 
 /// Add query parameters to a callback URL, replacing any that already exist.
+/// The User-Agent sent to other servers: FediFetcher and the user's server,
+/// unless the server's name is hidden — or the whole thing is replaced by
+/// the config's override, when one is set.
+fn user_agent_string(config: &Config) -> String {
+    if let Some(agent) = &config.user_agent_override {
+        return agent.clone();
+    }
+    if config.hide_server_in_user_agent {
+        format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")
+    } else {
+        format!(
+            "FediFetcher/{VERSION}; +{} (https://go.thms.uk/ff)",
+            config.server
+        )
+    }
+}
+
 pub fn build_callback_url(url: &str, params: &[(String, String)]) -> String {
     let (base, query) = match url.split_once('?') {
         Some((base, query)) => (base, query),

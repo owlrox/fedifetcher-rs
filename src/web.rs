@@ -1206,7 +1206,10 @@ async fn oauth_disconnect(
 
 /// Options whose empty form field means "unset".
 fn is_optional_option(name: &str) -> bool {
-    matches!(name, "lock_file" | "on_start" | "on_done" | "on_fail")
+    matches!(
+        name,
+        "lock_file" | "on_start" | "on_done" | "on_fail" | "user_agent_override"
+    )
 }
 
 /// A failed save: the message, and a way back to the form.
@@ -2912,6 +2915,10 @@ fn ConfigPage(
     rows.push(bool_row(
         "hide_server_in_user_agent",
         config.hide_server_in_user_agent,
+    ));
+    rows.push(text_row(
+        "user_agent_override",
+        &optional(&config.user_agent_override),
     ));
     rows.push(text_row(
         "instance_blocklist",

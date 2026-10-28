@@ -1,3 +1,270 @@
+## 1.3.36
+
+A user-agent override config value.
+
+A new optional `user_agent_override` config value sends any User-Agent
+you type to other servers, as-is, replacing the default one entirely —
+a further option beyond `hide_server_in_user_agent`, which the override
+makes irrelevant while it is set. Leave it empty to keep the default
+behavior of naming FediFetcher and your server.
+
+## 1.3.35
+
+The Debug page shows its memory beside the database.
+
+The About page's top bar was shorter than the rest: only the pages
+with a current-page mark reserved the white underline's space, and
+About has none. Every nav link now reserves it behind a transparent
+border, so the bar is the same height everywhere. The Debug page's
+Database section gains a Memory section to its right, showing the
+same numbers the exit line reports — resident, peak resident, and
+the heap with its peak — taken live from the running process.
+
+## 1.3.34
+
+The docs and the crate point at the new repository home.
+
+The README's clone command and Cargo's repository field carry the
+real URL now that the project lives at
+github.com/owlrox/fedifetcher-rs.
+
+## 1.3.33
+
+A graceful stop reports the signal, the memory, and the database.
+
+Serve now shuts down gracefully on Ctrl-C or SIGTERM — a service
+manager's stop finally ends it cleanly — and the exit names the
+signal that asked: 'shut down (SIGTERM)'. The same exit line
+reports the memory worth watching: resident, peak resident — the
+leak detector — and the heap's current and peak bytes, counted by
+a wrapping global allocator, plus the database's size on disk, wal
+included. Virtual size stays out: it counts reserved address
+space, not use. The db file sizes come from one place,
+db::disk_usage_at, which the Debug page's Database section reads
+too, and one byte formatter, mem::human, serves both. A kill -9 or
+a crash can still say nothing; nothing can.
+
+## 1.3.32
+
+A centered card, scroll shadows, and a tidier top bar.
+
+The page sits centered as a card on a page background that differs
+from it, so the margins read as margins. Scrollable tables show a
+shadow edge on the side that has more content, and the shadow disappears
+once you scroll to that edge — no guessing whether there is more.
+Top bar links lose their underlines; the version number keeps one,
+spaced off the app name.
+
+## 1.3.30
+
+The UI passes an accessibility pass.
+
+Every input and select carries an accessible name, table headers
+declare scope=col, wide tables scroll in a wrapper instead of
+blowing out narrow viewports, and the colors adapt to the color
+scheme: links, muted text, and the outlined level pills pick dark
+variants in light mode and lighter ones in dark, while the badge
+backgrounds darken enough to hold white text at contrast. The top
+bar's links go light to sit on its dark gradient.
+
+## 1.3.29
+
+The top bar underlines the page you are on.
+
+The data tab's pressed-in styling is reverted; the current-page
+marker lives in the top bar instead, as a white line under the nav
+link for the page being shown. The bar's gradient darkens toward
+the body's own greys.
+
+## 1.3.28
+
+The landed-on data tab looks pressed in.
+
+The active tab now carries the same #8881 tint the pre blocks use,
+with rounded top corners and side padding, so it reads as the tab
+you are on rather than just a bolder link.
+
+## 1.3.27
+
+The crate is fedifetcher-rs everywhere.
+
+The [[bin]] rename left the package name as plain fedifetcher, so
+cargo still announced 'Compiling fedifetcher'. The package is now
+fedifetcher-rs and the binary file name matches; the library keeps
+its fedifetcher crate name so the existing use paths are untouched.
+deploy.sh and the README use the new executable name, and the binary
+integration test finds it through CARGO_BIN_EXE_fedifetcher-rs.
+
+## 1.3.26
+
+--version and --help carry the project's FediFetcher-rs name.
+
+The version number was right but the name was bare "fedifetcher": the
+web UI's "FediFetcher-rs" is a hardcoded display string, and clap's
+command name — which --version and --help print — was still the crate
+name. The command name is now "FediFetcher-rs", and the serve mode's
+startup log line names it the same way, so the three places the version
+surfaces (--version, the startup log, the web header) agree.
+
+Deliberately unchanged: the compiled binary is still named fedifetcher
+(deploy.sh and any cron entry call it by that file name), and the HTTP
+User-Agent is still FediFetcher/<version> — remote sites and their
+robots.txt rules know that name, and changing it would silently
+re-identify FediFetcher to every server it talks to.
+
+The version-flag test pins the name next to the version.
+
+## 1.3.25
+
+Wafrn servers speak the Mastodon API.
+
+app.wafrn.net's nodeinfo names its software "wafrn", which mapped to no
+API flavor — so every post URL on it failed with "runs wafrn and no
+supported API is known for it", and the context of any post it hosted
+was skipped. Wafrn serves a Mastodon-shaped /api/v1 (its /api/v1/instance
+answers "4.3.0 (compatible; Wafrn ...)"), so "wafrn" now maps to the
+Mastodon flavor, and the Mastodon client reads wafrn's two URL shapes:
+posts at /fediverse/post/<id> (the id the API addresses the post by)
+and profiles at /blog/<user>.
+
+A test pins the client choice and both URL shapes, against the URL
+from the error that started this.
+
+## 1.3.24
+
+The config option's name carries the same tooltip as its field.
+
+Hovering the field showed the option's description; hovering the name
+showed nothing. The name's cell now carries the same title, so the
+tooltip answers from either half of the row.
+
+A web test pins it: the config page renders a td title with the
+option's documented description.
+
+## 1.3.23
+
+The live toggle rules auto-refresh, Debug follows a run, softer gradient.
+
+The live-updates toggle is now the master control for auto-refresh on
+every page: on, the dashboard, data, logs and debug pages reload
+themselves every five seconds, idle or not; off, they hold still. The
+dashboard used to refresh only while a run was in progress, and the
+data page never refreshed at all — both now follow the toggle like the
+logs page always has.
+
+The refresh-while-a-run-is-in-progress baseline stays, carried to the
+debug page: dashboard, logs and debug refresh while the history's
+newest run row is "running" even with the toggle off, since those are
+the pages a run is actively writing to. The data page deliberately
+does not join them — a run filling its tables is not worth losing
+your place in a long list — and config and about never refresh (one
+holds a form half-filled, the other nothing live).
+
+The top bar's gradient is redone in the page's own grey family —
+#3a3a3a to #757575, a softer dark-to-medium ramp that reads well
+against the #888 accents in both color schemes.
+
+Four web tests pin it: the data page's toggle-only rule, the debug
+page's while-running rule, the master control across all six pages,
+and the new gradient.
+
+## 1.3.22
+
+The data and logs pages follow a run in progress.
+
+The dashboard meta-refreshes while the history's newest run row is
+"running", even with live updates toggled off — but it was the only
+page with that rule, and it is not the only page a run writes to. The
+data page (never refreshed itself) and the logs page (refreshed only
+when the toggle was on) sat still while a run filled the tables and
+wrote the lines they show.
+
+Both now carry the dashboard's rule: while a run is in progress, the
+page refreshes itself every five seconds, whatever the toggle says —
+idle, they hold still as before (the logs page keeps its toggle-driven
+refresh). Config, Debug and About show nothing a run changes, so they
+stay static.
+
+Two web tests pin it: with a run row recorded as running and the live
+cookie off, /data and /logs carry the meta refresh; after the row
+finishes, neither does.
+
+## 1.3.21
+
+Grey top bar, a two-section dashboard, clickable table URLs.
+
+The top bar is a dark-to-medium grey gradient (left to right) with
+light text; the live-updates toggle is lightened to stay readable on
+it.
+
+The dashboard keeps only the State section and Recent runs. The Run
+section is gone — its controls were duplicates of the top bar's, which
+every page carries — and so is Enabled tasks, which the Config page's
+task list shows better. The dashboard's meta-refresh while a run is in
+progress stays: the State counts and the history's elapsed time keep
+ticking. The tests that pinned the Run section's buttons and its
+"Running since"/"Paused (running since ...)" labels now pin the top
+bar's pill and buttons instead; the OAuth suite's dashboard token-count
+test is gone with the section it pinned (the dance-adds-a-token
+behavior it rode on is covered by its own test).
+
+URLs the tables show are clickable: a data-page cell that is a bare
+http(s) URL renders as a link — covering seen_urls, context_cache,
+known_context_posts, private_posts, robots_cache and trigger_posts —
+and the hosts tab's host name links to the server's own https address.
+The check is shape-only (no whitespace, http scheme), so error text
+that merely contains a URL stays text.
+
+New tests pin all three: the dashboard's two sections and the top
+bar's controls, the gradient and light header text, and the links
+across all seven tables.
+
+## 1.3.20
+
+Pretty-print JSON cells on the Data page.
+
+The seen_hosts tab's raw_nodeinfo column rendered the nodeinfo document
+as the dense one-liner it is stored as. A cell whose content parses as
+a JSON object or array now renders pretty-printed in a pre block —
+scrollable, in a smaller face — while every other cell renders as it
+did. The document stays stored exactly as the server sent it: the
+fields FediFetcher reads are already columns of their own, and the
+rest varies by software, so no more schema is added at write time.
+
+A web test pins the pretty rendering, the pre wrapper, and that plain
+cells stay plain.
+
+## 1.3.19
+
+Log settings apply on save, and the pages lose their how-to blurbs.
+
+Changing log_level or log_format on the config page used to need a
+restart, because the logger was built once at startup and never
+touched again. The level filter now sits behind a reload layer and the
+stderr format is shared with the config, so saving the config — or
+connecting or disconnecting an account, which also saves it — applies
+both to the running logger on the spot: the next log line renders in
+the new format at the new level. logging::apply does the swap, a
+no-op when logging was never set up; a refused level (one setup would
+reject too) leaves the old settings alone and is only logged. The
+config page's "log level and format apply on restart" sentence is
+gone, since it no longer does.
+
+Also on the pages: the remove-token checkbox is pulled slightly left
+(margin-right where margin-left:auto had it touching the row's edge),
+and four instructional sentences are removed — "no token to copy by
+hand", both "Click a column heading to sort by it" blurbs, "The last
+column fetches that one thing now, in the background", and the logs
+page's refresh sentence. The sort links, the level pills, the fetch
+buttons and the meta refresh all still work; only the sentences that
+explained them are gone. The logs page's blurb now reads "The last 200
+entries from the database, newest first."
+
+New tests: logging pins that apply swaps the format in place and
+refuses an unknown level without changing anything; the web suite pins
+the gone sentences, the surviving blurb, the checkbox's CSS, and that
+saving a new level and format succeeds.
+
 ## 1.3.18
 
 Drop the debug tab's cleanup blurb, count only the biggest tables.

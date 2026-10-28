@@ -196,6 +196,7 @@ fn every_known_option_has_a_description() {
         "http_timeout",
         "rate_limit_cooldown",
         "hide_server_in_user_agent",
+        "user_agent_override",
         "instance_blocklist",
         "state_dir",
         "lock_file",
@@ -226,6 +227,31 @@ fn the_user_agent_option_round_trips() {
         !Config::default().hide_server_in_user_agent,
         "the server is named by default"
     );
+}
+
+#[test]
+fn the_user_agent_override_round_trips_and_empty_means_unset() {
+    let config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        (
+            "user_agent_override",
+            json!("MyFetcher/1.0 (+https://me.example)"),
+        ),
+    ]))
+    .unwrap();
+    assert_eq!(
+        config.user_agent_override.as_deref(),
+        Some("MyFetcher/1.0 (+https://me.example)")
+    );
+    assert_eq!(Config::default().user_agent_override, None);
+
+    // the optional strings' empty form field arrives as a null, and means unset
+    let mut config = config;
+    config
+        .apply_values(&values(vec![("user_agent_override", Value::Null)]))
+        .expect("a cleared optional string saves");
+    assert_eq!(config.user_agent_override, None);
 }
 
 #[test]

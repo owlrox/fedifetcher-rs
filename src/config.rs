@@ -116,6 +116,10 @@ pub struct Config {
     /// Omit your server's name from the User-Agent sent to other servers
     /// (default: disabled)
     pub hide_server_in_user_agent: bool,
+    /// Send this User-Agent to other servers instead of the default one,
+    /// as-is; when set, `hide_server_in_user_agent` is ignored
+    /// (default: unset)
+    pub user_agent_override: Option<String>,
     /// Instances that FediFetcher should never try to connect to
     pub instance_blocklist: Vec<String>,
     /// Directory to store persistent files and possibly lock file
@@ -166,6 +170,7 @@ impl Default for Config {
             http_timeout: 5,
             rate_limit_cooldown: vec![0.5, 2.0, 8.0, 32.0, 128.0],
             hide_server_in_user_agent: false,
+            user_agent_override: None,
             instance_blocklist: Vec::new(),
             state_dir: default_state_dir(),
             lock_file: None,
@@ -319,6 +324,9 @@ impl Config {
             "hide_server_in_user_agent",
             Value::Bool(self.hide_server_in_user_agent),
         );
+        if let Some(agent) = &self.user_agent_override {
+            put("user_agent_override", Value::String(agent.clone()));
+        }
         put(
             "instance_blocklist",
             Value::Array(
@@ -424,6 +432,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "http_timeout"
             | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
+            | "user_agent_override"
             | "instance_blocklist"
             | "state_dir"
             | "lock_file"
@@ -561,6 +570,9 @@ fn base_description(name: &str) -> Option<&'static str> {
         "hide_server_in_user_agent" => {
             "Omit your server's name from the User-Agent FediFetcher sends to other servers"
         }
+        "user_agent_override" => {
+            "Send this User-Agent to other servers instead of the default one, as-is. When set, hide_server_in_user_agent is ignored. Leave empty to use the default"
+        }
         "instance_blocklist" => {
             "A comma-separated list of instances that FediFetcher should never try to connect to"
         }
@@ -676,6 +688,9 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
             "rate_limit_cooldown" => coerce_seconds(value).map(|v| config.rate_limit_cooldown = v),
             "hide_server_in_user_agent" => {
                 coerce_bool(value).map(|v| config.hide_server_in_user_agent = v)
+            }
+            "user_agent_override" => {
+                coerce_optional_string(value).map(|v| config.user_agent_override = v)
             }
             "instance_blocklist" => coerce_list(value).map(|v| config.instance_blocklist = v),
             "state_dir" => coerce_path(value).map(|v| config.state_dir = v),

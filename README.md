@@ -184,6 +184,7 @@ The configuration is stored in the database and edited through the web UI's conf
 | `http_timeout` | `5` | Timeout in seconds for HTTP requests to your own or other instances |
 | `rate_limit_cooldown` | `0.5,2,8,32,128` | Seconds to wait between retries when a server rate limits (HTTP 429), one entry per retry step; the request fails when the list runs out |
 | `hide_server_in_user_agent` | `false` | Omit your server's name from the User-Agent sent to other servers |
+| `user_agent_override` | *(unset)* | Send this User-Agent to other servers instead of the default one, as-is; when set, `hide_server_in_user_agent` is ignored |
 | `instance_blocklist` | *(empty)* | Comma-separated list of instances to never connect to |
 | `state_dir` | see below | Directory for persistent files and the lock file |
 | `lock_file` | `<state_dir>/lock.lock` | Location of the lock file |
