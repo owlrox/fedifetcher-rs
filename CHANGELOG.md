@@ -1,3 +1,17 @@
+## 1.4.1
+
+Resident memory shows its peak inline; B612 is out.
+
+The Memory section's rows now read like the heap's: "resident X
+(peak Y)" on one line, instead of resident and peak resident on two.
+All four numbers still show — resident now, peak resident so far,
+heap now, heap peak — the layout is the only thing that changed.
+
+The B612 typeface is backed out entirely: the embedded faces, the
+font routes, the @font-face rules, the font test, and the NOTICE.md
+section and OFL text. The UI is back to system-ui and monospace, as
+it was before the font experiment.
+
 ## 1.5.0
 
 The cron engine is croner's, and DST just works.

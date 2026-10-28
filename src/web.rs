@@ -10,7 +10,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Query, State as AxumState};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::{get, post};
 use leptos::prelude::*;
 use regex::Regex;
@@ -276,9 +276,6 @@ fn app_state(config: Config, db: SqlitePool, scheme: &'static str) -> (Router, A
         .route("/debug", get(debug_page).post(debug_post))
         .route("/about", get(about))
         .route("/healthz", get(healthz))
-        .route("/fonts/b612-regular.woff2", get(font_regular))
-        .route("/fonts/b612-bold.woff2", get(font_bold))
-        .route("/fonts/b612-mono-regular.woff2", get(font_mono))
         .with_state(state.clone());
     (router, state)
 }
@@ -2058,44 +2055,9 @@ fn log_level_row(value: &str) -> AnyView {
     .into_any()
 }
 
-/// The B612 faces, embedded: the cockpit-display typeface the UI is set
-/// in, shipped in the binary so the UI stays self-contained. Under the
-/// SIL Open Font License 1.1 (assets/fonts/OFL.txt).
-const B612_REGULAR: &[u8] = include_bytes!("../assets/fonts/b612-regular.woff2");
-const B612_BOLD: &[u8] = include_bytes!("../assets/fonts/b612-bold.woff2");
-const B612_MONO: &[u8] = include_bytes!("../assets/fonts/b612-mono-regular.woff2");
-
-/// A font file, served with a long cache lifetime: the bytes are pinned
-/// by this binary's version, so a browser can keep them for good.
-async fn font(bytes: &'static [u8]) -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "font/woff2"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-        ],
-        bytes,
-    )
-        .into_response()
-}
-
-async fn font_regular() -> Response {
-    font(B612_REGULAR).await
-}
-
-async fn font_bold() -> Response {
-    font(B612_BOLD).await
-}
-
-async fn font_mono() -> Response {
-    font(B612_MONO).await
-}
-
 const CSS: &str = r#"
-@font-face { font-family: 'B612'; src: url('/fonts/b612-regular.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
-@font-face { font-family: 'B612'; src: url('/fonts/b612-bold.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
-@font-face { font-family: 'B612 Mono'; src: url('/fonts/b612-mono-regular.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
 :root { color-scheme: light dark; --link: light-dark(#06c, #7ab8ff); --muted: light-dark(#666, #999); --page: light-dark(#ececec, #161616); --surface: light-dark(#ffffff, #222222); }
-body { font-family: 'B612', system-ui, sans-serif; margin: 0; background: var(--page); }
+body { font-family: system-ui, sans-serif; margin: 0; background: var(--page); }
 header { display: flex; gap: 1.5rem; align-items: baseline; padding: 0.75rem max(1.5rem, calc((100% - 64rem) / 2)); border-bottom: 1px solid #8884; flex-wrap: wrap; background: linear-gradient(to right, #333333, #585858); color: #eee; }
 header h1 { font-size: 1.1rem; margin: 0; }
 header h1 a { color: #eee; text-decoration: none; }
@@ -2118,7 +2080,7 @@ h2 { font-size: 1rem; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; overflow-wrap: break-word; }
 th { font-weight: 600; }
-code, pre { font-family: 'B612 Mono', ui-monospace, monospace; font-size: 0.85em; }
+code, pre { font-family: ui-monospace, monospace; font-size: 0.85em; }
 pre { background: #8881; padding: 0.75rem; overflow-x: auto; }
 button { font-size: 1rem; padding: 0.4rem 1rem; }
 input, select { font: inherit; padding: 0.2rem 0.4rem; }
@@ -3195,11 +3157,14 @@ fn ConfigPage(
 fn memory_section() -> AnyView {
     let memory = mem::snapshot();
     let mut rows: Vec<(String, String)> = Vec::new();
-    if let Some(bytes) = memory.resident {
-        rows.push(("resident".to_string(), mem::human(bytes)));
-    }
-    if let Some(bytes) = memory.peak_resident {
-        rows.push(("peak resident".to_string(), mem::human(bytes)));
+    match (memory.resident, memory.peak_resident) {
+        (Some(bytes), Some(peak)) => rows.push((
+            "resident".to_string(),
+            format!("{} (peak {})", mem::human(bytes), mem::human(peak)),
+        )),
+        (Some(bytes), None) => rows.push(("resident".to_string(), mem::human(bytes))),
+        (None, Some(peak)) => rows.push(("peak resident".to_string(), mem::human(peak))),
+        _ => {}
     }
     match (memory.heap, memory.heap_peak) {
         (Some(bytes), Some(peak)) => rows.push((

@@ -3459,8 +3459,13 @@ async fn the_debug_page_shows_the_memory_next_to_the_database() {
         "the debug page has a Memory section: {body}"
     );
     assert!(
-        body.contains("resident") && body.contains("peak resident") && body.contains("heap"),
-        "the Memory section carries the same numbers the exit line does"
+        body.contains("resident") && body.contains("peak") && body.contains("heap"),
+        "the Memory section carries the same numbers the exit line does: {body}"
+    );
+    // resident and its peak share the row, the way the heap's do
+    assert!(
+        body.contains("resident") && body.contains("(peak"),
+        "resident shows its peak inline: {body}"
     );
     // the two sections sit side by side
     assert!(
@@ -3728,43 +3733,4 @@ async fn the_serve_mode_scheduler_runs_on_its_own() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     panic!("the serve mode's scheduler never fired a run");
-}
-
-/// The web UI ships its own typeface: the three B612 faces serve from
-/// the binary, as font files, and every page's CSS names the family
-/// with its fallbacks behind it.
-#[tokio::test]
-async fn the_web_ui_serves_its_own_fonts() {
-    let dir = common::tmp_dir();
-    let base = spawn_ui(&dir).await;
-    for path in [
-        "/fonts/b612-regular.woff2",
-        "/fonts/b612-bold.woff2",
-        "/fonts/b612-mono-regular.woff2",
-    ] {
-        let resp = client().get(format!("{base}{path}")).send().await.unwrap();
-        assert_eq!(resp.status().as_u16(), 200, "{path}");
-        assert_eq!(
-            resp.headers().get("Content-Type").unwrap(),
-            "font/woff2",
-            "{path}"
-        );
-        // a long cache lifetime: the bytes are pinned by this version
-        assert!(
-            resp.headers()
-                .get("Cache-Control")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("immutable"),
-            "{path}"
-        );
-        let bytes = resp.bytes().await.unwrap();
-        assert!(bytes.len() > 1000, "{path} is suspiciously small");
-        // the woff2 magic
-        assert_eq!(&bytes[0..4], b"wOF2", "{path}");
-    }
-    // the pages name the family
-    let (_, body) = get(&format!("{base}/config")).await;
-    assert!(body.contains("B612"), "{body}");
 }
