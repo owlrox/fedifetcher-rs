@@ -53,6 +53,13 @@ For a fresh server or LXC container — Alpine, Arch, Debian, or Fedora — `dep
 sudo ./deploy.sh https://github.com/owlrox/fedifetcher-rs.git [branch]   # branch defaults to main
 ```
 
+On a fresh box with nothing checked out, run it straight from git — no clone needed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/owlrox/fedifetcher-rs/main/deploy.sh \
+  | sudo sh -s -- https://github.com/owlrox/fedifetcher-rs.git   # branch defaults to main
+```
+
 The script uses the distribution's own Rust toolchain when it is new enough and falls back to rustup when it is not. Distro Rust versions as of this writing:
 
 | Distribution | Rust shipped | Toolchain used |
