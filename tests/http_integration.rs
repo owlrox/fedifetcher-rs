@@ -35,7 +35,9 @@ async fn user_agent_names_the_configured_server() {
     let client = HttpClient::new(config, db);
     assert_eq!(
         client.user_agent(),
-        format!("FediFetcher/{VERSION}; +example.social (+https://github.com/owlrox/fedifetcher-rs)")
+        format!(
+            "FediFetcher/{VERSION}; +example.social (+https://github.com/owlrox/fedifetcher-rs)"
+        )
     );
 }
 

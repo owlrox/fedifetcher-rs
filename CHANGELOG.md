@@ -1,3 +1,24 @@
+## 1.5.0
+
+The cron engine is croner's, and DST just works.
+
+The hand-rolled cron parser and search are gone — croner does the
+parsing and the firing search now, behind the same Schedule API the
+schedulers were already using, so no caller changed. The win is the
+timezone: croner searches in chrono's Local, whose timezone database
+resolves daylight-saving transitions — a run scheduled in the
+spring-forward gap fires in the first minute after the gap, and @daily
+stays at midnight, wall time, on both change days. (The hand-rolled
+search kept the offset it started with; a probe confirmed croner does
+the same when handed a fixed offset, but resolves it properly through
+chrono's Local — which is what the adapter hands it.) The probe lives
+on as the DST unit test, which detects whether the machine's timezone
+even has the gap before asserting.
+
+The User-Agent now carries this fork's repository home instead of the
+original author's go.thms.uk/ff link — the upstream credit stays on
+the about page and in NOTICE.md.
+
 ## 1.4.1
 
 The User-Agent points at this fork's own home.

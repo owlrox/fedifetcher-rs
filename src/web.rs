@@ -162,7 +162,7 @@ static SHUTDOWN_REASON: std::sync::OnceLock<&'static str> = std::sync::OnceLock:
 async fn scheduler(state: Arc<AppState>) {
     let mut last_poll = timeutil::now_local();
     loop {
-        tokio::time::sleep(schedule::POLL.try_into().expect("a positive poll interval")).await;
+        tokio::time::sleep(schedule::POLL).await;
         let now = timeutil::now_local();
         let schedule = {
             let config = state.config.lock().unwrap();

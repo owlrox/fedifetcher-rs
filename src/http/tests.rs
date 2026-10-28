@@ -11,7 +11,9 @@ fn the_user_agent_names_the_server_unless_hidden_or_overridden() {
     };
     assert_eq!(
         user_agent_string(&config),
-        format!("FediFetcher/{VERSION}; +example.social (+https://github.com/owlrox/fedifetcher-rs)")
+        format!(
+            "FediFetcher/{VERSION}; +example.social (+https://github.com/owlrox/fedifetcher-rs)"
+        )
     );
     config.hide_server_in_user_agent = true;
     assert_eq!(
@@ -28,7 +30,9 @@ fn the_user_agent_names_the_server_unless_hidden_or_overridden() {
     config.user_agent_override = Some("   ".to_string());
     assert_eq!(
         user_agent_string(&config),
-        format!("FediFetcher/{VERSION}; +example.social (+https://github.com/owlrox/fedifetcher-rs)")
+        format!(
+            "FediFetcher/{VERSION}; +example.social (+https://github.com/owlrox/fedifetcher-rs)"
+        )
     );
 }
 

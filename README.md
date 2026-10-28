@@ -139,7 +139,7 @@ With `serve` running, a background tick reads the schedule and starts a run when
 fedifetcher-rs schedule
 ```
 
-Times are read in the server's local timezone, so `@daily` means the local midnight. Both at once is fine: the lock file serializes the schedule, the **Run** button, and any external cron job — when a firing minute passes while an external run is going, the firing is skipped (logged as `Scheduled run: ... skipped`), and the schedule catches up at its next firing rather than piling failed runs into the history. So the usual setup is one or the other, but both at once also just works — e.g. external cron while you trial the built-in schedule. One caveat: schedules are evaluated in the local timezone as read at each poll, so a run scheduled near a daylight-saving change fires an hour off wall time on the change day itself.
+Times are read in the server's local timezone, so `@daily` means the local midnight. Both at once is fine: the lock file serializes the schedule, the **Run** button, and any external cron job — when a firing minute passes while an external run is going, the firing is skipped (logged as `Scheduled run: ... skipped`), and the schedule catches up at its next firing rather than piling failed runs into the history. So the usual setup is one or the other, but both at once also just works — e.g. external cron while you trial the built-in schedule. Daylight-saving changes are handled: a run scheduled in the spring-forward gap fires just after the gap, and `@daily` stays at midnight, wall time, on both change days.
 
 The old way still works, if you'd rather keep the scheduling in cron:
 

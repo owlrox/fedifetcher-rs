@@ -1,6 +1,6 @@
 [package]
 name = "fedifetcher-rs"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.99.1"
 description = "Pull missing posts and profiles into your Mastodon instance (Rust port with web UI)"
@@ -56,6 +56,8 @@ axum = "0.8"
 leptos = { version = "0.8", features = ["ssr"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2"
+croner = "4"
+chrono = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
