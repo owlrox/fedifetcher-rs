@@ -634,9 +634,6 @@ fn base_description(name: &str) -> Option<String> {
         "hide_server_in_user_agent" => {
             "Omit your server's name from the User-Agent FediFetcher sends to other servers"
         }
-        "user_agent_override" => {
-            "Send this User-Agent to other servers instead of the default one, as-is. When set, hide_server_in_user_agent is ignored. It cannot be blank: a blank value falls back to the default, which is \"FediFetcher/{VERSION}; +https://<your server>\". A common choice, if you would rather look like a browser: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-        }
         "instance_blocklist" => {
             "A comma-separated list of instances that FediFetcher should never try to connect to"
         }

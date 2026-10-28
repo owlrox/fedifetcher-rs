@@ -1,4 +1,14 @@
-## 1.4.1
+## 1.5.2
+
+The user-agent description lives in one place.
+
+base_description special-cased user_agent_override so the tooltip
+could name the fallback with this build's version — and still carried
+the same text as a match arm, unreachable behind the special case.
+The dead arm is gone; the special case is the one place the text
+lives.
+
+## 1.5.1
 
 Resident memory shows its peak inline; B612 is out.
 
