@@ -1,3 +1,16 @@
+## 1.5.3
+
+The README and the about page say whose fork this is.
+
+The README now says why this fork exists: the Python original wants a
+Docker image to configure, environment variables to spell, API keys to
+create and paste by hand, and Python dependencies to keep updated, and
+this port does away with all of that — one binary, the web UI connects
+the account, the configuration lives in the database. The README's
+license section and the about page carry the fork's own copyright
+(owlrox), beside the upstream credit; the crate metadata names the
+author and the repository home.
+
 ## 1.5.2
 
 The user-agent description lives in one place.

@@ -1,10 +1,12 @@
 [package]
 name = "fedifetcher-rs"
-version = "1.5.2"
+version = "1.5.3"
+authors = ["owlrox"]
+repository = "https://github.com/owlrox/fedifetcher-rs"
+homepage = "https://github.com/owlrox/fedifetcher-rs"
 edition = "2024"
 rust-version = "1.99.1"
 description = "Pull missing posts and profiles into your Mastodon instance (Rust port with web UI)"
-repository = "https://github.com/owlrox/fedifetcher-rs"
 license = "GPL-3.0-only"
 
 [lib]

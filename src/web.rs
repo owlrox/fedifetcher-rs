@@ -3535,7 +3535,9 @@ fn AboutPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl 
                     "FediFetcher-rs v" {VERSION} " — pulls missing posts and profiles into your Mastodon instance: the context of what your users reply to, boost, bookmark, favorite, list, and get notified about, fetched from the servers that host it."
                 </p>
                 <p class="muted">
-                    "A Rust port of the Python FediFetcher, with a server-rendered web UI that needs no JavaScript."
+                    "A Rust port of the Python FediFetcher, with a server-rendered web UI that needs no JavaScript. This fork exists to make FediFetcher easier to run: one binary, no Docker, no environment variables, no manual API keys — the config page connects your account and stores everything in the database. Its home is "
+                    <a href="https://github.com/owlrox/fedifetcher-rs">"github.com/owlrox/fedifetcher-rs"</a>
+                    "."
                 </p>
             </section>
             <section>
@@ -3551,7 +3553,7 @@ fn AboutPage(state: Arc<AppState>, running: Option<String>, live: bool) -> impl 
                     " in the source distribution."
                 </p>
                 <p class="muted">
-                    "The original FediFetcher is Copyright (C) Michael Thomas and is MIT-licensed (github.com/nanos/FediFetcher); this port keeps its notice in "
+                    "FediFetcher-rs is Copyright (C) 2026 owlrox (github.com/owlrox/fedifetcher-rs). The original FediFetcher is Copyright (C) Michael Thomas and is MIT-licensed (github.com/nanos/FediFetcher); this port keeps its notice in "
                     <code>"NOTICE.md"</code>
                     "."
                 </p>

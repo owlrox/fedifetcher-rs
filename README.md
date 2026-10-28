@@ -7,6 +7,8 @@ Pull missing posts and profiles into your Mastodon instance: the context of what
 
 FediFetcher-rs is a Rust port of the Python [FediFetcher](https://github.com/nanos/FediFetcher) (v8.2.3), with a server-rendered web UI that needs no JavaScript.
 
+This fork exists purely to make FediFetcher easier to run. The Python original wants a Docker image to configure, environment variables to spell correctly, API keys to create and paste by hand, and Python dependencies to keep updated; this port does away with all of that. It builds to a single binary with no runtime dependencies, the web UI walks you through connecting your account (no manual key wrangling), and the whole configuration lives in one SQLite database you can back up.
+
 ## Features
 
 - Fetches remote replies to posts your users reply to, boost, bookmark, or favorite
@@ -327,5 +329,7 @@ Versions and their write-ups are collected in [CHANGELOG.md](CHANGELOG.md), one 
 ## License
 
 FediFetcher-rs is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License](https://www.gnu.org/licenses/gpl-3.0.html) as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. The full text ships as `LICENSE`.
+
+FediFetcher-rs itself is Copyright (C) 2026 owlrox — [github.com/owlrox/fedifetcher-rs](https://github.com/owlrox/fedifetcher-rs).
 
 It is a Rust port of the original [FediFetcher](https://github.com/nanos/FediFetcher), Copyright (C) Michael Thomas, which is MIT-licensed; the upstream copyright and MIT notice are kept in `NOTICE.md`, as the MIT license requires.
