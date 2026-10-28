@@ -354,8 +354,12 @@ struct TableAction {
     force: bool,
 }
 
-/// The per-row action a table's rows offer, if any.
-fn table_action(table: &str) -> Option<TableAction> {
+/// The per-row action a table's rows offer, if any — the Actions column
+/// only exists while debug mode is on.
+fn table_action(table: &str, debug: bool) -> Option<TableAction> {
+    if !debug {
+        return None;
+    }
     match table {
         "trigger_posts" | "context_cache" => Some(TableAction {
             kind: "post",
@@ -406,6 +410,7 @@ async fn data(
 ) -> Html<String> {
     page_load(&state, "GET /data");
     let config = state.config.lock().unwrap().clone();
+    let debug = config.debug_mode;
     let state_data = match StateStore::new(config).load(&state.db).await {
         Ok(data) => data,
         Err(ex) => {
@@ -525,7 +530,7 @@ async fn data(
                 count,
                 sort,
                 order,
-                action: table_action(name),
+                action: table_action(name, debug),
             }
         }
     };
@@ -828,6 +833,12 @@ async fn save_config(
     if let Err(ex) = config.apply_values(&values) {
         tracing::warn!("POST /config: not saved: {ex}");
         return Err(save_error(&state, StatusCode::BAD_REQUEST, &ex.to_string(), live).await);
+    }
+    // with debug mode off, the options it gates are hidden — and must be
+    // the documented defaults, so hiding them cannot smuggle in a choice
+    // nobody can see
+    if !config.debug_mode {
+        config.reset_debug_gated();
     }
     if !remove_tokens.is_empty() || !new_token.is_empty() {
         let removed: Vec<String> = config
@@ -1238,18 +1249,24 @@ async fn save_error(
     (status, body)
 }
 
+/// The debug page — unless debug mode is off, when the dashboard is where
+/// the link would have gone anyway.
 async fn debug_page(
     AxumState(state): AxumState<Arc<AppState>>,
     headers: HeaderMap,
-) -> Html<String> {
+) -> Result<Html<String>, Redirect> {
+    if !state.config.lock().unwrap().debug_mode {
+        tracing::info!("GET /debug: debug mode is off");
+        return Err(Redirect::to("/"));
+    }
     page_load(&state, "GET /debug");
     let live = live_updates(&headers);
     let running = run_in_progress(&state).await;
     let identities = debug_identities(&state).await;
     let usage = db_usage(&state).await;
-    render(move || {
+    Ok(render(move || {
         view! { <DebugPage state=state running=running result=None live=live identities=identities tested=None usage=usage /> }
-    })
+    }))
 }
 
 /// How many tables the debug page's database section counts: the five that
@@ -1411,7 +1428,11 @@ async fn debug_post(
     AxumState(state): AxumState<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> Html<String> {
+) -> Result<Html<String>, Redirect> {
+    if !state.config.lock().unwrap().debug_mode {
+        tracing::info!("POST /debug: debug mode is off");
+        return Err(Redirect::to("/"));
+    }
     let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
@@ -1428,9 +1449,9 @@ async fn debug_post(
         .find(|(key, _)| key == "token_index")
         .and_then(|(_, value)| value.trim().parse::<usize>().ok());
     let usage = db_usage(&state).await;
-    render(
+    Ok(render(
         move || view! { <DebugPage state=state running=running result=Some(outcome) live=live identities=identities tested=tested usage=usage /> },
-    )
+    ))
 }
 
 /// Run one debug action against the configured server, with the first
@@ -2068,7 +2089,11 @@ fn Page(
                         <a class=("here", page == "/data") href="/data">"Data"</a>
                         <a class=("here", page == "/logs") href="/logs">"Logs"</a>
                         <a class=("here", page == "/config") href="/config">"Config"</a>
-                        <a class=("here", page == "/debug") href="/debug">"Debug"</a>
+                        {debug_mode(&state).then(|| {
+                            view! {
+                                <a class=("here", page == "/debug") href="/debug">"Debug"</a>
+                            }
+                        })}
                     </nav>
                     <RunControls state=state running=running/>
                     {live_toggle(live)}
@@ -2077,6 +2102,12 @@ fn Page(
             </body>
         </html>
     }
+}
+
+/// Whether debug mode is on: the Debug page, the Data page's Actions
+/// column, and the debug-gated config options follow it.
+fn debug_mode(state: &Arc<AppState>) -> bool {
+    state.config.lock().unwrap().debug_mode
 }
 
 /// The top bar's run controls: the status pill, and the buttons that
@@ -2291,7 +2322,7 @@ fn DataPage(
         })
         .collect();
     let section = match tab {
-        TabView::Hosts { rows, sort, order } => hosts_tab(rows, sort, order),
+        TabView::Hosts { rows, sort, order } => hosts_tab(rows, sort, order, debug_mode(&state)),
         TabView::Table {
             name,
             columns,
@@ -2389,18 +2420,19 @@ fn hosts_tab(
     rows: Vec<(String, String, String, String, String)>,
     sort: HostSort,
     order: LogOrder,
+    actions: bool,
 ) -> AnyView {
     let dir = match order {
         LogOrder::Asc => "asc",
         LogOrder::Desc => "desc",
     };
     let back = format!("/data?tab=hosts&sort={}&dir={}", sort.param(), dir);
-    let action = TableAction {
+    let action = actions.then_some(TableAction {
         kind: "host",
         set: None,
         label: "Re-check",
         force: false,
-    };
+    });
     view! {
         <section>
             <h2>"Seen hosts"</h2>
@@ -2420,7 +2452,9 @@ fn hosts_tab(
                                 <th scope="col">{sort_link("Version", HostSort::Version.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
                                 <th scope="col">{sort_link("APIs", HostSort::Apis.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
                                 <th scope="col">{sort_link("Last checked", HostSort::LastChecked.param(), sort.param(), order, "/data?tab=hosts", LogOrder::Asc)}</th>
-                                <th scope="col">"Actions"</th>
+                                {action.as_ref().map(|_| {
+                                    view! { <th scope="col">"Actions"</th> }.into_any()
+                                })}
                             </tr>
                         </thead>
                         <tbody>
@@ -2437,7 +2471,7 @@ fn hosts_tab(
                                             <td>{version}</td>
                                             <td>{apis}</td>
                                             <td>{last_checked}</td>
-                                            {fetch_button(&action, &host, &back)}
+                                            {action.as_ref().map(|action| fetch_button(action, &host, &back))}
                                         </tr>
                                     }
                                 })
@@ -2858,42 +2892,34 @@ fn ConfigPage(
         .display()
         .to_string();
     let optional = |value: &Option<String>| value.clone().unwrap_or_default();
-    let mut rows: Vec<AnyView> = Vec::new();
-    rows.push(text_row("server", &config.server));
-    rows.push(tokens_row(&config));
-    rows.push(text_row("user", &config.user));
-    rows.push(int_row(
-        "reply_interval_in_hours",
-        config.reply_interval_in_hours,
-    ));
-    rows.push(int_row("home_timeline_length", config.home_timeline_length));
-    rows.push(bool_row("streaming", config.streaming));
-    rows.push(int_row("max_followings", config.max_followings));
-    rows.push(int_row("max_followers", config.max_followers));
-    rows.push(int_row("max_follow_requests", config.max_follow_requests));
-    rows.push(int_row("max_bookmarks", config.max_bookmarks));
-    rows.push(int_row("max_favorites", config.max_favorites));
-    rows.push(int_row("from_notifications", config.from_notifications));
-    rows.push(bool_row("from_lists", config.from_lists));
-    rows.push(int_row("max_list_length", config.max_list_length));
-    rows.push(int_row("max_list_accounts", config.max_list_accounts));
-    rows.push(int_row(
-        "max_posts_per_account",
-        config.max_posts_per_account,
-    ));
-    rows.push(bool_row(
-        "backfill_with_context",
-        config.backfill_with_context,
-    ));
-    rows.push(bool_row(
-        "backfill_mentioned_users",
-        config.backfill_mentioned_users,
-    ));
-    rows.push(bool_row("respect_robots_txt", config.respect_robots_txt));
-    rows.push(bool_row(
-        "respect_user_opt_out",
-        config.respect_user_opt_out,
-    ));
+    let mut rows: Vec<AnyView> = vec![
+        text_row("server", &config.server),
+        tokens_row(&config),
+        text_row("user", &config.user),
+        int_row("reply_interval_in_hours", config.reply_interval_in_hours),
+        int_row("home_timeline_length", config.home_timeline_length),
+        bool_row("streaming", config.streaming),
+        int_row("max_followings", config.max_followings),
+        int_row("max_followers", config.max_followers),
+        int_row("max_follow_requests", config.max_follow_requests),
+        int_row("max_bookmarks", config.max_bookmarks),
+        int_row("max_favorites", config.max_favorites),
+        int_row("from_notifications", config.from_notifications),
+        bool_row("from_lists", config.from_lists),
+        int_row("max_list_length", config.max_list_length),
+        int_row("max_list_accounts", config.max_list_accounts),
+        int_row("max_posts_per_account", config.max_posts_per_account),
+        bool_row("backfill_with_context", config.backfill_with_context),
+        bool_row("backfill_mentioned_users", config.backfill_mentioned_users),
+    ];
+    rows.push(bool_row("debug_mode", config.debug_mode));
+    if config.debug_mode {
+        rows.push(bool_row("respect_robots_txt", config.respect_robots_txt));
+        rows.push(bool_row(
+            "respect_user_opt_out",
+            config.respect_user_opt_out,
+        ));
+    }
     rows.push(int_row(
         "remember_users_for_hours",
         config.remember_users_for_hours,
@@ -2912,14 +2938,16 @@ fn ConfigPage(
             .collect::<Vec<_>>()
             .join(", "),
     ));
-    rows.push(bool_row(
-        "hide_server_in_user_agent",
-        config.hide_server_in_user_agent,
-    ));
-    rows.push(text_row(
-        "user_agent_override",
-        &optional(&config.user_agent_override),
-    ));
+    if config.debug_mode {
+        rows.push(bool_row(
+            "hide_server_in_user_agent",
+            config.hide_server_in_user_agent,
+        ));
+        rows.push(text_row(
+            "user_agent_override",
+            &optional(&config.user_agent_override),
+        ));
+    }
     rows.push(text_row(
         "instance_blocklist",
         &config.instance_blocklist.join(", "),

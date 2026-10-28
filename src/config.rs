@@ -120,6 +120,11 @@ pub struct Config {
     /// as-is; when set, `hide_server_in_user_agent` is ignored
     /// (default: unset)
     pub user_agent_override: Option<String>,
+    /// Show the debug tooling: the Debug page, the Data page's Actions
+    /// column, and the options that stand between FediFetcher and the
+    /// politeness rules. Turning it off writes those options' defaults
+    /// back (default: enabled)
+    pub debug_mode: bool,
     /// Instances that FediFetcher should never try to connect to
     pub instance_blocklist: Vec<String>,
     /// Directory to store persistent files and possibly lock file
@@ -171,6 +176,7 @@ impl Default for Config {
             rate_limit_cooldown: vec![0.5, 2.0, 8.0, 32.0, 128.0],
             hide_server_in_user_agent: false,
             user_agent_override: None,
+            debug_mode: true,
             instance_blocklist: Vec::new(),
             state_dir: default_state_dir(),
             lock_file: None,
@@ -246,6 +252,17 @@ impl Config {
         apply(self, values)?;
         self.server = Config::normalize_server(&self.server);
         Ok(())
+    }
+
+    /// Write the debug-gated options' defaults back: what the config page
+    /// does when debug mode is turned off, so the options it hides are
+    /// always the documented defaults.
+    pub fn reset_debug_gated(&mut self) {
+        let defaults = Config::default();
+        self.respect_robots_txt = defaults.respect_robots_txt;
+        self.respect_user_opt_out = defaults.respect_user_opt_out;
+        self.hide_server_in_user_agent = defaults.hide_server_in_user_agent;
+        self.user_agent_override = defaults.user_agent_override.clone();
     }
 
     /// The whole effective configuration as raw values, ready to be stored
@@ -327,6 +344,7 @@ impl Config {
         if let Some(agent) = &self.user_agent_override {
             put("user_agent_override", Value::String(agent.clone()));
         }
+        put("debug_mode", Value::Bool(self.debug_mode));
         put(
             "instance_blocklist",
             Value::Array(
@@ -433,6 +451,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
             | "user_agent_override"
+            | "debug_mode"
             | "instance_blocklist"
             | "state_dir"
             | "lock_file"
@@ -597,8 +616,24 @@ fn base_description(name: &str) -> Option<&'static str> {
         }
         "log_format" => "The log format. Applies on restart",
         "log_page_loads" => "Log a line for every page load of the web UI, at DEBUG",
+        "debug_mode" => {
+            "Show the debug tooling: the Debug page, the Data page's Actions column, and the options that stand between FediFetcher and the politeness rules (respect_robots_txt, respect_user_opt_out, hide_server_in_user_agent, user_agent_override). Turning it off writes those options' defaults back, so the hidden options are the documented defaults"
+        }
         _ => return None,
     })
+}
+
+/// The options the debug mode gates: the ones that stand between
+/// FediFetcher and the politeness rules, plus the User-Agent override.
+/// Hidden on the config page while debug mode is off, and written back to
+/// their defaults when debug mode is turned off.
+pub fn debug_gated_options() -> &'static [&'static str] {
+    &[
+        "respect_robots_txt",
+        "respect_user_opt_out",
+        "hide_server_in_user_agent",
+        "user_agent_override",
+    ]
 }
 
 /// Options whose empty form field means "back to the documented default":
@@ -629,6 +664,7 @@ pub fn empty_resets_to_default(name: &str) -> bool {
             | "http_timeout"
             | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
+            | "debug_mode"
             | "instance_blocklist"
             | "log_page_loads"
     )
@@ -692,6 +728,7 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
             "user_agent_override" => {
                 coerce_optional_string(value).map(|v| config.user_agent_override = v)
             }
+            "debug_mode" => coerce_bool(value).map(|v| config.debug_mode = v),
             "instance_blocklist" => coerce_list(value).map(|v| config.instance_blocklist = v),
             "state_dir" => coerce_path(value).map(|v| config.state_dir = v),
             "lock_file" => coerce_optional_path(value).map(|v| config.lock_file = v),

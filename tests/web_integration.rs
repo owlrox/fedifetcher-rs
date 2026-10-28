@@ -3468,3 +3468,95 @@ async fn the_debug_page_shows_the_memory_next_to_the_database() {
         "Database and Memory share a row"
     );
 }
+
+/// A seen host in the UI's database, so the data page's hosts table
+/// renders with all of its columns.
+async fn spawn_ui_with_a_seen_host(debug: bool) -> String {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    config.debug_mode = debug;
+    let db = fedifetcher::db::open(&config).await.unwrap();
+    let store = fedifetcher::store::StateStore::new(config.clone());
+    let mut session = store.session(&db).await.unwrap();
+    let info = fedifetcher::servers::ServerInfo::from_nodeinfo(
+        "remote.example",
+        &serde_json::json!({"software": {"name": "mastodon", "version": "1"}}),
+    )
+    .unwrap();
+    session
+        .state()
+        .seen_hosts_mut()
+        .add("remote.example", info.to_state());
+    session.finish().await.unwrap();
+    spawn_ui_with(config).await.0
+}
+
+/// Debug mode off takes the Debug page away: the page itself redirects to
+/// the dashboard, the nav bar drops the link, and the config page hides
+/// the options that stand between FediFetcher and the politeness rules.
+#[tokio::test]
+async fn debug_mode_off_hides_the_debug_page_and_gated_options() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    config.debug_mode = false;
+    let (base, _pool) = spawn_ui_with(config).await;
+
+    // the Debug page redirects to the dashboard
+    let resp = client().get(format!("{base}/debug")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    assert_eq!(resp.headers().get("Location").unwrap(), "/");
+
+    // the config page hides the gated options' rows, and still offers
+    // debug_mode (whose tooltip names the gated options, so the row's own
+    // <code> name cell is what the test asks for)
+    let (status, body) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(!body.contains("<code>respect_robots_txt</code>"), "{body}");
+    assert!(!body.contains("<code>user_agent_override</code>"), "{body}");
+    assert!(!body.contains("name=\"respect_robots_txt\""), "{body}");
+    assert!(body.contains("name=\"debug_mode\""), "{body}");
+
+    // the nav bar drops the Debug link
+    let (_, body) = get(&format!("{base}/")).await;
+    assert!(!body.contains("href=\"/debug\""), "{body}");
+}
+
+/// Saving the config with debug mode off writes the gated options'
+/// defaults back, so what is hidden is always the documented default.
+#[tokio::test]
+async fn turning_debug_mode_off_resets_the_gated_options() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, pool) = spawn_ui_with(config).await;
+
+    let (status, location, _) = post_config(
+        &base,
+        "respect_robots_txt=0&respect_user_opt_out=0&hide_server_in_user_agent=1\
+         &user_agent_override=Custom/1.0&debug_mode=0",
+    )
+    .await;
+    assert_eq!(status, 303, "the save is a redirect back to the form");
+    assert_eq!(location.as_deref(), Some("/config"));
+
+    let saved = saved_config(&pool).await;
+    assert!(!saved.debug_mode);
+    assert!(saved.respect_robots_txt, "reset to the default");
+    assert!(saved.respect_user_opt_out, "reset to the default");
+    assert!(!saved.hide_server_in_user_agent, "reset to the default");
+    assert_eq!(saved.user_agent_override, None, "reset to the default");
+}
+
+/// The data page's Actions column — the hosts' re-check button and every
+/// table's fetch button — exists only while debug mode is on.
+#[tokio::test]
+async fn the_data_page_shows_the_actions_column_only_in_debug_mode() {
+    let with_debug = spawn_ui_with_a_seen_host(true).await;
+    let (_, body) = get(&format!("{with_debug}/data")).await;
+    assert!(body.contains(">Actions<"), "{body}");
+
+    let without_debug = spawn_ui_with_a_seen_host(false).await;
+    let (_, body) = get(&format!("{without_debug}/data")).await;
+    assert!(!body.contains(">Actions<"), "{body}");
+}

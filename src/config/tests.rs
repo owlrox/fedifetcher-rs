@@ -215,6 +215,42 @@ fn every_known_option_has_a_description() {
 }
 
 #[test]
+fn debug_mode_defaults_on_and_round_trips() {
+    assert!(Config::default().debug_mode);
+    let config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        ("debug_mode", json!(false)),
+    ]))
+    .unwrap();
+    assert!(!config.debug_mode);
+    // a cleared boolean returns to the default, like the other booleans
+    let mut config = config;
+    config
+        .apply_values(&values(vec![("debug_mode", json!(""))]))
+        .expect("a cleared field saves");
+    assert!(config.debug_mode);
+}
+
+#[test]
+fn resetting_the_debug_gated_options_writes_their_defaults() {
+    let mut config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        ("respect_robots_txt", json!(false)),
+        ("respect_user_opt_out", json!(false)),
+        ("hide_server_in_user_agent", json!(true)),
+        ("user_agent_override", json!("Custom/1.0")),
+    ]))
+    .unwrap();
+    config.reset_debug_gated();
+    assert!(config.respect_robots_txt);
+    assert!(config.respect_user_opt_out);
+    assert!(!config.hide_server_in_user_agent);
+    assert_eq!(config.user_agent_override, None);
+}
+
+#[test]
 fn the_user_agent_option_round_trips() {
     let config = Config::from_values(values(vec![
         ("server", json!("example.social")),

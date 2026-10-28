@@ -1,3 +1,16 @@
+## 1.3.37
+
+Debug mode gates the debug tooling and resets what it hides.
+
+A new `debug_mode` config value, on by default, decides whether the
+debug tooling is shown at all: the Debug page (whose direct visits now
+redirect to the dashboard when it is off), the Data page's Actions
+column, and the options that stand between FediFetcher and the
+politeness rules — respect_robots_txt, respect_user_opt_out,
+hide_server_in_user_agent, and user_agent_override. Turning debug mode
+off writes those options' defaults back at save time, so what the form
+hides is always the documented default; the tooltip says so.
+
 ## 1.3.36
 
 A user-agent override config value.
