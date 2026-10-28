@@ -44,7 +44,7 @@ Prefer no build at all? Grab a release binary, untar it, and run it — the tarb
 
 ```sh
 curl -fsSL -o /tmp/fedifetcher-rs.tar.gz \
-  https://github.com/owlrox/fedifetcher-rs/releases/download/v1.5.3/fedifetcher-rs-x86_64-unknown-linux-musl.tar.gz
+  https://github.com/owlrox/fedifetcher-rs/releases/download/v1.5.4/fedifetcher-rs-x86_64-unknown-linux-musl.tar.gz
 tar -xzf /tmp/fedifetcher-rs.tar.gz && sudo install fedifetcher-rs /usr/local/bin/fedifetcher-rs
 cd /var/lib/fedifetcher 2>/dev/null || sudo mkdir -p /var/lib/fedifetcher && cd /var/lib/fedifetcher
 fedifetcher-rs serve --bind 127.0.0.1 --port 8080
