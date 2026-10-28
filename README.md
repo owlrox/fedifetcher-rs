@@ -50,7 +50,7 @@ cargo test
 For a fresh server or LXC container — Alpine, Arch, Debian, or Fedora — `deploy.sh` does the whole setup: it detects the package manager (apk, pacman, apt, or dnf/yum), installs the build dependencies, fetches the source into `/opt/fedifetcher`, installs a Rust toolchain via rustup if the system one is older than the `rust-version` in `Cargo.toml`, builds with `cargo build --release --locked`, installs the binary to `/usr/local/bin/fedifetcher-rs`, creates a `fedifetcher` system user, and sets up a service that runs the web UI (systemd where available, OpenRC on Alpine without systemd).
 
 ```sh
-sudo ./deploy.sh <repo-url> [branch]   # branch defaults to main
+sudo ./deploy.sh https://github.com/owlrox/fedifetcher-rs.git [branch]   # branch defaults to main
 ```
 
 The script uses the distribution's own Rust toolchain when it is new enough and falls back to rustup when it is not. Distro Rust versions as of this writing:
