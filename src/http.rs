@@ -546,10 +546,10 @@ fn user_agent_string(config: &Config) -> String {
         }
     }
     if config.hide_server_in_user_agent {
-        format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")
+        format!("FediFetcher/{VERSION} (+https://github.com/owlrox/fedifetcher-rs)")
     } else {
         format!(
-            "FediFetcher/{VERSION}; +{} (https://go.thms.uk/ff)",
+            "FediFetcher/{VERSION}; +{} (+https://github.com/owlrox/fedifetcher-rs)",
             config.server
         )
     }

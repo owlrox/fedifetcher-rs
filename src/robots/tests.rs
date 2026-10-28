@@ -9,7 +9,7 @@ fn parser(robots: &str) -> RobotFileParser {
     parser
 }
 
-const AGENT: &str = "FediFetcher/8.2.3; +example.com (https://go.thms.uk/ff)";
+const AGENT: &str = "FediFetcher/8.2.3; +example.com (+https://github.com/owlrox/fedifetcher-rs)";
 
 #[test]
 fn empty_robots_allows_everything() {

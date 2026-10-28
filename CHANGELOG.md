@@ -1,3 +1,11 @@
+## 1.4.1
+
+The User-Agent points at this fork's own home.
+
+The agent string carried the original author's go.thms.uk/ff contact
+link; it now carries this fork's repository instead — the upstream
+credit stays where it belongs, on the about page and in NOTICE.md.
+
 ## 1.4.0
 
 A schedule, page toggles, a user-agent choice, onboarding, and B612.

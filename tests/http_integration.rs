@@ -35,7 +35,7 @@ async fn user_agent_names_the_configured_server() {
     let client = HttpClient::new(config, db);
     assert_eq!(
         client.user_agent(),
-        format!("FediFetcher/{VERSION}; +example.social (https://go.thms.uk/ff)")
+        format!("FediFetcher/{VERSION}; +example.social (+https://github.com/owlrox/fedifetcher-rs)")
     );
 }
 
@@ -48,7 +48,7 @@ async fn user_agent_can_hide_the_server() {
     let client = HttpClient::new(config, db);
     assert_eq!(
         client.user_agent(),
-        format!("FediFetcher/{VERSION} (https://go.thms.uk/ff)")
+        format!("FediFetcher/{VERSION} (+https://github.com/owlrox/fedifetcher-rs)")
     );
 }
 
