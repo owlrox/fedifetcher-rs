@@ -193,6 +193,7 @@ The configuration is stored in the database and edited through the web UI's conf
 | `log_level` | `DEBUG` | Severity of events to log: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`; applies on restart |
 | `log_format` | `%(asctime)s: %(message)s` | The log format; applies on restart |
 | `log_page_loads` | `false` | Log a line for every page load of the web UI, at `DEBUG` |
+| `ui_pages` | `all` | Which pages the web UI shows: `all`, `no-debug` (Data and Logs), or `logs-only`. The config page itself is always shown |
 | `debug_mode` | `true` | Show the debug tooling: the Debug page, the Data page's Actions column, and the politeness options (`respect_robots_txt`, `respect_user_opt_out`, `hide_server_in_user_agent`, `user_agent_override`). Turning it off writes those options' defaults back, so what is hidden is always the documented default |
 
 ## State and data

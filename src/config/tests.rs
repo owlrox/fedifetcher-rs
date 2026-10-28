@@ -477,3 +477,39 @@ fn lenient_build_allows_an_empty_config() {
     assert_eq!(config.server, "example.com");
     assert_eq!(config.access_tokens, vec!["token1".to_string()]);
 }
+
+#[test]
+fn ui_pages_defaults_to_all_and_rejects_unknown_values() {
+    assert_eq!(Config::default().ui_pages, "all");
+    let config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        ("ui_pages", json!("logs-only")),
+    ]))
+    .unwrap();
+    assert_eq!(config.ui_pages, "logs-only");
+    let config = Config::from_values(values(vec![
+        ("server", json!("example.social")),
+        ("access_tokens", json!(["t"])),
+        ("ui_pages", json!("everything")),
+    ]));
+    assert!(config.is_err(), "an unknown page set is an error");
+}
+
+#[test]
+fn ui_pages_decides_which_pages_show() {
+    let mut config = Config::default();
+    for page in ["/data", "/logs", "/debug"] {
+        assert!(config.shows_page(page), "all shows {page}");
+    }
+    config.ui_pages = "no-debug".to_string();
+    assert!(config.shows_page("/data"));
+    assert!(config.shows_page("/logs"));
+    assert!(!config.shows_page("/debug"));
+    config.ui_pages = "logs-only".to_string();
+    assert!(!config.shows_page("/data"));
+    assert!(config.shows_page("/logs"));
+    assert!(!config.shows_page("/debug"));
+    // the config page itself is never hidden: that would lock you out
+    assert!(config.shows_page("/config"));
+}

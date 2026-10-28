@@ -3560,3 +3560,49 @@ async fn the_data_page_shows_the_actions_column_only_in_debug_mode() {
     let (_, body) = get(&format!("{without_debug}/data")).await;
     assert!(!body.contains(">Actions<"), "{body}");
 }
+
+/// The `ui_pages` setting hides the pages it names: no nav link, and a
+/// direct visit redirects to the dashboard. The config page itself is
+/// never hidden — that would lock you out.
+#[tokio::test]
+async fn ui_pages_hides_the_pages_it_names() {
+    let dir = common::tmp_dir();
+    let mut config = common::test_config(&dir, "example.social");
+    config.access_tokens = vec![TOKEN.to_string()];
+    config.ui_pages = "logs-only".to_string();
+    let (base, _pool) = spawn_ui_with(config).await;
+
+    // the hidden pages redirect to the dashboard
+    for path in ["/data", "/debug"] {
+        let resp = client().get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 303, "{path}");
+        assert_eq!(resp.headers().get("Location").unwrap(), "/");
+    }
+    // the logs page still shows
+    let (status, _) = get(&format!("{base}/logs")).await;
+    assert_eq!(status, 200);
+
+    // the nav bar shows only Dashboard, Logs, and Config
+    let (_, body) = get(&format!("{base}/")).await;
+    assert!(!body.contains("href=\"/data\""), "{body}");
+    assert!(body.contains("href=\"/logs\""), "{body}");
+    assert!(body.contains("href=\"/config\""), "{body}");
+
+    // the config page itself still shows, and offers ui_pages
+    let (status, body) = get(&format!("{base}/config")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("name=\"ui_pages\""), "{body}");
+}
+
+/// An unknown `ui_pages` value is refused with the accepted values named.
+#[tokio::test]
+async fn an_unknown_ui_pages_value_is_refused() {
+    let dir = common::tmp_dir();
+    let config = common::test_config(&dir, "example.social");
+    let (base, pool) = spawn_ui_with(config).await;
+
+    let (status, _, body) = post_config(&base, "ui_pages=everything").await;
+    assert_eq!(status, 400, "{body}");
+    let saved = saved_config(&pool).await;
+    assert_eq!(saved.ui_pages, "all", "the bad value was not saved");
+}

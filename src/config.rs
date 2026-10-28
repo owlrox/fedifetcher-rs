@@ -120,6 +120,10 @@ pub struct Config {
     /// as-is; when set, `hide_server_in_user_agent` is ignored
     /// (default: unset)
     pub user_agent_override: Option<String>,
+    /// Which pages the web UI shows: `all`, `no-debug` (Data and Logs),
+    /// or `logs-only` (default: `all`). The config page itself is never
+    /// hidden — that would lock you out.
+    pub ui_pages: String,
     /// Show the debug tooling: the Debug page, the Data page's Actions
     /// column, and the options that stand between FediFetcher and the
     /// politeness rules. Turning it off writes those options' defaults
@@ -176,6 +180,7 @@ impl Default for Config {
             rate_limit_cooldown: vec![0.5, 2.0, 8.0, 32.0, 128.0],
             hide_server_in_user_agent: false,
             user_agent_override: None,
+            ui_pages: "all".to_string(),
             debug_mode: true,
             instance_blocklist: Vec::new(),
             state_dir: default_state_dir(),
@@ -265,6 +270,20 @@ impl Config {
         self.user_agent_override = defaults.user_agent_override.clone();
     }
 
+    /// Whether the web UI shows the page at `path` — the `ui_pages`
+    /// setting's answer. The config page itself is never hidden: that
+    /// would lock you out.
+    pub fn shows_page(&self, page: &str) -> bool {
+        if page == "/config" {
+            return true;
+        }
+        match self.ui_pages.as_str() {
+            "no-debug" => page != "/debug",
+            "logs-only" => page == "/logs",
+            _ => true,
+        }
+    }
+
     /// The whole effective configuration as raw values, ready to be stored
     /// in the database. Options that are unset (`None`) are omitted, so
     /// a cleared option stays cleared when the config is read back.
@@ -344,6 +363,7 @@ impl Config {
         if let Some(agent) = &self.user_agent_override {
             put("user_agent_override", Value::String(agent.clone()));
         }
+        put("ui_pages", Value::String(self.ui_pages.clone()));
         put("debug_mode", Value::Bool(self.debug_mode));
         put(
             "instance_blocklist",
@@ -451,6 +471,7 @@ pub fn is_known_option(name: &str) -> bool {
             | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
             | "user_agent_override"
+            | "ui_pages"
             | "debug_mode"
             | "instance_blocklist"
             | "state_dir"
@@ -619,6 +640,9 @@ fn base_description(name: &str) -> Option<&'static str> {
         "debug_mode" => {
             "Show the debug tooling: the Debug page, the Data page's Actions column, and the options that stand between FediFetcher and the politeness rules (respect_robots_txt, respect_user_opt_out, hide_server_in_user_agent, user_agent_override). Turning it off writes those options' defaults back, so the hidden options are the documented defaults"
         }
+        "ui_pages" => {
+            "Which pages the web UI shows: all, no-debug (Data and Logs), or logs-only. The config page itself is always shown"
+        }
         _ => return None,
     })
 }
@@ -665,6 +689,7 @@ pub fn empty_resets_to_default(name: &str) -> bool {
             | "rate_limit_cooldown"
             | "hide_server_in_user_agent"
             | "debug_mode"
+            | "ui_pages"
             | "instance_blocklist"
             | "log_page_loads"
     )
@@ -728,6 +753,7 @@ fn apply(config: &mut Config, values: &RawValues) -> Result<()> {
             "user_agent_override" => {
                 coerce_optional_string(value).map(|v| config.user_agent_override = v)
             }
+            "ui_pages" => coerce_ui_pages(value).map(|v| config.ui_pages = v),
             "debug_mode" => coerce_bool(value).map(|v| config.debug_mode = v),
             "instance_blocklist" => coerce_list(value).map(|v| config.instance_blocklist = v),
             "state_dir" => coerce_path(value).map(|v| config.state_dir = v),
@@ -792,6 +818,19 @@ fn coerce_optional_string(value: &Value) -> Result<Option<String>> {
     match value {
         Value::Null => Ok(None),
         other => coerce_string(other).map(Some),
+    }
+}
+
+/// Which pages the web UI shows: one of the three named sets, or an error
+/// naming them — a typo would otherwise hide pages with no way back in
+/// except the API.
+fn coerce_ui_pages(value: &Value) -> Result<String> {
+    let text = coerce_string(value)?;
+    match text.trim() {
+        "all" | "no-debug" | "logs-only" => Ok(text.trim().to_string()),
+        other => Err(Error::Config(format!(
+            "{other:?} is not one of: all, no-debug, logs-only"
+        ))),
     }
 }
 

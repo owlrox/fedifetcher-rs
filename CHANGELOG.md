@@ -1,3 +1,14 @@
+## 1.3.38
+
+The config page decides which pages the web UI shows.
+
+A new `ui_pages` config value — a select of `all`, `no-debug` (Data and
+Logs), or `logs-only` — gates the nav bar and the pages themselves: a
+direct visit to a hidden page redirects to the dashboard. The config
+page itself is never hidden, since that would lock you out, and an
+unknown value is refused with the accepted ones named. The row sits at
+the top of the options table, under the accounts.
+
 ## 1.3.37
 
 Debug mode gates the debug tooling and resets what it hides.

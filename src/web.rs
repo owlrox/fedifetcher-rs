@@ -407,7 +407,11 @@ async fn data(
     AxumState(state): AxumState<Arc<AppState>>,
     Query(query): Query<DataQuery>,
     headers: HeaderMap,
-) -> Html<String> {
+) -> Result<Html<String>, Redirect> {
+    if !shows_page(&state, "/data") {
+        tracing::info!("GET /data: the ui_pages setting hides the page");
+        return Err(Redirect::to("/"));
+    }
     page_load(&state, "GET /data");
     let config = state.config.lock().unwrap().clone();
     let debug = config.debug_mode;
@@ -537,7 +541,9 @@ async fn data(
 
     let live = live_updates(&headers);
     let running = run_in_progress(&state).await;
-    render(move || view! { <DataPage state=state running=running tabs=tabs tab=tab live=live /> })
+    Ok(render(
+        move || view! { <DataPage state=state running=running tabs=tabs tab=tab live=live /> },
+    ))
 }
 
 /// The data page was /hosts once, before the page was renamed; old links
@@ -566,7 +572,11 @@ async fn logs(
     AxumState(state): AxumState<Arc<AppState>>,
     Query(query): Query<LogsQuery>,
     headers: HeaderMap,
-) -> Html<String> {
+) -> Result<Html<String>, Redirect> {
+    if !shows_page(&state, "/logs") {
+        tracing::info!("GET /logs: the ui_pages setting hides the page");
+        return Err(Redirect::to("/"));
+    }
     page_load(&state, "GET /logs");
     let sort = LogSort::parse(query.sort.as_deref());
     let order = match query.dir.as_deref() {
@@ -584,11 +594,11 @@ async fn logs(
             }
         };
     let running = run_in_progress(&state).await;
-    render(move || {
+    Ok(render(move || {
         view! {
             <LogsPage state=state running=running rows=rows sort=sort order=order live=live levels=levels />
         }
-    })
+    }))
 }
 
 /// The levels the /logs page shows, from the query string's comma-separated
@@ -1255,8 +1265,10 @@ async fn debug_page(
     AxumState(state): AxumState<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Html<String>, Redirect> {
-    if !state.config.lock().unwrap().debug_mode {
-        tracing::info!("GET /debug: debug mode is off");
+    if !state.config.lock().unwrap().debug_mode
+        || !state.config.lock().unwrap().shows_page("/debug")
+    {
+        tracing::info!("GET /debug: the page is hidden");
         return Err(Redirect::to("/"));
     }
     page_load(&state, "GET /debug");
@@ -1429,8 +1441,10 @@ async fn debug_post(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Html<String>, Redirect> {
-    if !state.config.lock().unwrap().debug_mode {
-        tracing::info!("POST /debug: debug mode is off");
+    if !state.config.lock().unwrap().debug_mode
+        || !state.config.lock().unwrap().shows_page("/debug")
+    {
+        tracing::info!("POST /debug: the page is hidden");
         return Err(Redirect::to("/"));
     }
     let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
@@ -1951,6 +1965,36 @@ fn tokens_row(config: &Config) -> AnyView {
     .into_any()
 }
 
+/// The pages row: a select of the three page sets `ui_pages` accepts.
+fn pages_row(value: &str) -> AnyView {
+    let sets = [
+        ("all", "all pages"),
+        ("no-debug", "no Debug page (Data and Logs)"),
+        ("logs-only", "Logs page only"),
+    ];
+    let tooltip = option_description("ui_pages");
+    view! {
+        <tr>
+            <td title={tooltip.clone()}><code>"ui_pages"</code></td>
+            <td>
+                <select name="ui_pages" aria-label={tooltip.clone()} title=tooltip>
+                    {sets
+                        .iter()
+                        .map(|(set, label)| {
+                            if *set == value {
+                                view! { <option value={set.to_string()} selected="selected">{label.to_string()}</option> }.into_any()
+                            } else {
+                                view! { <option value={set.to_string()}>{label.to_string()}</option> }.into_any()
+                            }
+                        })
+                        .collect::<Vec<_>>()}
+                </select>
+            </td>
+        </tr>
+    }
+    .into_any()
+}
+
 /// The log level row: a select of the levels `setup_logging` accepts.
 fn log_level_row(value: &str) -> AnyView {
     let levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
@@ -2086,10 +2130,18 @@ fn Page(
                     </h1>
                     <nav>
                         <a class=("here", page == "/") href="/">"Dashboard"</a>
-                        <a class=("here", page == "/data") href="/data">"Data"</a>
-                        <a class=("here", page == "/logs") href="/logs">"Logs"</a>
+                        {shows_page(&state, "/data").then(|| {
+                            view! {
+                                <a class=("here", page == "/data") href="/data">"Data"</a>
+                            }
+                        })}
+                        {shows_page(&state, "/logs").then(|| {
+                            view! {
+                                <a class=("here", page == "/logs") href="/logs">"Logs"</a>
+                            }
+                        })}
                         <a class=("here", page == "/config") href="/config">"Config"</a>
-                        {debug_mode(&state).then(|| {
+                        {(debug_mode(&state) && shows_page(&state, "/debug")).then(|| {
                             view! {
                                 <a class=("here", page == "/debug") href="/debug">"Debug"</a>
                             }
@@ -2108,6 +2160,11 @@ fn Page(
 /// column, and the debug-gated config options follow it.
 fn debug_mode(state: &Arc<AppState>) -> bool {
     state.config.lock().unwrap().debug_mode
+}
+
+/// Whether the `ui_pages` setting shows the page at `path`.
+fn shows_page(state: &Arc<AppState>, path: &str) -> bool {
+    state.config.lock().unwrap().shows_page(path)
 }
 
 /// The top bar's run controls: the status pill, and the buttons that
@@ -2895,6 +2952,7 @@ fn ConfigPage(
     let mut rows: Vec<AnyView> = vec![
         text_row("server", &config.server),
         tokens_row(&config),
+        pages_row(&config.ui_pages),
         text_row("user", &config.user),
         int_row("reply_interval_in_hours", config.reply_interval_in_hours),
         int_row("home_timeline_length", config.home_timeline_length),
